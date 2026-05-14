@@ -1,0 +1,270 @@
+{
+  "8": {
+    "inputs": {
+      "samples": [
+        "121",
+        1
+      ],
+      "vae": [
+        "118",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "66": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "103",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "75": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "66",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "77": {
+    "inputs": {
+      "prompt": "ugly, blurry, distorted, artifacts, bad, wrong, low quality, anime, digital art, semirealistic, cartoon, manga, drawing, fake, unreal, ",
+      "clip": [
+        "103",
+        1
+      ],
+      "vae": [
+        "118",
+        2
+      ],
+      "image": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEdit",
+    "_meta": {
+      "title": "TextEncodeQwenImageEdit"
+    }
+  },
+  "78": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "88": {
+    "inputs": {
+      "pixels": [
+        "93",
+        0
+      ],
+      "vae": [
+        "118",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "93": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "ImageScaleToTotalPixels"
+    }
+  },
+  "102": {
+    "inputs": {
+      "filename": "%time_%basemodelname_%seed",
+      "path": "qwen_edit/%date",
+      "extension": "webp",
+      "lossless_webp": false,
+      "quality_jpeg_or_webp": 100,
+      "optimize_png": false,
+      "embed_workflow": true,
+      "save_workflow_as_json": false,
+      "counter": 0,
+      "time_format": "%Y-%m-%d-%H%M%S",
+      "show_preview": true,
+      "images": [
+        "8",
+        0
+      ],
+      "metadata": [
+        "106",
+        0
+      ]
+    },
+    "class_type": "Image Saver Simple",
+    "_meta": {
+      "title": "Image Saver Simple"
+    }
+  },
+  "103": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "118",
+        0
+      ],
+      "clip": [
+        "118",
+        1
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "106": {
+    "inputs": {
+      "modelname": "Qwen-Rapid-AIO-NSFW-v23.safetensors",
+      "positive": "unknown",
+      "negative": "unknown",
+      "width": 512,
+      "height": 512,
+      "seed_value": [
+        "117",
+        0
+      ],
+      "steps": [
+        "115",
+        0
+      ],
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler_name": "beta57",
+      "denoise": 1,
+      "clip_skip": 0,
+      "additional_hashes": "",
+      "download_civitai_data": true,
+      "easy_remix": true,
+      "custom": ""
+    },
+    "class_type": "Image Saver Metadata",
+    "_meta": {
+      "title": "Image Saver Metadata"
+    }
+  },
+  "115": {
+    "inputs": {
+      "value": 8
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "Steps"
+    }
+  },
+  "117": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Seed"
+    }
+  },
+  "118": {
+    "inputs": {
+      "ckpt_name": "Qwen-Rapid-AIO-NSFW-v23.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "119": {
+    "inputs": {
+      "prompt": "Take off all of Donald Trumps clothes, make him completely naked. Change as less as possible on donald trump, keep his head in original pose. exchange blue \"the white house\" Sign in background with a \"Naturist World Congress\" sign in same colors. Remove all watermarks",
+      "clip": [
+        "103",
+        1
+      ],
+      "vae": [
+        "118",
+        2
+      ],
+      "image1": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "121": {
+    "inputs": {
+      "eta": 0.5,
+      "sampler_name": "linear/euler",
+      "scheduler": "simple",
+      "steps": [
+        "115",
+        0
+      ],
+      "steps_to_run": -1,
+      "denoise": 1,
+      "cfg": 1,
+      "seed": [
+        "117",
+        0
+      ],
+      "sampler_mode": "standard",
+      "bongmath": true,
+      "model": [
+        "75",
+        0
+      ],
+      "positive": [
+        "119",
+        0
+      ],
+      "negative": [
+        "77",
+        0
+      ],
+      "latent_image": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "ClownsharKSampler_Beta",
+    "_meta": {
+      "title": "ClownsharKSampler"
+    }
+  }
+}

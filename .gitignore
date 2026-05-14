@@ -1,0 +1,8 @@
+outputs/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+LLM Test Results/
+llm_test_results_*.json

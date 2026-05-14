@@ -1,0 +1,710 @@
+{
+  "categories": {
+    "txt2img": {
+      "name": "🖼️ Text → Image",
+      "description": "Generate images from text",
+      "needs_input_image": false,
+      "needs_prompt": true,
+      "needs_resolution": true,
+      "workflows": [
+        "Flux Dev",
+        "Flux2 Klein 9B - T2I",
+        "Z-Image"
+      ]
+    },
+    "img2img": {
+      "name": "🎨 Image → Image",
+      "description": "Edit or transform images",
+      "needs_input_image": true,
+      "needs_prompt": true,
+      "workflows": [
+        "Flux 2 Klein 9B - I2I",
+        "Pony Cosplay-v2",
+        "Pony Cosplay-v3",
+        "Qwen IE Rapid",
+        "Flux2 Klein M-I Edit"
+      ]
+    },
+    "img2vid": {
+      "name": "🎬 Image → Video",
+      "description": "Create videos from images",
+      "needs_input_image": true,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": true,
+      "workflows": [
+        "LTX2.3 - I2V",
+        "LTX2.3 - FFLF2V",
+        "LTX2.3 (4.2) - I2V",
+        "LTX2.3 (4.2) - FFLF2V",
+        "LTX2.3 (4.2) - FFMFLF2V"
+      ]
+    },
+    "txt2vid": {
+      "name": "📹 Text → Video",
+      "description": "Generate videos from text",
+      "needs_input_image": false,
+      "needs_prompt": true,
+      "needs_resolution": true,
+      "needs_duration": true,
+      "workflows": [
+        "LTX2.3 - T2V",
+        "LTX2.3 (4.2) - T2V"
+      ]
+    },
+    "vid2vid": {
+      "name": "🎞️ Video → Video",
+      "description": "Extend or transform videos",
+      "needs_input_image": false,
+      "needs_input_video": true,
+      "needs_input_audio": false,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": true,
+      "prompt_hint": "📹 **Video2Video Workflow**\n\n**Prompt format:**\n1. Describe the original video\n2. Add: '*the video continues with*'\n3. Describe the continuation\n\n**Example:**\n`a woman plays guitar. the video continues with zooming out showing the full band`\n\n💡 **Note:** Clip length = original + continuation",
+      "workflows": [
+        "LTX2.3 - V2V",
+        "LTX2.3 (4.2) - V2V"
+      ]
+    },
+    "ia2vid": {
+      "name": "🎵🖼️ Image+Audio → Video",
+      "description": "Create videos from image and audio",
+      "needs_input_image": true,
+      "needs_input_video": false,
+      "needs_input_audio": true,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": false,
+      "prompt_hint": "🎵 **Image+Audio→Video Workflow**\n\n💡 **Note:** Video length is auto-matched to audio length (max 15s)\n\nDescribe what should happen in the video:",
+      "workflows": [
+        "LTX2.3 - IA2V",
+        "LTX2.3 - FFLFA2V",
+        "LTX2.3 (4.2) - IA2V",
+        "LTX2.3 (4.2) - FFMFLFA2V"
+      ]
+    },
+    "ta2vid": {
+      "name": "🎵📹 Text+Audio → Video",
+      "description": "Generate videos from text with audio",
+      "needs_input_image": false,
+      "needs_input_video": false,
+      "needs_input_audio": true,
+      "needs_prompt": true,
+      "needs_resolution": true,
+      "needs_duration": false,
+      "prompt_hint": "🎵 **Text+Audio→Video Workflow**\n\n💡 **Note:** Video length is auto-matched to audio length (max 60s)\n\nDescribe what should happen in the video:",
+      "workflows": [
+        "LTX2.3 - TA2V",
+        "LTX2.3 (4.2) - TA2V"
+      ]
+    },
+    "tl2vid": {
+      "name": "🎬📷 Text+LastFrame → Video",
+      "description": "Generate videos from text with a guided last frame",
+      "needs_input_image": true,
+      "needs_input_video": false,
+      "needs_input_audio": false,
+      "needs_prompt": true,
+      "needs_resolution": true,
+      "needs_duration": true,
+      "prompt_hint": "📷 **Text+LastFrame→Video Workflow**\n\n💡 **Note:** The uploaded image will be used as the last frame of the video\n\nDescribe what should happen in the video:",
+      "workflows": ["LTX2.3 - TLF2V"]
+    },
+    "tal2vid": {
+      "name": "🎵📷 Text+Audio+LastFrame → Video",
+      "description": "Generate videos from text and audio with a guided last frame",
+      "needs_input_image": true,
+      "needs_input_video": false,
+      "needs_input_audio": true,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": false,
+      "prompt_hint": "🎵📷 **Text+Audio+LastFrame→Video Workflow**\n\n💡 **Note:** Video length is auto-matched to audio length. The uploaded image will be used as the last frame\n\nDescribe what should happen in the video:",
+      "workflows": ["LTX2.3 - TALF2V"]
+    },
+    "va2vid": {
+      "name": "🎵🎞️ Video+Audio → Video",
+      "description": "Transform a video with audio guidance",
+      "needs_input_image": false,
+      "needs_input_video": true,
+      "needs_input_audio": true,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": true,
+      "prompt_hint": "🎵 **Video+Audio→Video Workflow**\n\n💡 **Note:** Video length is auto-matched to audio length\n\nDescribe what should happen in the video:",
+      "workflows": [
+        "LTX2.3 (4.2) - VA2V"
+      ]
+    },
+    "vl2vid": {
+      "name": "🎞️📷 Video+LastFrame → Video",
+      "description": "Transform a video with a guided last frame",
+      "needs_input_image": true,
+      "needs_input_video": true,
+      "needs_input_audio": false,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": true,
+      "prompt_hint": "📷 **Video+LastFrame→Video Workflow**\n\n💡 **Note:** The uploaded image will be used as the last frame of the video\n\nDescribe what should happen in the video:",
+      "workflows": ["LTX2.3 - VLF2V"]
+    },
+    "val2vid": {
+      "name": "🎵🎞️📷 Video+Audio+LastFrame → Video",
+      "description": "Transform a video with audio and a guided last frame",
+      "needs_input_image": true,
+      "needs_input_video": true,
+      "needs_input_audio": true,
+      "needs_prompt": true,
+      "needs_resolution": false,
+      "needs_duration": false,
+      "prompt_hint": "🎵📷 **Video+Audio+LastFrame→Video Workflow**\n\n💡 **Note:** Video length is auto-matched to audio length. The uploaded image will be used as the last frame\n\nDescribe what should happen in the video:",
+      "workflows": ["LTX2.3 - VALF2V"]
+    },
+    "shortfilm": {
+      "name": "🎬 Short Film",
+      "description": "Generate short films from a story idea",
+      "needs_input_image": false,
+      "needs_input_video": false,
+      "needs_input_audio": false,
+      "needs_prompt": false,
+      "needs_resolution": false,
+      "needs_duration": false,
+      "workflows": []
+    },
+    "musicvideo": {
+      "name": "🎬 Music Video",
+      "description": "Generate music videos from audio",
+      "needs_input_image": false,
+      "needs_input_video": false,
+      "needs_input_audio": false,
+      "needs_prompt": false,
+      "needs_resolution": false,
+      "needs_duration": false,
+      "workflows": []
+    }
+  },
+  "workflow_options": {
+    "Flux Dev": {
+      "resolution": {
+        "mode": "width_height",
+        "node_id": "27"
+      }
+    },
+    "Z-Image": {
+      "resolution": {
+        "mode": "aspect_ratio_label",
+        "node_id": "28"
+      }
+    },
+    "Flux2 Klein 9B - T2I": {
+      "resolution": {
+        "mode": "aspect_ratio_label",
+        "node_id": "134"
+      }
+    },
+    "Flux 2 Klein 9B - I2I": {
+      "resolution": {
+        "mode": "aspect_ratio_label",
+        "node_id": "134"
+      }
+    },
+    "LTX2.3 - T2V": {
+      "resolution": {
+        "mode": "longer_edge_portrait",
+        "node_id": "864",
+        "portrait_node_id": "1577"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 - I2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 - V2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 - IA2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 - TA2V": {
+      "resolution": {
+        "mode": "longer_edge_portrait",
+        "node_id": "864",
+        "portrait_node_id": "1577"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 - FFLF2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "first_frame",
+            "label": "🖼️ First Frame",
+            "type": "image",
+            "node_id": "149",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 - FFLFA2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "first_frame",
+            "label": "🖼️ First Frame",
+            "type": "image",
+            "node_id": "149",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 - TLF2V": {
+      "resolution": {
+        "mode": "longer_edge_portrait",
+        "node_id": "864",
+        "portrait_node_id": "1577"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 - TALF2V": {
+      "resolution": {
+        "mode": "longer_edge_portrait",
+        "node_id": "864",
+        "portrait_node_id": "1577"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 - VLF2V": {
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 - VALF2V": {
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 (4.2) - T2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 (4.2) - TA2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      }
+    },
+    "LTX2.3 (4.2) - I2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 (4.2) - IA2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      }
+    },
+    "LTX2.3 (4.2) - V2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      }
+    },
+    "LTX2.3 (4.2) - VA2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      }
+    },
+    "LTX2.3 (4.2) - FFLF2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "first_frame",
+            "label": "🖼️ First Frame",
+            "type": "image",
+            "node_id": "149",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 (4.2) - FFMFLF2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "duration": {
+        "node_id": "196",
+        "mode": "xi_xf"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "first_frame",
+            "label": "🖼️ First Frame",
+            "type": "image",
+            "node_id": "149",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "middle_frame",
+            "label": "🖼️ Middle Frame",
+            "type": "image",
+            "node_id": "1705",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "LTX2.3 (4.2) - FFMFLFA2V": {
+      "resolution": {
+        "mode": "aspect_ratio_v2",
+        "combo_node_id": "1774",
+        "slider_node_id": "1688",
+        "scale_node_id": "1775:1772"
+      },
+      "input_schema": {
+        "enabled": true,
+        "modes": ["single"],
+        "unused_slot_strategy": "keep_existing",
+        "slots": [
+          {
+            "id": "first_frame",
+            "label": "🖼️ First Frame",
+            "type": "image",
+            "node_id": "149",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "middle_frame",
+            "label": "🖼️ Middle Frame",
+            "type": "image",
+            "node_id": "1705",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "last_frame",
+            "label": "🖼️ Last Frame",
+            "type": "image",
+            "node_id": "786",
+            "required": true,
+            "modes": ["single"]
+          }
+        ]
+      }
+    },
+    "Flux2 Klein M-I Edit": {
+      "input_schema": {
+        "enabled": true,
+        "modes": [
+          "single",
+          "multi"
+        ],
+        "upscale_toggle": true,
+        "unused_slot_strategy": "repeat_primary",
+        "slots": [
+          {
+            "id": "single_base",
+            "label": "Single Base Image",
+            "type": "image",
+            "node_id": "54",
+            "required": true,
+            "modes": ["single"]
+          },
+          {
+            "id": "multi_image_1",
+            "label": "Multi Image 1",
+            "type": "image",
+            "node_id": "33",
+            "required": true,
+            "modes": ["multi"]
+          },
+          {
+            "id": "multi_image_2",
+            "label": "Multi Image 2",
+            "type": "image",
+            "node_id": "34",
+            "required": false,
+            "modes": ["multi"]
+          },
+          {
+            "id": "multi_image_3",
+            "label": "Multi Image 3",
+            "type": "image",
+            "node_id": "36",
+            "required": false,
+            "modes": ["multi"]
+          },
+          {
+            "id": "multi_image_4",
+            "label": "Multi Image 4",
+            "type": "image",
+            "node_id": "45",
+            "required": false,
+            "modes": ["multi"]
+          },
+          {
+            "id": "multi_pose",
+            "label": "Pose Image (Optional)",
+            "type": "image",
+            "node_id": "37",
+            "required": false,
+            "modes": ["multi"]
+          }
+        ],
+        "output_profiles": {
+          "single": {
+            "upscale_off": ["19"],
+            "upscale_off_disable_class_types": [
+              "SeedVR2VideoUpscaler",
+              "SeedVR2LoadDiTModel",
+              "SeedVR2LoadVAEModel",
+              "Image Comparer (rgthree)",
+              "LayerUtility: PurgeVRAM"
+            ],
+            "upscale_on": ["70"],
+            "upscale_on_node_input_overrides": [
+              {"node_id": "28", "inputs": {"resolution": 2560, "max_resolution": 2560}},
+              {"node_id": "73", "inputs": {"resolution": 2560, "max_resolution": 2560}}
+            ]
+          },
+          "multi": {
+            "upscale_off": ["80"],
+            "upscale_off_disable_class_types": [
+              "SeedVR2VideoUpscaler",
+              "SeedVR2LoadDiTModel",
+              "SeedVR2LoadVAEModel",
+              "Image Comparer (rgthree)",
+              "LayerUtility: PurgeVRAM"
+            ],
+            "upscale_on": ["25"],
+            "upscale_on_node_input_overrides": [
+              {"node_id": "28", "inputs": {"resolution": 2560, "max_resolution": 2560}},
+              {"node_id": "73", "inputs": {"resolution": 2560, "max_resolution": 2560}}
+            ]
+          }
+        }
+      }
+    }
+  },
+  "groups": {
+    "image": {
+      "name": "🖼️ Image",
+      "categories": ["img2img", "txt2img"]
+    },
+    "video": {
+      "name": "🎬 Video",
+      "sub_groups": {
+        "img2video": {
+          "name": "🖼️ Image → Video",
+          "categories": ["img2vid", "ia2vid"]
+        },
+        "txt2video": {
+          "name": "📝 Text → Video",
+          "categories": ["txt2vid", "ta2vid", "tl2vid", "tal2vid"]
+        },
+        "vid2video": {
+          "name": "🎞️ Video → Video",
+          "categories": ["vid2vid", "va2vid", "vl2vid", "val2vid"]
+        }
+      }
+    },
+    "audio": {
+      "name": "🎵 Audio",
+      "categories": ["audio"]
+    },
+    "musicvideo": {
+      "name": "🎬 Music Video",
+      "categories": ["musicvideo"]
+    },
+    "shortfilm": {
+      "name": "🎬 Short Film",
+      "categories": ["shortfilm"]
+    }
+  },
+  "no_prompt_workflows": [
+    "Pony Cosplay-v2",
+    "Pony Cosplay-v3"
+  ]
+}

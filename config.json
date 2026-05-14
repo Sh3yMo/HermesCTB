@@ -1,0 +1,22 @@
+{
+  "comfyui_url": "http://127.0.0.1:8188",
+  "workflows_dir": "./Workflows",
+  "comfy_view_timeout_seconds": 60,
+  "comfy_view_retries": 3,
+  "comfy_recovery": {
+    "job_timeout_seconds": 2400,
+    "history_retry_attempts": 60,
+    "history_retry_delay_seconds": 3
+  },
+  "prompt_enhancer": {
+    "enabled": true,
+    "openrouter_enabled": true,
+    "openrouter_api_key": "",
+    "openrouter_model": "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
+    "request_timeout_seconds": 30,
+    "max_retries": 3,
+    "audio_llm_model": "qwen/qwen3.5-plus-02-15",
+    "genre_validation_model": "qwen/qwen3-next-80b-a3b-instruct:free"
+  }
+}

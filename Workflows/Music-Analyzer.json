@@ -1,0 +1,67 @@
+{
+  "1": {
+    "inputs": {
+      "audio_path": "PLACEHOLDER_AUDIO_PATH"
+    },
+    "class_type": "LoadAudioFromPath",
+    "_meta": {
+      "title": "Load Audio From Path"
+    }
+  },
+  "2": {
+    "inputs": {
+      "audio": [
+        "1",
+        0
+      ],
+      "extract_tags": true,
+      "extract_bpm": true,
+      "extract_keyscale": true,
+      "extract_lyrics": true,
+      "generate_caption": true,
+      "lyrics_model": "distil-whisper-large-v3",
+      "captioning_model": "whisper-small-captioning",
+      "lyrics_duration": 300,
+      "tags_duration": 60,
+      "tags_min_confidence": 0.1,
+      "tags_max_count": 24,
+      "max_genre_crops": 24,
+      "unload_after_each_stage": true,
+      "unload_all_when_done": true,
+      "genre_model": "hybrid+maest",
+      "genres_vocab_path": "I:\\CTB"
+    },
+    "class_type": "MusicAnalyzerLite",
+    "_meta": {
+      "title": "Music Analyzer Lite"
+    }
+  },
+  "3": {
+    "inputs": {
+      "tags": [
+        "2",
+        0
+      ],
+      "bpm": [
+        "2",
+        1
+      ],
+      "keyscale": [
+        "2",
+        2
+      ],
+      "lyrics": [
+        "2",
+        3
+      ],
+      "caption": [
+        "2",
+        4
+      ]
+    },
+    "class_type": "CTBSaveAnalysis",
+    "_meta": {
+      "title": "CTB Save Analysis"
+    }
+  }
+}

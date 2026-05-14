@@ -1,0 +1,1084 @@
+{
+  "12": {
+    "inputs": {
+      "image": "38261_400.webp"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "PUT YOUR IMAGE HERE"
+    }
+  },
+  "16": {
+    "inputs": {
+      "switch_1": "On",
+      "controlnet_1": "t2i-adapter-depth-zoe-sdxl-1.0.safetensors",
+      "controlnet_strength_1": 0.30000000000000004,
+      "start_percent_1": 0,
+      "end_percent_1": 0.5000000000000001,
+      "switch_2": "On",
+      "controlnet_2": "t2i-adapter-canny-sdxl-1.0.fp16.safetensors",
+      "controlnet_strength_2": 0.30000000000000004,
+      "start_percent_2": 0,
+      "end_percent_2": 0.7000000000000002,
+      "switch_3": "Off",
+      "controlnet_3": "None",
+      "controlnet_strength_3": 0.8000000000000002,
+      "start_percent_3": 0,
+      "end_percent_3": 0.8000000000000002,
+      "image_1": [
+        "55",
+        0
+      ],
+      "image_2": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "CR Multi-ControlNet Stack",
+    "_meta": {
+      "title": "Canny-Depth Stack"
+    }
+  },
+  "18": {
+    "inputs": {
+      "switch": "On",
+      "base_positive": [
+        "71",
+        0
+      ],
+      "base_negative": [
+        "71",
+        1
+      ],
+      "controlnet_stack": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "CR Apply Multi-ControlNet",
+    "_meta": {
+      "title": "🕹️ CR Apply Multi-ControlNet"
+    }
+  },
+  "23": {
+    "inputs": {
+      "model": "wd-vit-tagger-v3",
+      "threshold": 0.35,
+      "character_threshold": 0.85,
+      "replace_underscore": false,
+      "trailing_comma": false,
+      "exclude_tags": "",
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "WD14Tagger|pysssss",
+    "_meta": {
+      "title": "WD14 Tagger 🐍"
+    }
+  },
+  "26": {
+    "inputs": {
+      "preprocessor": "CannyEdgePreprocessor",
+      "resolution": 1024,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "Canny Proc"
+    }
+  },
+  "27": {
+    "inputs": {
+      "preprocessor": "DepthAnythingV2Preprocessor",
+      "resolution": 1024,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "Depth Proc"
+    }
+  },
+  "29": {
+    "inputs": {
+      "ckpt_name": "cyberrealisticPony_v130.safetensors",
+      "vae_name": "Baked VAE",
+      "clip_skip": -2,
+      "lora_name": "None",
+      "lora_model_strength": 1.0000000000000002,
+      "lora_clip_strength": 1,
+      "positive": [
+        "41",
+        7
+      ],
+      "negative": "score_6, score_5, score_4, (worst quality:1.2), (low quality:1.2), (normal quality:1.2), lowres, bad anatomy, bad hands, signature, watermarks, ugly, imperfect eyes, skewed eyes, unnatural face, unnatural body, error, extra limb, missing limbs, blurry, blurred, wrinkles, wrinkled face",
+      "token_normalization": "none",
+      "weight_interpretation": "comfy",
+      "empty_latent_width": [
+        "40",
+        1
+      ],
+      "empty_latent_height": [
+        "40",
+        2
+      ],
+      "batch_size": [
+        "52",
+        0
+      ],
+      "lora_stack": [
+        "44",
+        0
+      ]
+    },
+    "class_type": "Efficient Loader",
+    "_meta": {
+      "title": "Efficient Loader"
+    }
+  },
+  "31": {
+    "inputs": {
+      "weight": 0.8000000000000002,
+      "weight_type": "ease out",
+      "combine_embeds": "concat",
+      "start_at": 0,
+      "end_at": 0.7000000000000002,
+      "embeds_scaling": "V only",
+      "model": [
+        "33",
+        0
+      ],
+      "ipadapter": [
+        "33",
+        1
+      ],
+      "image": [
+        "114",
+        0
+      ],
+      "clip_vision": [
+        "48",
+        0
+      ]
+    },
+    "class_type": "IPAdapterAdvanced",
+    "_meta": {
+      "title": "IPAdapter Advanced"
+    }
+  },
+  "33": {
+    "inputs": {
+      "preset": "PLUS FACE (portraits)",
+      "model": [
+        "29",
+        0
+      ]
+    },
+    "class_type": "IPAdapterUnifiedLoader",
+    "_meta": {
+      "title": "IPAdapter Unified Loader"
+    }
+  },
+  "40": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "interpolation": "nearest-exact",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 0,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "🔧 Image Resize"
+    }
+  },
+  "41": {
+    "inputs": {
+      "text1": "score_9, score_8_up, score_7_up, (18 year old:1.2)",
+      "text2": [
+        "23",
+        0
+      ],
+      "text3": "(cute girl:1.3)",
+      "text4": "(realistic hair:1.2), hair strands",
+      "text5": "high quality, high contrast, balanced exposure, studio lighting, realistic face, photorealistic, embedding:CyberRealisticPony_POSV1",
+      "text6": "",
+      "text7": "",
+      "delimiter": ", "
+    },
+    "class_type": "ttN text7BOX_concat",
+    "_meta": {
+      "title": "7x TXT Loader Concat"
+    }
+  },
+  "44": {
+    "inputs": {
+      "switch_1": "On",
+      "lora_name_1": "amateur_style_v1_pony.safetensors",
+      "model_weight_1": 2.0000000000000004,
+      "clip_weight_1": 1,
+      "switch_2": "On",
+      "lora_name_2": "cinematic photography detailed pony xl v5.1.safetensors",
+      "model_weight_2": 1.0000000000000002,
+      "clip_weight_2": 1,
+      "switch_3": "On",
+      "lora_name_3": "Point_and_shoot_v0.1.safetensors",
+      "model_weight_3": 0.5000000000000001,
+      "clip_weight_3": 1
+    },
+    "class_type": "CR LoRA Stack",
+    "_meta": {
+      "title": "💊 CR LoRA Stack"
+    }
+  },
+  "46": {
+    "inputs": {
+      "text_0": "score_9, score_8_up, score_7_up, (18 year old:1.2), annie_leonhart, 1girl, solo, short_hair, blue_eyes, blonde_hair, jacket, upper_body, hood, looking_to_the_side, hoodie, folded_ponytail, (cute girl:1.3), (realistic hair:1.2), hair strands, high quality, high contrast, balanced exposure, studio lighting, realistic face, photorealistic, embedding:CyberRealisticPony_POSV1",
+      "text": [
+        "41",
+        7
+      ]
+    },
+    "class_type": "ShowText|pysssss",
+    "_meta": {
+      "title": "FINAL PROMPT"
+    }
+  },
+  "47": {
+    "inputs": {
+      "filename_prefix": "Pony/realism",
+      "images": [
+        "81",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "48": {
+    "inputs": {
+      "clip_name": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {
+      "title": "Load CLIP Vision"
+    }
+  },
+  "49": {
+    "inputs": {
+      "purge_cache": false,
+      "purge_models": false,
+      "anything": [
+        "51",
+        5
+      ]
+    },
+    "class_type": "LayerUtility: PurgeVRAM",
+    "_meta": {
+      "title": "LayerUtility: Purge VRAM"
+    }
+  },
+  "51": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": 735184970620227,
+      "steps": 60,
+      "cfg": 4,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
+      "start_at_step": 0,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "enable",
+      "preview_method": "latent2rgb",
+      "vae_decode": "true",
+      "model": [
+        "31",
+        0
+      ],
+      "positive": [
+        "119",
+        0
+      ],
+      "negative": [
+        "119",
+        1
+      ],
+      "latent_image": [
+        "29",
+        3
+      ],
+      "optional_vae": [
+        "29",
+        4
+      ]
+    },
+    "class_type": "KSampler Adv. (Efficient)",
+    "_meta": {
+      "title": "KSampler Adv. (Efficient)"
+    }
+  },
+  "52": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "easy int",
+    "_meta": {
+      "title": "BATCH SIZE"
+    }
+  },
+  "55": {
+    "inputs": {
+      "width": [
+        "40",
+        1
+      ],
+      "height": [
+        "40",
+        2
+      ],
+      "interpolation": "nearest-exact",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 0,
+      "image": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "Canny Res"
+    }
+  },
+  "56": {
+    "inputs": {
+      "width": [
+        "40",
+        1
+      ],
+      "height": [
+        "40",
+        2
+      ],
+      "interpolation": "nearest-exact",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 0,
+      "image": [
+        "27",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "Depth Res"
+    }
+  },
+  "68": {
+    "inputs": {
+      "switch_1": "On",
+      "controlnet_1": "diffusion_pytorch_model_promax.safetensors",
+      "controlnet_strength_1": 0.30000000000000004,
+      "start_percent_1": 0,
+      "end_percent_1": 0.5000000000000001,
+      "switch_2": "Off",
+      "controlnet_2": "None",
+      "controlnet_strength_2": 0.30000000000000004,
+      "start_percent_2": 0,
+      "end_percent_2": 0.7000000000000002,
+      "switch_3": "Off",
+      "controlnet_3": "None",
+      "controlnet_strength_3": 0.30000000000000004,
+      "start_percent_3": 0,
+      "end_percent_3": 0.30000000000000004,
+      "image_1": [
+        "70",
+        0
+      ]
+    },
+    "class_type": "CR Multi-ControlNet Stack",
+    "_meta": {
+      "title": "Tile Stack"
+    }
+  },
+  "69": {
+    "inputs": {
+      "preprocessor": "TilePreprocessor",
+      "resolution": 1024,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "Tile Proc"
+    }
+  },
+  "70": {
+    "inputs": {
+      "width": [
+        "40",
+        1
+      ],
+      "height": [
+        "40",
+        2
+      ],
+      "interpolation": "nearest-exact",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 0,
+      "image": [
+        "69",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "Tile Res"
+    }
+  },
+  "71": {
+    "inputs": {
+      "switch": "On",
+      "base_positive": [
+        "29",
+        1
+      ],
+      "base_negative": [
+        "29",
+        2
+      ],
+      "controlnet_stack": [
+        "68",
+        0
+      ]
+    },
+    "class_type": "CR Apply Multi-ControlNet",
+    "_meta": {
+      "title": "🕹️ CR Apply Multi-ControlNet"
+    }
+  },
+  "73": {
+    "inputs": {
+      "text": "score_9, score_8_up, score_7_up, high quality, high contrast, balanced exposure, studio lighting, realistic skin, photorealistic, high quality, masterpiece, cinematic exposition, absurdres, high resolution, (8k resolution), 8k, 8kres, 8k res, high details, detailed and intricate, intricate details, high intricate details, absurd amount of details, super resolution, ultra hd, megapixel, Extreme Wide Shot, skin texture style, realism, detailed",
+      "clip": [
+        "29",
+        5
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Upscale Positive"
+    }
+  },
+  "74": {
+    "inputs": {
+      "model_name": "4x_NMKD-Siax_200k.pth"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load Upscale Model"
+    }
+  },
+  "77": {
+    "inputs": {
+      "model_name": "bbox/Eyes.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "Eye Detector"
+    }
+  },
+  "79": {
+    "inputs": {
+      "rgthree_comparer": {
+        "images": [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_jvgzb_00001_.png&type=temp&subfolder=&rand=0.21329029432507496"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_jvgzb_00002_.png&type=temp&subfolder=&rand=0.0391379143930255"
+          }
+        ]
+      },
+      "image_a": [
+        "81",
+        0
+      ],
+      "image_b": [
+        "103",
+        0
+      ]
+    },
+    "class_type": "Image Comparer (rgthree)",
+    "_meta": {
+      "title": "Compare Orig to Eye Detailer"
+    }
+  },
+  "81": {
+    "inputs": {
+      "guide_size": 1080,
+      "guide_size_for": true,
+      "max_size": 1080,
+      "seed": 1,
+      "steps": 30,
+      "cfg": 7.5,
+      "sampler_name": "dpmpp_sde",
+      "scheduler": "normal",
+      "denoise": 0.10000000000000002,
+      "feather": 10,
+      "noise_mask": true,
+      "force_inpaint": true,
+      "bbox_threshold": 0.5,
+      "bbox_dilation": 10,
+      "bbox_crop_factor": 3,
+      "sam_detection_hint": "center-1",
+      "sam_dilation": 0,
+      "sam_threshold": 0.93,
+      "sam_bbox_expansion": 0,
+      "sam_mask_hint_threshold": 0.7,
+      "sam_mask_hint_use_negative": "False",
+      "drop_size": 10,
+      "wildcard": "",
+      "cycle": 1,
+      "inpaint_model": false,
+      "noise_mask_feather": 20,
+      "tiled_encode": false,
+      "tiled_decode": false,
+      "image": [
+        "103",
+        0
+      ],
+      "model": [
+        "92",
+        0
+      ],
+      "clip": [
+        "92",
+        1
+      ],
+      "vae": [
+        "29",
+        4
+      ],
+      "positive": [
+        "93",
+        0
+      ],
+      "negative": [
+        "29",
+        2
+      ],
+      "bbox_detector": [
+        "77",
+        0
+      ]
+    },
+    "class_type": "FaceDetailer",
+    "_meta": {
+      "title": "EYESDetailer"
+    }
+  },
+  "91": {
+    "inputs": {
+      "rgthree_comparer": {
+        "images": [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_lluxv_00001_.png&type=temp&subfolder=&rand=0.7177285738056118"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_lluxv_00002_.png&type=temp&subfolder=&rand=0.8933042791425825"
+          }
+        ]
+      },
+      "image_a": [
+        "103",
+        0
+      ],
+      "image_b": [
+        "103",
+        0
+      ]
+    },
+    "class_type": "Image Comparer (rgthree)",
+    "_meta": {
+      "title": "Compare Face to Upscaled"
+    }
+  },
+  "92": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "lora_1": {
+        "on": true,
+        "lora": "Her_eyes.safetensors",
+        "strength": 0.4
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "29",
+        0
+      ],
+      "clip": [
+        "29",
+        5
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "93": {
+    "inputs": {
+      "text": [
+        "94",
+        0
+      ],
+      "clip": [
+        "92",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "94": {
+    "inputs": {
+      "text1": "RAW Photo, (photorealistic:1.1), (realistic:1.2),",
+      "text2": [
+        "109",
+        0
+      ],
+      "text3": "eyes",
+      "delimiter": " "
+    },
+    "class_type": "ttN concat",
+    "_meta": {
+      "title": "textConcat"
+    }
+  },
+  "95": {
+    "inputs": {
+      "images": [
+        "81",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "96": {
+    "inputs": {
+      "text_0": "RAW Photo, (photorealistic:1.1), (realistic:1.2), blue eyes",
+      "text": [
+        "94",
+        0
+      ]
+    },
+    "class_type": "ShowText|pysssss",
+    "_meta": {
+      "title": "Show Text 🐍"
+    }
+  },
+  "101": {
+    "inputs": {
+      "seed": -1
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": {
+      "title": "Seed (rgthree)"
+    }
+  },
+  "102": {
+    "inputs": {
+      "text": [
+        "110",
+        0
+      ],
+      "clip": [
+        "29",
+        5
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Upscale Positive"
+    }
+  },
+  "103": {
+    "inputs": {
+      "guide_size": 1920,
+      "guide_size_for": true,
+      "max_size": 1920,
+      "seed": 530027201801682,
+      "steps": 60,
+      "cfg": 4,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
+      "denoise": 0.30000000000000004,
+      "feather": 5,
+      "noise_mask": true,
+      "force_inpaint": true,
+      "bbox_threshold": 0.5,
+      "bbox_dilation": 10,
+      "bbox_crop_factor": 3,
+      "sam_detection_hint": "center-1",
+      "sam_dilation": 0,
+      "sam_threshold": 0.93,
+      "sam_bbox_expansion": 0,
+      "sam_mask_hint_threshold": 0.7,
+      "sam_mask_hint_use_negative": "False",
+      "drop_size": 10,
+      "wildcard": "",
+      "cycle": 1,
+      "inpaint_model": false,
+      "noise_mask_feather": 20,
+      "tiled_encode": false,
+      "tiled_decode": false,
+      "image": [
+        "51",
+        5
+      ],
+      "model": [
+        "29",
+        0
+      ],
+      "clip": [
+        "29",
+        5
+      ],
+      "vae": [
+        "29",
+        4
+      ],
+      "positive": [
+        "102",
+        0
+      ],
+      "negative": [
+        "29",
+        2
+      ],
+      "bbox_detector": [
+        "104",
+        0
+      ]
+    },
+    "class_type": "FaceDetailer",
+    "_meta": {
+      "title": "FaceDetailer"
+    }
+  },
+  "104": {
+    "inputs": {
+      "model_name": "bbox/face_yolov8m.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "106": {
+    "inputs": {
+      "rgthree_comparer": {
+        "images": [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_aadxd_00001_.png&type=temp&subfolder=&rand=0.594105695850883"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_aadxd_00002_.png&type=temp&subfolder=&rand=0.6929296021611624"
+          }
+        ]
+      },
+      "image_a": [
+        "103",
+        0
+      ],
+      "image_b": [
+        "51",
+        5
+      ]
+    },
+    "class_type": "Image Comparer (rgthree)",
+    "_meta": {
+      "title": "Compare Orig to Face"
+    }
+  },
+  "109": {
+    "inputs": {
+      "text": "blue"
+    },
+    "class_type": "ttN text",
+    "_meta": {
+      "title": "Eye Color"
+    }
+  },
+  "110": {
+    "inputs": {
+      "text1": "score_9, score_8_up, score_7_up, RAW Photo, (photorealistic:1.1), (realistic:1.2), detailed face,",
+      "text2": [
+        "109",
+        0
+      ],
+      "text3": "eyes",
+      "delimiter": " "
+    },
+    "class_type": "ttN concat",
+    "_meta": {
+      "title": "Eye Color Concat"
+    }
+  },
+  "111": {
+    "inputs": {
+      "images": [
+        "114",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "IPADAPTER IMAGE"
+    }
+  },
+  "112": {
+    "inputs": {
+      "value": "((a-b)/2)+8",
+      "a": [
+        "40",
+        2
+      ],
+      "b": [
+        "40",
+        1
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "PADDING SIZE"
+    }
+  },
+  "113": {
+    "inputs": {
+      "feathering": 0,
+      "feather_second_pass": "true",
+      "left_padding": [
+        "112",
+        0
+      ],
+      "right_padding": [
+        "112",
+        0
+      ],
+      "top_padding": 8,
+      "bottom_padding": 8,
+      "image": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "Image Padding",
+    "_meta": {
+      "title": "Image Padding"
+    }
+  },
+  "114": {
+    "inputs": {
+      "op": "union (max)",
+      "clamp_result": "yes",
+      "round_result": "no",
+      "image1": [
+        "113",
+        0
+      ],
+      "image2": [
+        "113",
+        1
+      ]
+    },
+    "class_type": "Combine Masks",
+    "_meta": {
+      "title": "Combine Masks"
+    }
+  },
+  "115": {
+    "inputs": {
+      "text": "148",
+      "anything": [
+        "112",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "Show Any"
+    }
+  },
+  "117": {
+    "inputs": {
+      "preprocessor": "OpenposePreprocessor",
+      "resolution": 1024,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "Pose Proc"
+    }
+  },
+  "118": {
+    "inputs": {
+      "width": [
+        "40",
+        1
+      ],
+      "height": [
+        "40",
+        2
+      ],
+      "interpolation": "nearest-exact",
+      "method": "keep proportion",
+      "condition": "always",
+      "multiple_of": 0,
+      "image": [
+        "117",
+        0
+      ]
+    },
+    "class_type": "ImageResize+",
+    "_meta": {
+      "title": "Pose Res"
+    }
+  },
+  "119": {
+    "inputs": {
+      "switch": "On",
+      "base_positive": [
+        "18",
+        0
+      ],
+      "base_negative": [
+        "18",
+        1
+      ],
+      "controlnet_stack": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "CR Apply Multi-ControlNet",
+    "_meta": {
+      "title": "🕹️ CR Apply Multi-ControlNet"
+    }
+  },
+  "120": {
+    "inputs": {
+      "switch_1": "On",
+      "controlnet_1": "OpenPoseXL2.safetensors",
+      "controlnet_strength_1": 1.0000000000000002,
+      "start_percent_1": 0,
+      "end_percent_1": 0.8000000000000002,
+      "switch_2": "Off",
+      "controlnet_2": "None",
+      "controlnet_strength_2": 0.30000000000000004,
+      "start_percent_2": 0,
+      "end_percent_2": 0.7000000000000002,
+      "switch_3": "Off",
+      "controlnet_3": "None",
+      "controlnet_strength_3": 0.30000000000000004,
+      "start_percent_3": 0,
+      "end_percent_3": 0.30000000000000004,
+      "image_1": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "CR Multi-ControlNet Stack",
+    "_meta": {
+      "title": "Pose Stack"
+    }
+  },
+  "121": {
+    "inputs": {
+      "images": [
+        "118",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Pose"
+    }
+  },
+  "122": {
+    "inputs": {
+      "images": [
+        "55",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Canny"
+    }
+  },
+  "123": {
+    "inputs": {
+      "images": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Depth"
+    }
+  },
+  "124": {
+    "inputs": {
+      "images": [
+        "70",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Tile"
+    }
+  }
+}
