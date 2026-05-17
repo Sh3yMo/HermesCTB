@@ -19,7 +19,11 @@
   },
   "121": {
     "inputs": {
-      "text": "The old, battle-weary warrior, with his long beard and battered helmet and bloodstained armour, stands before the viewer and speaks in a broken, pensive voice: \"Well, we have won the battle --- but at what cost\""
+      "text": "The old, battle-weary warrior, with his long beard and battered helmet and bloodstained armour, stands before the viewer and speaks in a broken, pensive voice: \"Well, we have won the battle --- but at what cost\"",
+      "clip": [
+        "146",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
@@ -124,6 +128,10 @@
       "model": [
         "366",
         0
+      ],
+      "clip": [
+        "146",
+        0
       ]
     },
     "class_type": "Power Lora Loader (rgthree)",
@@ -161,7 +169,11 @@
   },
   "593": {
     "inputs": {
-      "text": ""
+      "text": "",
+      "clip": [
+        "146",
+        0
+      ]
     },
     "class_type": "CLIPTextEncode",
     "_meta": {

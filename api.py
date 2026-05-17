@@ -21,6 +21,8 @@ from comfyui import (
     inject_input_audio,
     inject_input_image,
     inject_prompt,
+    inject_resolution,
+    inject_segment_duration,
     init_config,
     make_comfy_caller,
     queue_prompt_async,
@@ -58,7 +60,7 @@ def _outputs_dir() -> str:
 
 def _new_job(job_id: str | None = None) -> str:
     jid = job_id or str(uuid.uuid4())
-    JOBS[jid] = {"status": "pending", "output_path": None, "error": None}
+    JOBS[jid] = {"status": "pending", "output_path": None, "lyrics_path": None, "error": None, "prompt_id": None}
     return jid
 
 
@@ -66,9 +68,10 @@ def _job_running(jid: str) -> None:
     JOBS[jid]["status"] = "running"
 
 
-def _job_done(jid: str, output_path: str) -> None:
+def _job_done(jid: str, output_path: str, lyrics_path: str | None = None) -> None:
     JOBS[jid]["status"] = "completed"
     JOBS[jid]["output_path"] = output_path
+    JOBS[jid]["lyrics_path"] = lyrics_path
 
 
 def _job_failed(jid: str, error: str) -> None:
@@ -89,7 +92,7 @@ async def lifespan(app: FastAPI):
     if comfyui_env:
         CONFIG["comfyui_url"] = comfyui_env
     init_config(CONFIG)
-    AUDIO_ENHANCER = AudioEnhancer(CONFIG)
+    AUDIO_ENHANCER = AudioEnhancer(CONFIG["prompt_enhancer"])
     MV_PROMPTER = MusicVideoPrompter(CONFIG)
     REGISTRY = load_registry()
     os.makedirs("outputs", exist_ok=True)
@@ -107,6 +110,23 @@ app = FastAPI(title="HermesCTB API", lifespan=lifespan)
 @app.get("/health")
 async def health():
     return {"status": "ok", "comfyui_url": COMFYUI_URL}
+
+
+@app.get("/presets")
+async def list_presets():
+    from prompt_enhancer import (
+        DIRECTOR_PRESETS, FILMSTYLE_PRESETS, CAMERA_PRESETS,
+        LIGHT_PRESETS, MOOD_PRESETS, MOTION_PRESETS, CINEMATIC_PATTERN_PRESETS,
+    )
+    return {
+        "director":          {k: v["label"] for k, v in DIRECTOR_PRESETS.items()},
+        "film_style":        {k: v["label"] for k, v in FILMSTYLE_PRESETS.items()},
+        "camera":            list(CAMERA_PRESETS.keys()),
+        "lighting":          list(LIGHT_PRESETS.keys()),
+        "mood":              list(MOOD_PRESETS.keys()),
+        "motion":            list(MOTION_PRESETS.keys()),
+        "cinematic_pattern": list(CINEMATIC_PATTERN_PRESETS.keys()),
+    }
 
 
 @app.get("/workflows")
@@ -142,7 +162,24 @@ async def get_status(job_id: str):
             history = resp.json()
         if job_id in history:
             outputs = history[job_id].get("outputs", {})
-            return {"status": "completed" if outputs else "running", "prompt_id": job_id}
+            if outputs:
+                from comfyui import download_output_to_local
+                out_dir = _outputs_dir()
+                local_paths = []
+                for node_out in outputs.values():
+                    for item in node_out.get("images", []) + node_out.get("videos", []):
+                        try:
+                            path = await download_output_to_local(item, out_dir)
+                            local_paths.append(path)
+                        except Exception:
+                            pass
+                return {
+                    "status": "completed",
+                    "prompt_id": job_id,
+                    "output_path": local_paths[0] if local_paths else "",
+                    "output_urls": local_paths,
+                }
+            return {"status": "running", "prompt_id": job_id}
         # Check queue
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{COMFYUI_URL}/queue", timeout=5)
@@ -171,9 +208,28 @@ async def get_output(job_id: str):
     return FileResponse(path)
 
 
+@app.get("/outputs/{path:path}")
+async def serve_output_file(path: str):
+    full_path = os.path.join("outputs", path)
+    if not os.path.exists(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+
 # ---------------------------------------------------------------------------
 # Direct workflow dispatch helpers
 # ---------------------------------------------------------------------------
+
+async def _run_direct_download_job(jid: str, prompt_id: str) -> None:
+    _job_running(jid)
+    try:
+        output_info = await wait_for_completion_async(prompt_id)
+        out_path = await download_output_to_local(output_info, _outputs_dir())
+        _job_done(jid, out_path)
+    except Exception as e:
+        _job_failed(jid, str(e))
+        raise
+
 
 async def _run_direct_workflow(
     workflow_name: str,
@@ -184,10 +240,16 @@ async def _run_direct_workflow(
     input_audio_name: Optional[str] = None,
     input_video_bytes: Optional[bytes] = None,
     input_video_name: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
+    duration: Optional[float] = None,
 ) -> dict:
     workflow = load_workflow(workflow_name)
     if prompt:
         workflow = inject_prompt(workflow, prompt)
+    if aspect_ratio:
+        workflow = inject_resolution(workflow, aspect_ratio)
+    if duration is not None:
+        workflow = inject_segment_duration(workflow, duration)
     if input_image_bytes:
         uploaded = await upload_file_to_comfy(input_image_bytes, input_image_name or "input.png", "image")
         workflow = inject_input_image(workflow, uploaded)
@@ -198,7 +260,10 @@ async def _run_direct_workflow(
         uploaded = await upload_file_to_comfy(input_video_bytes, input_video_name or "input.mp4", "image")
         workflow = inject_input_image(workflow, uploaded)
     prompt_id = await queue_prompt_async(workflow)
-    return {"job_id": prompt_id, "prompt_id": prompt_id}
+    jid = _new_job()
+    JOBS[jid]["prompt_id"] = prompt_id
+    asyncio.create_task(_run_direct_download_job(jid, prompt_id))
+    return {"job_id": jid, "prompt_id": prompt_id}
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +275,14 @@ async def generate_image(
     workflow_id: str = Form(...),
     prompt: str = Form(...),
     input_image: Optional[UploadFile] = File(None),
+    aspect_ratio: Optional[str] = Form(None),
 ):
     img_bytes = await input_image.read() if input_image else None
     return await _run_direct_workflow(
         workflow_id, prompt,
         input_image_bytes=img_bytes,
         input_image_name=input_image.filename if input_image else None,
+        aspect_ratio=aspect_ratio,
     )
 
 
@@ -230,6 +297,8 @@ async def generate_video(
     input_image: Optional[UploadFile] = File(None),
     input_video: Optional[UploadFile] = File(None),
     input_audio: Optional[UploadFile] = File(None),
+    aspect_ratio: Optional[str] = Form(None),
+    duration: Optional[float] = Form(None),
 ):
     img_bytes = await input_image.read() if input_image else None
     vid_bytes = await input_video.read() if input_video else None
@@ -242,6 +311,8 @@ async def generate_video(
         input_audio_name=input_audio.filename if input_audio else None,
         input_video_bytes=vid_bytes,
         input_video_name=input_video.filename if input_video else None,
+        aspect_ratio=aspect_ratio,
+        duration=duration,
     )
 
 
@@ -417,11 +488,25 @@ async def generate_short_film(
 # ---------------------------------------------------------------------------
 
 @app.post("/enhance/prompt")
-async def enhance_prompt(
+async def enhance_prompt_endpoint(
     text: str = Form(...),
     workflow_id: Optional[str] = Form(None),
+    selections: Optional[str] = Form(None),
 ):
-    from prompt_enhancer import PromptEnhancer
-    enhancer = PromptEnhancer(CONFIG)
-    enhanced = await enhancer.build_prompt(text, workflow_name=workflow_id)
-    return {"original": text, "enhanced": enhanced}
+    try:
+        from prompt_enhancer import PromptEnhancer
+        sel_dict: dict = json.loads(selections) if selections else {}
+        enhancer = PromptEnhancer(CONFIG)
+        result = enhancer.enhance_prompt(
+            user_prompt=text,
+            workflow_name=workflow_id or "",
+            selections=sel_dict,
+        )
+        return {
+            "original": text,
+            "enhanced": result.final_prompt,
+            "used_llm": result.used_llm,
+            "status": result.status_message,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Prompt enhancer unavailable: {e}")
