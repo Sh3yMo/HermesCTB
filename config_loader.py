@@ -1,4 +1,5 @@
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -113,4 +114,11 @@ def load_config(config_path: str = "config.json") -> dict:
 
     config = _deep_merge(DEFAULT_CONFIG, raw)
     config["allowed_user_ids"] = [int(x) for x in config.get("allowed_user_ids", [])]
+
+    # Keep the runtime secret out of config.json entirely: if the key is blank
+    # (template / deployment), fall back to the OPENROUTER_API_KEY env var.
+    enhancer = config.setdefault("prompt_enhancer", {})
+    if not enhancer.get("openrouter_api_key"):
+        enhancer["openrouter_api_key"] = os.environ.get("OPENROUTER_API_KEY", "")
+
     return config

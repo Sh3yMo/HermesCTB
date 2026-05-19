@@ -4,5 +4,9 @@ __pycache__/
 *.pyo
 .env
 *.log
+
+# Runtime config holds the real OpenRouter key — never track it.
+# Use config.example.json as the template (copy -> config.json).
+config.json
 LLM Test Results/
 llm_test_results_*.json
