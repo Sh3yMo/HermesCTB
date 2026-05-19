@@ -37,6 +37,7 @@ class Segment:
     video_clip: str = ""
     end_frame: str = ""
     end_frame_comfy: str = ""  # ComfyUI filename for the end frame
+    frame_variant_prompt: str = ""  # MCA variant prompt for this segment's start frame
     transition: str = "cut"  # "cut" or "crossfade"
     status: str = "pending"  # "pending", "generating", "completed"
 
@@ -57,6 +58,7 @@ class Segment:
             "video_clip": self.video_clip,
             "end_frame": self.end_frame,
             "end_frame_comfy": self.end_frame_comfy,
+            "frame_variant_prompt": self.frame_variant_prompt,
             "transition": self.transition,
             "status": self.status,
         }
@@ -261,6 +263,207 @@ def _segment_fixed_length(total_duration: float, segment_length: float) -> List[
     return segments
 
 
+def clamp_song_duration(d: Any, default: int = 150, lo: int = 20, hi: int = 300) -> int:
+    """Clamp a requested song duration (seconds) into the supported range.
+
+    None / unparseable -> default (~150s, a full-length music video). An EXPLICIT
+    value is honored down to a 20s floor (short test clips) and up to a 300s cap.
+    """
+    if d is None:
+        return default
+    try:
+        v = int(float(d))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+# ACE-Step TextEncodeAceStepAudio1.5 `language` input — valid ISO codes (from
+# ComfyUI /object_info; passing anything else returns HTTP 400).
+ACE_STEP_LANGS = frozenset(
+    "ar az bg bn ca cs da de el en es fa fi fr he hi hr ht hu id is it ja ko la "
+    "lt ms ne nl no pa pl pt ro ru sa sk sr sv sw ta te th tl tr uk ur vi yue zh "
+    "unknown".split()
+)
+
+_LANG_NAME_TO_ISO = {
+    "german": "de", "deutsch": "de", "deutsche": "de", "deutsches": "de",
+    "english": "en", "englisch": "en",
+    "french": "fr", "französisch": "fr", "franzosisch": "fr", "français": "fr",
+    "francais": "fr",
+    "spanish": "es", "spanisch": "es", "español": "es", "espanol": "es",
+    "italian": "it", "italienisch": "it", "italiano": "it",
+    "portuguese": "pt", "portugiesisch": "pt",
+    "russian": "ru", "russisch": "ru",
+    "japanese": "ja", "japanisch": "ja",
+    "chinese": "zh", "chinesisch": "zh", "mandarin": "zh",
+    "korean": "ko", "koreanisch": "ko",
+    "dutch": "nl", "niederländisch": "nl",
+    "polish": "pl", "polnisch": "pl",
+    "turkish": "tr", "türkisch": "tr",
+}
+
+
+def to_ace_language(explicit: str, brief: str) -> Optional[str]:
+    """Resolve a song language to an ACE-Step-valid ISO code, or None.
+
+    Accepts an explicit value (ISO code or language name) or, failing that,
+    infers from keywords in the brief. Returns None when nothing valid is found
+    (caller then leaves the AudioSettings default — never an invalid value that
+    would 400 the ACE-Step graph).
+    """
+    v = (explicit or "").strip().lower()
+    if v in ACE_STEP_LANGS:
+        return v
+    if v in _LANG_NAME_TO_ISO:
+        return _LANG_NAME_TO_ISO[v]
+    b = (brief or "").lower()
+    for name, iso in _LANG_NAME_TO_ISO.items():
+        if name in b:
+            return iso
+    return None
+
+
+def chunk_list(items: List[Any], batch_size: int) -> List[List[Any]]:
+    """Split a list into chunks of at most batch_size (VRAM-aware MCA batching).
+
+    batch_size <= 0 -> a single chunk containing everything.
+    """
+    items = list(items)
+    if not items:
+        return []
+    if batch_size is None or batch_size <= 0:
+        return [items]
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def parse_segment_plan(response_text: str) -> List[Dict[str, Any]]:
+    """Parse an LLM JSON array of segment specs. Malformed -> [] (caller falls back).
+
+    Each spec: {video_prompt, frame_variant_prompt, duration, label, lyrics}.
+    frame_variant_prompt defaults to video_prompt when absent.
+    """
+    if not response_text:
+        return []
+    cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', response_text.strip(), flags=re.MULTILINE).strip()
+    s = cleaned.find('[')
+    e = cleaned.rfind(']')
+    if s == -1 or e <= s:
+        return []
+    try:
+        arr = json.loads(cleaned[s:e + 1])
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(arr, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        vp = str(item.get("video_prompt", "")).strip()
+        fvp = str(item.get("frame_variant_prompt", "")).strip() or vp
+        raw_dur = item.get("duration", None)
+        try:
+            dur = float(raw_dur) if raw_dur is not None else None
+        except (TypeError, ValueError):
+            dur = None
+        out.append({
+            "video_prompt": vp,
+            "frame_variant_prompt": fvp,
+            "duration": dur,
+            "label": str(item.get("label", "")).strip(),
+            "lyrics": str(item.get("lyrics", "")).strip(),
+        })
+    return out
+
+
+def build_segment_timeline(
+    specs: List[Dict[str, Any]],
+    total_duration: float,
+    min_seg: float,
+    max_seg: float,
+) -> List[Dict[str, Any]]:
+    """Tile [0, total_duration] into contiguous segments.
+
+    Per-segment length is clamped to [min_seg, min(max_seg, 30)] — the 30s ceiling
+    matches inject_segment_duration's silent clamp so audio and video clips stay in
+    sync. Segment count is derived so an exact feasible tiling exists; LLM-proposed
+    durations are used as relative weights and normalized to fill exactly.
+    """
+    if total_duration <= 0:
+        return []
+    cap = min(float(max_seg), 30.0)
+    lo = float(min_seg)
+    if lo > cap:
+        lo = cap
+
+    n_specs = len(specs)
+    if total_duration <= lo:
+        n = 1
+    else:
+        import math
+        n_min = max(1, math.ceil(total_duration / cap))
+        n_max = max(1, int(total_duration // lo))
+        if n_max < n_min:
+            n_max = n_min
+        if n_specs == 0:
+            preferred = (lo + cap) / 2.0
+            n = round(total_duration / preferred) if preferred > 0 else n_min
+        else:
+            n = n_specs
+        n = max(n_min, min(n_max, max(1, n)))
+
+    # Relative weights from spec durations (cycle specs to fill n slots).
+    preferred = (lo + cap) / 2.0
+    weights: List[float] = []
+    for i in range(n):
+        spec = specs[i % n_specs] if n_specs else None
+        d = spec.get("duration") if spec else None
+        weights.append(float(d) if isinstance(d, (int, float)) and d and d > 0 else preferred)
+
+    wsum = sum(weights) or float(n)
+    durs = [max(lo, min(cap, w / wsum * total_duration)) for w in weights]
+
+    # Absorb the clamp residual into segments that still have slack.
+    for _ in range(200):
+        residual = total_duration - sum(durs)
+        if abs(residual) < 1e-6:
+            break
+        if residual > 0:
+            slack = [(i, cap - durs[i]) for i in range(n) if cap - durs[i] > 1e-9]
+        else:
+            slack = [(i, durs[i] - lo) for i in range(n) if durs[i] - lo > 1e-9]
+        cap_room = sum(s for _, s in slack)
+        if cap_room < 1e-9:
+            break
+        for i, room in slack:
+            durs[i] += residual * (room / cap_room)
+            durs[i] = max(lo, min(cap, durs[i]))
+
+    # Force exact tiling: last segment closes at total_duration.
+    out: List[Dict[str, Any]] = []
+    t = 0.0
+    for i in range(n):
+        spec = specs[i % n_specs] if n_specs else None
+        if i == n - 1:
+            end = total_duration
+        else:
+            end = min(total_duration, round(t + durs[i], 3))
+            if end <= t:
+                end = min(total_duration, t + lo)
+        out.append({
+            "start_time": round(t, 3),
+            "end_time": round(end, 3),
+            "video_prompt": (spec or {}).get("video_prompt", ""),
+            "frame_variant_prompt": (spec or {}).get("frame_variant_prompt", "")
+            or (spec or {}).get("video_prompt", ""),
+            "label": (spec or {}).get("label", "") or f"Segment {i + 1}",
+            "lyrics": (spec or {}).get("lyrics", ""),
+        })
+        t = end
+    return out
+
+
 def _extract_audio_clip(audio_path: str, start: float, end: float, output_path: str):
     """Extract a clip from audio using ffmpeg."""
     subprocess.run(
@@ -364,9 +567,12 @@ def assemble_video(
         if not has_crossfade:
             # Concat demuxer: robust against differing resolutions/pixel formats
             filelist_path = os.path.join(tmp_dir, "filelist.txt")
+            # concat demuxer resolves `file` paths relative to the filelist's
+            # own directory (the temp dir), so they MUST be absolute.
             with open(filelist_path, "w", encoding="utf-8") as f:
                 for seg in completed:
-                    f.write(f"file '{seg.video_clip.replace(chr(92), '/')}'\n")
+                    abs_clip = os.path.abspath(seg.video_clip).replace(chr(92), "/")
+                    f.write(f"file '{abs_clip}'\n")
             cmd = [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist_path,
                 "-c:v", "libx264", "-preset", "fast", "-r", "24", "-vsync", "cfr",
@@ -609,6 +815,93 @@ class MusicVideoPrompter:
         print(f"Full response:\n{response}")
         return [theme] * len(segments)
 
+    async def plan_segments(
+        self,
+        lyrics_text: str,
+        theme: str,
+        total_duration: float,
+        genre: str = "",
+        min_seg: float = 8.0,
+        max_seg: float = 30.0,
+    ) -> List[Segment]:
+        """Plan creative, variably-sized segments from lyrics + theme.
+
+        Each segment gets a video_prompt (LTX scene/motion incl. sung lyrics) and a
+        frame_variant_prompt (how that segment's MCA start frame should look —
+        pose/outfit/location/shot). Durations are clamped to [min_seg, 30] and
+        normalized to tile the song exactly (A/V sync).
+        """
+        cap = min(float(max_seg), 30.0)
+        approx_min = max(1, int(total_duration // cap))
+        approx_max = max(approx_min, int(total_duration // float(min_seg)))
+
+        system_prompt = (
+            "You are a creative music video director. Break the song into a sequence "
+            "of distinct visual segments featuring ONE recurring singer/performer who "
+            "performs the song on camera. Vary location, outfit detail, pose and "
+            "background per segment for a dynamic video — but the SAME singer is the "
+            "clear main subject in every segment.\n\n"
+            "CRITICAL for lip-sync: when a segment has sung lyrics, the singer's FACE "
+            "and MOUTH must be clearly visible and reasonably close — use medium "
+            "shot, medium close-up or close-up framing on the performer singing to "
+            "camera. Do NOT make a sung segment a wide landscape, a crowd, an empty "
+            "scene or an object/action shot without the singer's face visible — the "
+            "model can only lip-sync a visible mouth. Scenery/location is BACKGROUND "
+            "behind the singer, never a replacement for them. Instrumental segments "
+            "(Intro/Outro/no lyrics) may use wider establishing shots.\n\n"
+            "For EACH segment return:\n"
+            "- label: short section name (e.g. Intro, Verse 1, Chorus).\n"
+            f"- duration: seconds, between {int(min_seg)} and 30 (hard maximum 30).\n"
+            "- video_prompt: the singer performing — describe the singer, their action, "
+            "camera motion, lighting, mood, and the background. If the segment is sung, "
+            "the singer is singing to camera (mouth moving, performing) and you MUST "
+            'include the exact lyrics in double quotes (e.g. he sings \"...\"). Compose '
+            "the END of the clip so it cuts cleanly to the next scene (hard cut, no fade).\n"
+            "- frame_variant_prompt: a single still-image description for this segment's "
+            "OPENING frame — the SAME recognizable singer (same face/hair/build), new "
+            "pose/outfit-detail/location. For sung segments this still MUST be a "
+            "medium/close framing with the singer's face clearly visible and forward; "
+            "moderate variation, never a different person, never a faceless scene.\n\n"
+            "The sum of all durations should be close to the song length. "
+            "Always write every prompt in English regardless of input language.\n"
+            "Return ONLY a JSON array of objects. No other text."
+        )
+        user_prompt = (
+            f"Visual theme/style: {theme}\n"
+            f"Genre: {genre or 'unspecified'}\n"
+            f"Song length: {int(total_duration)} seconds\n"
+            f"Aim for roughly {approx_min}-{approx_max} segments.\n\n"
+            f"Lyrics (with [section] tags):\n{lyrics_text or '(instrumental — no lyrics)'}\n\n"
+            "Return the JSON array now."
+        )
+
+        response = await self._call_openrouter(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=6000,
+        )
+
+        specs = parse_segment_plan(response)
+        timeline = build_segment_timeline(specs, total_duration, min_seg, cap)
+        if not timeline:
+            timeline = build_segment_timeline([], total_duration, min_seg, cap)
+
+        segments: List[Segment] = []
+        for i, row in enumerate(timeline):
+            vp = row.get("video_prompt") or theme
+            segments.append(Segment(
+                index=i,
+                start_time=row["start_time"],
+                end_time=row["end_time"],
+                label=row.get("label", f"Segment {i + 1}"),
+                lyrics=row.get("lyrics", ""),
+                prompt=vp,
+                frame_variant_prompt=row.get("frame_variant_prompt") or vp,
+            ))
+        return segments
+
     async def analyze_frame(self, frame_path: str) -> str:
         """Analyze a single video frame. Kept for backwards compatibility — delegates to analyze_frames."""
         return await self.analyze_frames([frame_path])
@@ -726,6 +1019,39 @@ class MusicVideoPrompter:
             max_tokens=200,
         )
         return response if response else theme
+
+    async def generate_character_portrait_prompt(self, seed: str, genre: str = "") -> str:
+        """RC7a: T2I prompt for a clean SINGER reference portrait (identity anchor).
+
+        Front-facing, face & upper body clearly visible, plain neutral studio
+        background — so MCA can derive consistent per-segment frames and LTX has
+        a real face/mouth to lip-sync. NOT a cinematic scene.
+        """
+        context = f"Music / lyrics context: {seed}"
+        if genre:
+            context += f"\nGenre: {genre}"
+        response = await self._call_openrouter(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate a text-to-image prompt for a CLEAN CHARACTER REFERENCE "
+                        "PORTRAIT of the singer/performer of this song. Hard requirements: "
+                        "the subject faces the camera directly (front-facing), shown head "
+                        "to waist or full body, face and mouth clearly visible and in sharp "
+                        "focus; plain neutral background (white, light grey, or soft studio "
+                        "gradient); even studio lighting. NO scenery, environment, action, "
+                        "props or other people. Establish the character's face, hair, skin "
+                        "tone, age, build and outfit so they stay recognizable across the "
+                        "video. Derive a fitting performer from the genre/lyrics mood. "
+                        "Under 80 words. Always write in English. Output ONLY the prompt."
+                    ),
+                },
+                {"role": "user", "content": context},
+            ],
+            max_tokens=200,
+        )
+        return response if response else (seed or "front-facing studio portrait of a singer, neutral grey background")
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""

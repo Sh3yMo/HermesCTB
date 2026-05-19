@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import uuid
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
@@ -36,7 +37,11 @@ from music_video_pipeline import (
     MusicVideoPrompter,
     Segment,
     assemble_video,
+    clamp_song_duration,
+    get_audio_duration,
     segment_audio,
+    to_ace_language,
+    _extract_audio_clip,
 )
 from short_film_pipeline import FilmPipeline
 from workflow_registry import load_registry
@@ -93,7 +98,9 @@ async def lifespan(app: FastAPI):
         CONFIG["comfyui_url"] = comfyui_env
     init_config(CONFIG)
     AUDIO_ENHANCER = AudioEnhancer(CONFIG["prompt_enhancer"])
-    MV_PROMPTER = MusicVideoPrompter(CONFIG)
+    # openrouter_api_key lives under prompt_enhancer, NOT top-level — passing the
+    # full CONFIG leaves api_key="" and silently kills every MV LLM call.
+    MV_PROMPTER = MusicVideoPrompter(CONFIG["prompt_enhancer"])
     REGISTRY = load_registry()
     os.makedirs("outputs", exist_ok=True)
     print("HermesCTB API ready")
@@ -320,17 +327,28 @@ async def generate_video(
 # generate/music  (ACEStep)
 # ---------------------------------------------------------------------------
 
+async def _generate_song(settings_dict: dict, idea: str) -> tuple[str, str | None]:
+    """Generate a song via ACE-Step. Returns (audio_path, lyrics_path|None).
+
+    Reusable by /generate/music and the music-video orchestration so lyrics are
+    always pipeline-authored (never improvised by the caller).
+    """
+    settings = AudioSettings.from_dict(settings_dict)
+    enriched = await AUDIO_ENHANCER.generate_song(settings, idea)
+    workflow = load_workflow("ACE-Step 1.5")
+    workflow = AUDIO_ENHANCER.inject_audio_settings(workflow, enriched)
+    prompt_id = await queue_prompt_async(workflow)
+    output_info = await wait_for_completion_async(prompt_id)
+    out_path = await download_output_to_local(output_info, _outputs_dir())
+    lyrics_path = enriched.export_lyrics(out_path)
+    return out_path, lyrics_path
+
+
 async def _run_music_generation(jid: str, settings_dict: dict, idea: str) -> None:
     _job_running(jid)
     try:
-        settings = AudioSettings.from_dict(settings_dict)
-        enriched = await AUDIO_ENHANCER.generate_song(settings, idea)
-        workflow = load_workflow("ACE-Step 1.5")
-        workflow = AUDIO_ENHANCER.inject_audio_settings(workflow, enriched)
-        prompt_id = await queue_prompt_async(workflow)
-        output_info = await wait_for_completion_async(prompt_id)
-        out_path = await download_output_to_local(output_info, _outputs_dir())
-        _job_done(jid, out_path)
+        out_path, lyrics_path = await _generate_song(settings_dict, idea)
+        _job_done(jid, out_path, lyrics_path)
     except Exception as e:
         _job_failed(jid, str(e))
         raise
@@ -384,7 +402,10 @@ async def _run_music_video(
     try:
         seg_dir = os.path.join(tmp_dir, "segments")
         os.makedirs(seg_dir, exist_ok=True)
-        segments = segment_audio(audio_path, seg_dir)
+        base, _ = os.path.splitext(audio_path)
+        sidecar = f"{base}_lyrics.txt"
+        lyrics_path = sidecar if os.path.exists(sidecar) else None
+        segments = segment_audio(audio_path, seg_dir, lyrics_path=lyrics_path)
         prompts = await MV_PROMPTER.generate_segment_prompts(segments, theme)
 
         out_dir = _outputs_dir()
@@ -419,7 +440,7 @@ async def _run_music_video(
 @app.post("/generate/music-video")
 async def generate_music_video(
     audio: UploadFile = File(...),
-    video_workflow_id: str = Form("LTX2.3 - IA2V"),
+    video_workflow_id: str = Form("LTX2.3 - IA2V"),  # non-4.2: 4.2 IA2V has no lip-sync (audio not driving video)
     theme: str = Form(...),
     crossfade_duration: float = Form(0.0),
 ):
@@ -430,6 +451,306 @@ async def generate_music_video(
 
     jid = _new_job()
     asyncio.create_task(_run_music_video(jid, audio_path, video_workflow_id, theme, crossfade_duration, tmp_dir))
+    return {"job_id": jid}
+
+
+# ---------------------------------------------------------------------------
+# create/music-video  (autonomous orchestration: song → source → MCA → video)
+# ---------------------------------------------------------------------------
+
+def _mca_cfg() -> dict:
+    c = CONFIG.get("music_video", {}).get("mca", {})
+    return {
+        "workflow": c.get("workflow", "F2K9B MCA.json"),
+        "input_node": str(c.get("input_node", "76")),
+        "prompt_node": str(c.get("prompt_node", "101")),
+        "output_node": str(c.get("output_node", "9")),
+        "batch_size": int(c.get("mca_batch_size", 4)),
+        "t2i_workflow": c.get("t2i_workflow", "Flux2 Klein 9B - T2I"),
+    }
+
+
+async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) -> str:
+    """Synchronously generate one still image; returns a local file path."""
+    from comfyui import randomize_seeds
+    wf = load_workflow(workflow_name)
+    wf = inject_prompt(wf, prompt)
+    if aspect_ratio:
+        wf = inject_resolution(wf, aspect_ratio)
+    wf = randomize_seeds(wf)
+    prompt_id = await queue_prompt_async(wf)
+    info = await wait_for_completion_async(prompt_id)
+    return await download_output_to_local(info, _outputs_dir())
+
+
+async def _resolve_source_image(
+    mode: str,
+    image_bytes: Optional[bytes],
+    image_name: Optional[str],
+    description: str,
+    theme: str,
+    lyrics_text: str,
+    genre: str,
+    aspect_ratio: str,
+    consistent_character: bool,
+    tmp_dir: str,
+) -> Optional[str]:
+    """Resolve the single source character image. Returns a local path or None.
+
+    upload   -> caller-supplied image
+    describe -> LLM turns description into a prompt -> generated still
+    auto     -> derive from lyrics + theme -> prompt -> generated still
+    none     -> no source image (segments render without a start frame)
+
+    RC7a: when consistent_character (default), describe/auto generate a CLEAN
+    front-facing singer PORTRAIT (identity anchor, face/mouth visible for
+    lip-sync) instead of a cinematic scene. False -> legacy scene image
+    (intentional varied/different characters per voice).
+    """
+    try:
+        if mode == "upload" and image_bytes:
+            p = os.path.join(tmp_dir, image_name or "source.png")
+            with open(p, "wb") as f:
+                f.write(image_bytes)
+            return p
+        if mode in ("describe", "auto"):
+            if mode == "describe":
+                seed = description or theme
+            else:
+                seed = (lyrics_text[:600] + "\n" + theme).strip() or theme
+            if consistent_character:
+                t2i = await MV_PROMPTER.generate_character_portrait_prompt(seed, genre)
+            else:
+                t2i = await MV_PROMPTER.generate_start_image_prompt(seed, genre)
+            return await _generate_still(_mca_cfg()["t2i_workflow"], t2i, aspect_ratio)
+    except Exception as e:
+        print(f"[create-mv] source image resolution failed ({mode}): {e} — continuing without start frame")
+    return None
+
+
+async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) -> list[str]:
+    """One source image -> N variant stills via F2K9B MCA, in VRAM-safe chunks.
+
+    Returns local paths aligned to variant_prompts order (best-effort; may be
+    shorter if a chunk yields fewer images).
+    """
+    from music_video_pipeline import chunk_list
+    from comfyui import randomize_seeds
+    cfg = _mca_cfg()
+    wf_path = os.path.join(CONFIG.get("workflows_dir", "./Workflows"), cfg["workflow"])
+    if not os.path.exists(wf_path):
+        raise FileNotFoundError(f"MCA workflow not found: {wf_path}")
+
+    src_bytes = open(source_image_path, "rb").read()
+    out_dir = os.path.join(_outputs_dir(), "mca_frames")
+    os.makedirs(out_dir, exist_ok=True)
+    results: list[str] = []
+    idx = 0
+
+    for chunk in chunk_list(variant_prompts, cfg["batch_size"]):
+        with open(wf_path, encoding="utf-8") as f:
+            wf = json.load(f)
+        async with httpx.AsyncClient(timeout=30) as client:
+            up = await client.post(
+                f"{COMFYUI_URL}/upload/image",
+                files={"image": (f"mca_src_{uuid.uuid4().hex}.png", src_bytes, "image/png")},
+                data={"overwrite": "true"},
+            )
+            up.raise_for_status()
+            uploaded_name = up.json().get("name")
+        wf[cfg["input_node"]]["inputs"]["image"] = uploaded_name
+        wf[cfg["prompt_node"]]["inputs"]["prompts"] = "\n".join(p.strip() for p in chunk)
+        wf = randomize_seeds(wf)
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            pr = await client.post(
+                f"{COMFYUI_URL}/prompt",
+                json={"prompt": wf, "client_id": str(uuid.uuid4())},
+            )
+            pr.raise_for_status()
+            prompt_id = pr.json()["prompt_id"]
+
+        outputs = None
+        for _ in range(120):
+            await asyncio.sleep(3)
+            async with httpx.AsyncClient(timeout=10) as client:
+                hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
+            if prompt_id in hist and hist[prompt_id].get("outputs"):
+                outputs = hist[prompt_id]["outputs"]
+                break
+        if not outputs:
+            raise RuntimeError(f"[MCA] timeout waiting for prompt {prompt_id}")
+
+        images = outputs.get(cfg["output_node"], {}).get("images", [])
+        for img in images:
+            async with httpx.AsyncClient(timeout=30) as client:
+                view = await client.get(
+                    f"{COMFYUI_URL}/view",
+                    params={
+                        "filename": img["filename"],
+                        "subfolder": img.get("subfolder", ""),
+                        "type": img.get("type", "output"),
+                    },
+                )
+                view.raise_for_status()
+            dest = os.path.join(out_dir, f"frame_{idx:03d}.png")
+            with open(dest, "wb") as fh:
+                fh.write(view.content)
+            results.append(dest)
+            idx += 1
+
+    return results
+
+
+async def _run_create_music_video(
+    jid: str,
+    brief: str,
+    song_path: Optional[str],
+    theme: str,
+    source_mode: str,
+    source_image_bytes: Optional[bytes],
+    source_image_name: Optional[str],
+    source_description: str,
+    duration: Optional[int],
+    video_workflow_id: str,
+    crossfade_duration: float,
+    aspect_ratio: str,
+    language: str,
+    consistent_character: bool,
+    tmp_dir: str,
+) -> None:
+    _job_running(jid)
+    try:
+        # 1. Song (pipeline-authored lyrics) unless caller supplied one.
+        if song_path:
+            audio_path = song_path
+            base, _ = os.path.splitext(audio_path)
+            sidecar = f"{base}_lyrics.txt"
+            lyrics_path = sidecar if os.path.exists(sidecar) else None
+        else:
+            # RC2: AudioSettings defaults language to 'en' → English lyrics even
+            # for "deutsches ..." briefs. The ACE-Step TextEncodeAceStepAudio1.5
+            # node only accepts ISO codes (de/en/fr/...), NOT names — passing a
+            # name 400s the graph. Resolve to a valid code or leave the default.
+            lang = to_ace_language(language, brief)
+            settings_dict = {
+                "caption": brief,
+                "mode": "vocal",
+                "duration": clamp_song_duration(duration),
+            }
+            if lang:
+                settings_dict["language"] = lang
+            audio_path, lyrics_path = await _generate_song(settings_dict, brief)
+
+        total_duration = get_audio_duration(audio_path)
+        theme_eff = theme or brief
+        lyrics_text = ""
+        if lyrics_path and os.path.exists(lyrics_path):
+            with open(lyrics_path, encoding="utf-8") as f:
+                lyrics_text = f.read()
+
+        # 2. Creative segment plan (dynamic lengths + per-segment frame variants).
+        segments = await MV_PROMPTER.plan_segments(
+            lyrics_text, theme_eff, total_duration, genre=brief
+        )
+
+        seg_dir = os.path.join(tmp_dir, "segments")
+        os.makedirs(seg_dir, exist_ok=True)
+        for seg in segments:
+            clip = os.path.join(seg_dir, f"seg_{seg.index:03d}.wav")
+            _extract_audio_clip(audio_path, seg.start_time, seg.end_time, clip)
+            seg.audio_clip = clip
+
+        # 3. Source image + per-segment MCA variant frames.
+        source = await _resolve_source_image(
+            source_mode, source_image_bytes, source_image_name,
+            source_description, theme_eff, lyrics_text, brief,
+            aspect_ratio, consistent_character, tmp_dir,
+        )
+        frames: list[str] = []
+        if source:
+            frames = await _run_mca_variants(
+                source, [s.frame_variant_prompt or s.prompt for s in segments]
+            )
+
+        # 4. Per-segment IA2V render (fresh frame each segment, no chaining,
+        #    no inject_resolution — IA2V resolution is driven by the input image).
+        out_dir = _outputs_dir()
+        for i, seg in enumerate(segments):
+            wf = load_workflow(video_workflow_id)
+            wf = inject_prompt(wf, seg.prompt)
+            frame = frames[i] if i < len(frames) else (source or "")
+            if frame and os.path.exists(frame):
+                with open(frame, "rb") as fr:
+                    up = await upload_file_to_comfy(fr.read(), os.path.basename(frame), "image")
+                wf = inject_input_image(wf, up)
+            if seg.audio_clip and os.path.exists(seg.audio_clip):
+                with open(seg.audio_clip, "rb") as af:
+                    ua = await upload_file_to_comfy(af.read(), os.path.basename(seg.audio_clip), "audio")
+                wf = inject_input_audio(wf, ua)
+            # Best-effort: ineffective on LTX2.3 (4.2) IA2V (latent length is a
+            # wired compute chain that ignores a literal) — clips come out at the
+            # workflow's fixed length there. Kept for workflows where it works.
+            wf = inject_segment_duration(wf, seg.duration)
+            prompt_id = await queue_prompt_async(wf)
+            info = await wait_for_completion_async(prompt_id)
+            seg.video_clip = await download_output_to_local(info, os.path.join(out_dir, "seg_videos"))
+            seg.status = "completed"
+
+        # RC3: per-segment audio chunks were planned to a length the (4.2)
+        # workflow ignores, so splicing them against fixed-length video clips
+        # produced an audible gap at every segment boundary. Drop the chunks and
+        # mux the FULL continuous song over the assembled video instead — one
+        # uninterrupted track, A/V coherent regardless of clip lengths.
+        for seg in segments:
+            seg.audio_clip = ""
+
+        session = MVSession(
+            audio_path=audio_path,
+            start_image_path=source or "",
+            segments=segments,
+            crossfade_duration=crossfade_duration,
+        )
+        final_path = os.path.join(out_dir, f"music_video_{jid[:8]}.mp4")
+        assemble_video(session, final_path)
+        _job_done(jid, final_path, lyrics_path)
+    except Exception as e:
+        _job_failed(jid, str(e))
+        raise
+
+
+@app.post("/create/music-video")
+async def create_music_video(
+    brief: str = Form(...),
+    song: Optional[UploadFile] = File(None),
+    theme: str = Form(""),
+    source_mode: str = Form("auto"),
+    source_image: Optional[UploadFile] = File(None),
+    source_description: str = Form(""),
+    duration: Optional[int] = Form(None),
+    video_workflow_id: str = Form("LTX2.3 - IA2V"),  # non-4.2: 4.2 IA2V has no lip-sync (audio not driving video)
+    crossfade_duration: float = Form(0.0),
+    aspect_ratio: str = Form("16:9"),
+    language: str = Form(""),
+    consistent_character: bool = Form(True),
+):
+    """Autonomous music-video creation. Lyrics are always pipeline-authored —
+    callers pass a topic in `brief`, never finished lyrics."""
+    tmp_dir = tempfile.mkdtemp(prefix="ctb_cmv_")
+    song_path = None
+    if song is not None:
+        song_path = os.path.join(tmp_dir, song.filename or "song.wav")
+        with open(song_path, "wb") as f:
+            f.write(await song.read())
+    src_bytes = await source_image.read() if source_image is not None else None
+    src_name = source_image.filename if source_image is not None else None
+
+    jid = _new_job()
+    asyncio.create_task(_run_create_music_video(
+        jid, brief, song_path, theme, source_mode, src_bytes, src_name,
+        source_description, duration, video_workflow_id, crossfade_duration,
+        aspect_ratio, language, consistent_character, tmp_dir,
+    ))
     return {"job_id": jid}
 
 

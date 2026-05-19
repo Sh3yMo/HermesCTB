@@ -15,7 +15,7 @@ import httpx
 # ---------------------------------------------------------------------------
 # Globals — overridden by init_config()
 # ---------------------------------------------------------------------------
-COMFYUI_URL = "http://127.0.0.1:8188"
+COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 WORKFLOWS_DIR = "./Workflows"
 COMFY_VIEW_TIMEOUT = 60
 COMFY_VIEW_RETRIES = 3
@@ -115,8 +115,12 @@ def inject_input_audio(workflow: dict, audio_filename: str) -> dict:
 
 def inject_segment_duration(workflow: dict, duration_seconds: float, max_duration: float = 30.0) -> dict:
     clamped = min(duration_seconds, max_duration)
+    LTX_FPS = 24  # LTX2.3 (4.2) renders at 24 fps (verified via ffprobe on real output)
     for node in workflow.values():
-        if isinstance(node, dict) and node.get("class_type") in ("ImpactInt", "PrimitiveNode"):
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        if ct in ("ImpactInt", "PrimitiveNode"):
             title = node.get("_meta", {}).get("title", "").lower()
             if "duration" in title or "length" in title or "frames" in title:
                 if "inputs" in node and "value" in node["inputs"]:
@@ -124,6 +128,50 @@ def inject_segment_duration(workflow: dict, duration_seconds: float, max_duratio
                         node["inputs"]["value"] = max(1, int(clamped * 24))
                     else:
                         node["inputs"]["value"] = clamped
+        elif ct == "EmptyLTXVLatentVideo":
+            node.setdefault("inputs", {})
+            node["inputs"]["length"] = max(1, int(clamped * LTX_FPS))
+        elif ct == "LTXVEmptyLatentAudio":
+            node.setdefault("inputs", {})
+            node["inputs"]["frames_number"] = max(1, int(clamped * LTX_FPS))
+    return workflow
+
+
+_ASPECT_RATIOS: dict[str, tuple[int, int]] = {
+    "16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1),
+    "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9),
+    "2:3": (2, 3), "3:2": (3, 2), "9:7": (9, 7),
+}
+
+_RESOLUTION_LATENT_TYPES = (
+    "EmptyFlux2LatentImage",
+    "EmptyLatentImage",
+    "EmptySD3LatentImage",
+    "EmptyLTXVLatentVideo",
+)
+
+
+def inject_resolution(workflow: dict, aspect_ratio: str, megapixels: float = 0.59) -> dict:
+    import math
+    ratio = _ASPECT_RATIOS.get(aspect_ratio)
+    if ratio is None:
+        parts = aspect_ratio.split(":")
+        if len(parts) == 2:
+            try:
+                ratio = (int(parts[0]), int(parts[1]))
+            except ValueError:
+                return workflow
+        else:
+            return workflow
+    w_r, h_r = ratio
+    total = int(megapixels * 1_000_000)
+    height = int(math.sqrt(total * h_r / w_r) / 64) * 64
+    width = int(math.sqrt(total * w_r / h_r) / 64) * 64
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") in _RESOLUTION_LATENT_TYPES:
+            node.setdefault("inputs", {})
+            node["inputs"]["width"] = width
+            node["inputs"]["height"] = height
     return workflow
 
 
@@ -168,8 +216,11 @@ def inject_custom_loras(workflow: dict, custom_loras: list) -> dict:
 # ---------------------------------------------------------------------------
 
 async def upload_file_to_comfy(file_bytes: bytes, filename: str, file_type: str = "image") -> str:
-    endpoint = "upload/image" if file_type == "image" else "upload/audio" if file_type == "audio" else "upload/image"
-    content_type = "image/png" if file_type == "image" else "audio/wav"
+    # ComfyUI exposes only /upload/image; it stores any uploaded file in the
+    # input/ dir by filename (LoadAudio/LoadImage then read it by name).
+    # There is no /upload/audio endpoint (POSTing to it returns HTTP 405).
+    endpoint = "upload/image"
+    content_type = "audio/wav" if file_type == "audio" else "image/png"
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{COMFYUI_URL}/{endpoint}",
@@ -201,8 +252,18 @@ async def wait_for_completion_async(prompt_id: str, timeout: Optional[int] = Non
     start = time.time()
     async with httpx.AsyncClient() as client:
         while (time.time() - start) < max_wait:
-            resp = await client.get(f"{COMFYUI_URL}/queue", timeout=5)
-            data = resp.json()
+            # Transient poll failures (ComfyUI GPU-saturated during a long
+            # render → /queue slow/unreachable) must NOT kill the job. Skip
+            # the tick; max_wait still bounds total wall time.
+            try:
+                resp = await client.get(f"{COMFYUI_URL}/queue", timeout=5)
+                resp.raise_for_status()
+                data = resp.json()
+            except (httpx.HTTPError, ValueError) as e:
+                elapsed = int(time.time() - start)
+                print(f"Job {prompt_id}: queue poll transient error ({elapsed}s): {e!r} — retrying")
+                await asyncio.sleep(check_interval)
+                continue
             running = data.get("queue_running", [])
             pending = data.get("queue_pending", [])
             if not any(item[1] == prompt_id for item in running + pending):
@@ -214,8 +275,14 @@ async def wait_for_completion_async(prompt_id: str, timeout: Optional[int] = Non
             raise TimeoutError(f"Job {prompt_id} timed out after {max_wait}s")
 
         for attempt in range(COMFY_HISTORY_RETRIES):
-            resp = await client.get(f"{COMFYUI_URL}/history/{prompt_id}", timeout=10)
-            history = resp.json()
+            try:
+                resp = await client.get(f"{COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                resp.raise_for_status()
+                history = resp.json()
+            except (httpx.HTTPError, ValueError) as e:
+                print(f"Job {prompt_id}: history poll transient error (attempt {attempt}): {e!r} — retrying")
+                await asyncio.sleep(COMFY_HISTORY_RETRY_DELAY)
+                continue
             if prompt_id in history:
                 outputs = history[prompt_id].get("outputs", {})
                 if outputs:

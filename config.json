@@ -12,11 +12,25 @@
     "enabled": true,
     "openrouter_enabled": true,
     "openrouter_api_key": "",
-    "openrouter_model": "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openrouter_model": "qwen/qwen3.5-flash-02-23",
     "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
     "request_timeout_seconds": 30,
     "max_retries": 3,
-    "audio_llm_model": "qwen/qwen3.5-plus-02-15",
-    "genre_validation_model": "qwen/qwen3-next-80b-a3b-instruct:free"
+    "fallback_models": [
+      "qwen/qwen3.5-9b",
+      "nvidia/nemotron-3-super-120b-a12b"
+    ],
+    "audio_llm_model": "google/gemma-4-31b-it",
+    "genre_validation_model": "qwen/qwen3.5-9b"
+  },
+  "music_video": {
+    "mca": {
+      "workflow": "F2K9B MCA.json",
+      "input_node": "76",
+      "prompt_node": "101",
+      "output_node": "9",
+      "mca_batch_size": 4,
+      "t2i_workflow": "Flux2 Klein 9B - T2I"
+    }
   }
 }

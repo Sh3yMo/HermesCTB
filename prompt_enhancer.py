@@ -556,7 +556,6 @@ class PromptEnhancer:
         context_parts.append(f"lighting: {light_hint}")
         context_parts.append(f"mood: {mood_hint}")
         if film_style_key != "none":
-            context_parts.append(f"FILM STYLE (primary visual medium — highest priority): {film_style_hint}")
             context_parts.append(f"director color/composition hints (adapt WITHIN the film style): {style_hint}")
         else:
             context_parts.append(f"visual style: {style_hint}")
@@ -572,7 +571,7 @@ class PromptEnhancer:
             f"Shot with {camera_hint}, {light_hint}.",
         ])
         if film_style_key != "none":
-            local_sections.append(f"The mood is {mood_hint}, with {style_hint} color grading adapted to the {film_style_hint} medium.")
+            local_sections.append(f"The mood is {mood_hint}, with {style_hint} color grading adapted to the established film-style medium.")
         else:
             local_sections.append(f"The mood is {mood_hint}, with {style_hint}.")
         if motion_hint and "none" not in motion_hint.lower():
@@ -672,6 +671,16 @@ class PromptEnhancer:
             f"\n\nContext to weave into the paragraph:\n" +
             "\n".join(f"- {p}" for p in context_parts)
         )
+
+        # Film style is stated EXACTLY ONCE at the very start (per rule 8),
+        # kept out of the weave-context above to avoid front+tail duplication.
+        if film_style_key != "none":
+            llm_instructions += (
+                f"\n\nFILM STYLE (primary visual medium — highest priority): {film_style_hint}\n"
+                "State this film-style medium ONCE at the very start of the paragraph "
+                "(e.g. 'In <film style>, ...'). Do NOT restate, summarize, or echo the "
+                "style description anywhere else in the paragraph."
+            )
 
         if source_visual_context and template_key in {"video_i2v", "video_ia2v", "video_v2v"}:
             local_sections.append(source_visual_context)
@@ -2256,6 +2265,9 @@ class PromptEnhancer:
             except Exception as e:
                 route_steps.append(f"LLM path failed: {e}")
                 print(f"[Enhancer] OpenRouter failed, falling back to local template: {e}")
+        elif self.openrouter_enabled and not self.openrouter_api_key:
+            route_steps.append("No openrouter_api_key — local template fallback")
+            print("[Enhancer] No openrouter_api_key configured — using LOCAL template fallback (not LLM)")
 
         fallback_source_text = user_prompt
         if self.translate_on_local_fallback and self.openrouter_enabled and self.openrouter_api_key:
@@ -2435,6 +2447,7 @@ class PromptEnhancer:
         if family == "ltx":
             return (
                 "You are an expert cinematic prompt engineer for the LTX-Video AI model. "
+                "If the user's input is not in English, translate it to English first, then enhance. "
                 "You produce a SINGLE FLOWING PARAGRAPH of max 200 words in natural English. "
                 "No labels, no sections, no bullet points. Start directly with the action. "
                 "Weave camera, lighting, style, and mood naturally into the scene description. "
@@ -2444,6 +2457,7 @@ class PromptEnhancer:
         if family == "flux":
             return (
                 "You are an expert prompt engineer for the Flux image generation model by Black Forest Labs. "
+                "If the user's input is not in English, translate it to English first, then enhance. "
                 "You produce a CONCISE NATURAL LANGUAGE PARAGRAPH of 30-80 words. "
                 "Front-load the most important elements (subject, action first). "
                 "Camera and lens specifications (focal lengths, f-stops, camera brands, film stocks) are "
@@ -2455,6 +2469,7 @@ class PromptEnhancer:
         if family == "pony":
             return (
                 "You are an expert prompt engineer for Pony Diffusion / CyberRealistic Pony models. "
+                "If the user's input is not in English, translate it to English first, then enhance. "
                 "You MUST start every prompt with the quality score chain: "
                 "'score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up' — "
                 "this is mandatory and must never be omitted. "
@@ -2467,6 +2482,7 @@ class PromptEnhancer:
         # Generic fallback
         return (
             "You are an expert cinematic prompt engineer for AI image and video generation. "
+            "If the user's input is not in English, translate it to English first, then enhance. "
             "You master photography terminology (focal lengths, aperture, depth of field, "
             "named lighting setups like Rembrandt/butterfly/split) and cinematic language. "
             "Convert user intent into one high-quality English production prompt. "
@@ -2760,6 +2776,7 @@ class PromptEnhancer:
 # ---------------------------------------------------------------------------
 
 FILM_ENHANCE_SYSTEM = """You are an expert cinematographer writing prompts for an AI video model (LTX2.3).
+If the input scene description is not in English, translate it to English first, then enhance.
 Your task: expand the given scene description into a rich, detailed video generation prompt (80-120 words).
 
 Rules:
