@@ -24,6 +24,28 @@ DEFAULT_MAX_SEGMENT_DURATION = 15     # seconds, subdivide longer segments
 DEFAULT_CROSSFADE_DURATION = 0.5      # seconds
 
 
+# Strip song-lyric text from prompts destined for image generation.
+# Image models (Flux, SDXL, etc.) render any quoted string as literal on-canvas
+# text. The MCA T2I startframe prompt MUST NOT contain lyrics.
+_QUOTED_RUN_RE = re.compile(r'["“”„«»‘’‚][^"“”„«»‘’‚]{0,400}["“”„«»‘’‚]')
+_SINGS_CLAUSE_RE = re.compile(
+    r'\b(?:he|she|the\s+singer|singer|they|performer|vocalist)\s+(?:sings?|singing|says?|whispers?|raps?|chants?|screams?|shouts?|belts?|croons?)\s*:?\s*',
+    re.IGNORECASE,
+)
+
+
+def strip_lyrics_from_image_prompt(prompt: str) -> str:
+    """Remove quoted lyric runs + 'he sings ...' lead-ins so T2I models don't
+    render the song text as on-canvas caption text."""
+    if not prompt:
+        return prompt
+    cleaned = _QUOTED_RUN_RE.sub("", prompt)
+    cleaned = _SINGS_CLAUSE_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    return cleaned.strip(" ,.;:")
+
+
 @dataclass
 class Segment:
     index: int
@@ -40,6 +62,7 @@ class Segment:
     frame_variant_prompt: str = ""  # MCA variant prompt for this segment's start frame
     transition: str = "cut"  # "cut" or "crossfade"
     status: str = "pending"  # "pending", "generating", "completed"
+    reuse_of: Optional[int] = None  # RC8: reuse this earlier segment's MCA frame (repeated chorus)
 
     @property
     def duration(self) -> float:
@@ -61,6 +84,7 @@ class Segment:
             "frame_variant_prompt": self.frame_variant_prompt,
             "transition": self.transition,
             "status": self.status,
+            "reuse_of": self.reuse_of,
         }
 
     @classmethod
@@ -464,13 +488,140 @@ def build_segment_timeline(
     return out
 
 
+_SEG_DIRECTOR_RULES = (
+    "You are a creative music video director. The video features ONE recurring "
+    "singer/performer; vary location, outfit detail, pose and background per "
+    "section but keep the SAME singer recognizable.\n\n"
+    "CRITICAL for lip-sync: a VOCAL section's still/clip MUST keep the singer's "
+    "MOUTH clearly visible and readable — the model can only lip-sync a visible "
+    "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
+    "VARY THE CAMERA per segment for cinematic variety — do NOT repeat the same "
+    "framing. Mix freely across these allowed shot types:\n"
+    "  • close-up (face fills frame)\n"
+    "  • medium close-up (head + shoulders)\n"
+    "  • medium shot (waist up)\n"
+    "  • 3/4 angle (body turned ~30-45° but face still toward camera)\n"
+    "  • low angle looking up at singer\n"
+    "  • high angle looking down at singer\n"
+    "  • dutch tilt / canted angle\n"
+    "  • slow dolly-in or dolly-out\n"
+    "  • handheld with subtle drift\n"
+    "FORBIDDEN for VOCAL: pure 90° side profile (mouth occluded), back-of-head "
+    "shots, wide-landscape with singer as a small dot, crowd shot replacing the "
+    "singer, faceless object shots.\n\n"
+    "TWO KINDS:\n"
+    "- VOCAL (has lyric lines): singer performs to camera, close framing, "
+    "face/mouth visible; video_prompt MUST include the exact lyrics in double "
+    "quotes (e.g. he sings \"...\").\n"
+    "- STORY (instrumental: Intro/Outro/Build/Drop/Instrumental/Break/Fade — no "
+    "lyrics): a cinematic SHORT-FILM narrative beat advancing the song's "
+    "story/theme; the singer is NOT required (wide/action/landscape ok); no "
+    "lyrics quoted.\n"
+    "STRICT RULE for frame_variant_prompt: NEVER include song lyrics, never put "
+    "anything in double quotes, never write 'he sings \"...\"'. The startframe is "
+    "a still image fed to a text-to-image model which would render any quoted "
+    "text literally as on-screen caption. Describe ONLY visuals: subject, pose, "
+    "outfit, location, lighting, framing.\n"
+    "Music video AND story: vocal beats = performance, instrumental beats = "
+    "narrative cinema. Compose every clip's END for a clean hard cut (no fade). "
+    "Always write every prompt in English regardless of input language."
+)
+
+
+def build_aligned_timeline(
+    aligned: List[Dict[str, Any]],
+    min_seg: float,
+    max_seg: float,
+) -> List[Dict[str, Any]]:
+    """RC8: turn lyric_align sections (real [start,end]) into timeline rows.
+
+    Cuts land on real section boundaries (no mid-vocal cut). Sections longer
+    than the cap are split into equal sub-rows within their own time span;
+    very short sections (< min_seg/2) are merged into the previous row. Pure /
+    deterministic — unit-testable. Rows carry label/lyrics/is_vocal and
+    reuse_of (only on the FIRST row of a section; sub-rows never reuse).
+    """
+    if not aligned:
+        return []
+    cap = min(float(max_seg), 30.0)
+    tiny = max(1.0, float(min_seg) / 2.0)
+
+    # 1. merge tiny sections forward into the previous kept section
+    merged: List[Dict[str, Any]] = []
+    for s in aligned:
+        dur = float(s["end"]) - float(s["start"])
+        if merged and dur < tiny:
+            merged[-1]["end"] = s["end"]  # absorb time; keep prev label/lyrics
+        else:
+            merged.append(dict(s))
+
+    # 1b. The first section has no predecessor to merge into. An instrumental
+    # [Intro] often gets near-zero time from WhisperX — left alone it produces a
+    # 0-duration row → empty audio clip → LTX LTXVAudioVAEEncode crash. Absorb a
+    # too-short leading section INTO the next one instead.
+    while len(merged) > 1 and (float(merged[0]["end"]) - float(merged[0]["start"])) < tiny:
+        merged[1]["start"] = merged[0]["start"]
+        merged.pop(0)
+
+    # 2. split over-cap sections into equal sub-rows within their span
+    rows: List[Dict[str, Any]] = []
+    for sec_i, s in enumerate(merged):
+        st, en = float(s["start"]), float(s["end"])
+        span = max(0.1, en - st)
+        n = max(1, math_ceil(span / cap))
+        step = span / n
+        for k in range(n):
+            a = round(st + step * k, 3)
+            b = round(en if k == n - 1 else st + step * (k + 1), 3)
+            rows.append({
+                "start_time": a,
+                "end_time": b,
+                "label": s.get("label", f"Section {sec_i + 1}"),
+                "lyrics": s.get("lyrics", "") if k == 0 else "",
+                "is_vocal": bool(s.get("is_vocal")),
+                # reuse only the first row of a repeated section
+                "reuse_of": s.get("reuse_of") if k == 0 else None,
+                "sec_index": sec_i,
+            })
+    return rows
+
+
+def math_ceil(x: float) -> int:
+    import math
+    return int(math.ceil(x))
+
+
 def _extract_audio_clip(audio_path: str, start: float, end: float, output_path: str):
-    """Extract a clip from audio using ffmpeg."""
+    """Extract a sample-exact clip from audio using ffmpeg.
+
+    Old `-c copy` snapped to the source codec's frame boundary (MP3 ≈ 26ms),
+    which caused per-segment Lippe-vor-Gesang drift in assembled music videos
+    (LTX-rendered against snapped clip, final mux against sample-exact full mp3).
+
+    `-ss` before `-i` = fast seek to nearest keyframe, then `-t` (duration)
+    decodes + re-encodes to PCM-WAV for sample-accurate cut. Output is already
+    .wav-extension so PCM is the natural target (lossless, no AAC re-encode
+    artifacts).
+
+    Fail-loud guard: a near-zero duration would write a 0-sample WAV, which
+    crashes LTX (LTXVAudioVAEEncode → "tensor of 0 elements"). build_aligned_
+    timeline should never produce such a segment, but raise clearly if it does.
+    """
+    duration = end - start
+    if duration < 0.05:
+        raise ValueError(
+            f"_extract_audio_clip: degenerate segment {start:.3f}..{end:.3f} "
+            f"(duration {duration:.3f}s) — would produce an empty audio clip"
+        )
     subprocess.run(
         [
-            "ffmpeg", "-y", "-i", audio_path,
-            "-ss", str(start), "-to", str(end),
-            "-c", "copy", output_path,
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-i", audio_path,
+            "-t", str(duration),
+            "-c:a", "pcm_s16le",
+            "-ar", "48000",
+            output_path,
         ],
         capture_output=True, check=True,
     )
@@ -536,6 +687,72 @@ def extract_motion_frames(video_path: str, output_dir: str, num_frames: int = 3,
     return frames
 
 
+def _probe_frame_count(src: str) -> int:
+    """Return the exact frame count of src's first video stream.
+
+    Tries `nb_frames` (metadata, fast). Falls back to `-count_frames` (decodes
+    every packet — slow but reliable when metadata is missing/N/A).
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_frames",
+         "-of", "default=nw=1:nk=1", src],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        n = int(probe.stdout.strip())
+        if n > 0:
+            return n
+    except (ValueError, AttributeError):
+        pass
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-count_frames", "-show_entries", "stream=nb_read_frames",
+         "-of", "default=nw=1:nk=1", src],
+        capture_output=True, text=True, check=True,
+    )
+    return int(probe.stdout.strip())
+
+
+def _fit_clip_to_frames(src: str, n_frames: int, dst: str) -> tuple[str, int]:
+    """Fit a video to exactly n_frames: trim if longer, pad if shorter.
+
+    LTX-IA2V floor-rounds video to an 8n+1 latent grid, so each clip is 1-8
+    frames SHORTER than its planned (input-audio-clip) duration. Untrimmed/
+    unpadded, the final mux against the continuous mp3 accumulates 0.3-2s of
+    lip-sync drift across ~8-10 segments (measured Run #5: -1.3s cumsum).
+
+    - actual > n_frames → trim via `-frames:v n_frames` (defensive — workflows
+      that quantize UP would land here; LTX-IA2V doesn't).
+    - actual < n_frames → pad via `tpad=stop_mode=clone:stop=<missing>` — clones
+      the last frame for the gap (0-8 frames = 0-333ms freeze at the hard cut,
+      barely visible).
+    - actual == n_frames → just re-encode (concat stream-copy needs identical
+      params across all inputs).
+
+    Returns (output_path, actual_frame_count_before_fit) so the caller can log
+    the per-segment delta for verification.
+    """
+    actual = _probe_frame_count(src)
+
+    if actual < n_frames:
+        pad = n_frames - actual
+        vf = ["-vf", f"tpad=stop_mode=clone:stop={pad}"]
+    else:
+        vf = []  # trim (or equal) handled by -frames:v below
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", src] + vf + [
+            "-frames:v", str(n_frames),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "16",
+            "-fps_mode", "passthrough", "-an",
+            dst,
+        ],
+        capture_output=True, check=True,
+    )
+    return dst, actual
+
+
 def assemble_video(
     session: MVSession,
     output_path: str,
@@ -551,13 +768,30 @@ def assemble_video(
     if not completed:
         raise ValueError("No completed segments to assemble")
 
-    if len(completed) == 1:
-        seg = completed[0]
-        audio = seg.audio_clip if seg.audio_clip and os.path.exists(seg.audio_clip) else session.audio_path
-        _mux_audio(seg.video_clip, audio, output_path)
-        return output_path
-
     with tempfile.TemporaryDirectory(prefix="ctb_mv_assembly_") as tmp_dir:
+        # RC: LTX-IA2V floor-rounds each clip to an 8n+1 latent grid, making
+        # each segment 0-333ms SHORTER than its planned (input-audio-clip)
+        # duration (measured Run #5: -1.3s cumsum over 8 segments). Untouched,
+        # the final mux against the continuous mp3 accumulates lip-sync drift.
+        # Fit each clip to exactly round(plan_dur*24) frames (pad with cloned
+        # last-frame when shorter, trim when longer) so sum(video)==sum(plan)
+        # and the full-mp3 mux stays sample-aligned.
+        for seg in completed:
+            target_frames = max(1, round(seg.duration * 24))
+            fitted = os.path.join(tmp_dir, f"fit_{seg.index:03d}.mp4")
+            new_clip, actual = _fit_clip_to_frames(seg.video_clip, target_frames, fitted)
+            delta = actual - target_frames
+            op = "pad" if delta < 0 else ("trim" if delta > 0 else "noop")
+            print(
+                f"[assemble] seg {seg.index}: plan={seg.duration:.3f}s "
+                f"target={target_frames}f actual={actual}f {op}={abs(delta)}f"
+            )
+            seg.video_clip = new_clip
+
+        if len(completed) == 1:
+            _mux_audio(completed[0].video_clip, session.audio_path, output_path)
+            return output_path
+
         has_crossfade = any(
             s.transition == "crossfade" and session.crossfade_duration > 0
             for s in completed[:-1]
@@ -565,7 +799,9 @@ def assemble_video(
         temp_video = os.path.join(tmp_dir, "assembled_no_audio.mp4")
 
         if not has_crossfade:
-            # Concat demuxer: robust against differing resolutions/pixel formats
+            # Concat demuxer: try stream-copy first (exact frame-timing preservation,
+            # no re-encode drift). LTX outputs share codec/resolution/fps so copy works.
+            # Fall back to re-encode only if copy fails (e.g. mixed resolutions).
             filelist_path = os.path.join(tmp_dir, "filelist.txt")
             # concat demuxer resolves `file` paths relative to the filelist's
             # own directory (the temp dir), so they MUST be absolute.
@@ -573,13 +809,25 @@ def assemble_video(
                 for seg in completed:
                     abs_clip = os.path.abspath(seg.video_clip).replace(chr(92), "/")
                     f.write(f"file '{abs_clip}'\n")
-            cmd = [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist_path,
-                "-c:v", "libx264", "-preset", "fast", "-r", "24", "-vsync", "cfr",
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                temp_video,
-            ]
-            subprocess.run(cmd, capture_output=True, check=True)
+            try:
+                # Stream-copy: zero re-encode, frame timing preserved exactly.
+                # Fixes "lip-sync drift within longest segment" bug where re-encode
+                # with -vsync cfr inserted a phantom frame near segment boundaries.
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist_path,
+                    "-c", "copy", "-map", "0:v:0",
+                    temp_video,
+                ]
+                subprocess.run(cmd, capture_output=True, check=True)
+            except subprocess.CalledProcessError:
+                # Inputs incompatible for copy (mixed codec/res). Fall back to re-encode.
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist_path,
+                    "-c:v", "libx264", "-preset", "fast", "-r", "24", "-fps_mode", "passthrough",
+                    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    temp_video,
+                ]
+                subprocess.run(cmd, capture_output=True, check=True)
         else:
             # Detect resolution from first clip for normalization
             probe = subprocess.run(
@@ -823,6 +1071,7 @@ class MusicVideoPrompter:
         genre: str = "",
         min_seg: float = 8.0,
         max_seg: float = 30.0,
+        aligned_sections: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Segment]:
         """Plan creative, variably-sized segments from lyrics + theme.
 
@@ -830,8 +1079,64 @@ class MusicVideoPrompter:
         frame_variant_prompt (how that segment's MCA start frame should look —
         pose/outfit/location/shot). Durations are clamped to [min_seg, 30] and
         normalized to tile the song exactly (A/V sync).
+
+        RC8: when aligned_sections (from lyric_align.align_sections) is given,
+        segment boundaries come from REAL audio timestamps (cuts never land
+        mid-vocal) and the LLM only writes per-section creative prompts. Falls
+        back to LLM-chosen proportional segmentation when None.
         """
         cap = min(float(max_seg), 30.0)
+
+        # ---- RC8 aligned mode: fixed real-timestamp rows ------------------
+        if aligned_sections:
+            rows = build_aligned_timeline(aligned_sections, min_seg, cap)
+            if rows:
+                listing = "\n".join(
+                    f'{i}. [{ "VOCAL" if r["is_vocal"] else "STORY" }] '
+                    f'{r["label"]} ({round(r["end_time"]-r["start_time"],1)}s)'
+                    + (f' lyrics: "{r["lyrics"][:160]}"' if r["is_vocal"] and r["lyrics"] else "")
+                    for i, r in enumerate(rows)
+                )
+                aligned_system = (
+                    _SEG_DIRECTOR_RULES + "\n\n"
+                    "You are given a FIXED ordered list of sections with their "
+                    "kind (VOCAL/STORY) and lyrics. Return a JSON array with "
+                    "EXACTLY one object per listed section, in the SAME order — "
+                    "do NOT add, remove, reorder, merge or change durations. "
+                    "For each: video_prompt + frame_variant_prompt per the "
+                    "VOCAL/STORY rules above (VOCAL must quote its exact lyrics; "
+                    "STORY is cinematic narrative, no singer/lyrics). "
+                    "Return ONLY the JSON array, no other text."
+                )
+                aligned_user = (
+                    f"Visual theme/style: {theme}\nGenre: {genre or 'unspecified'}\n\n"
+                    f"Sections (return exactly {len(rows)} objects, same order):\n"
+                    f"{listing}\n\nReturn the JSON array now."
+                )
+                resp = await self._call_openrouter(
+                    messages=[{"role": "system", "content": aligned_system},
+                              {"role": "user", "content": aligned_user}],
+                    max_tokens=6000,
+                )
+                specs = parse_segment_plan(resp)
+                segments: List[Segment] = []
+                for i, r in enumerate(rows):
+                    spec = specs[i] if i < len(specs) else {}
+                    vp = spec.get("video_prompt") or r["lyrics"] or theme
+                    segments.append(Segment(
+                        index=i,
+                        start_time=r["start_time"],
+                        end_time=r["end_time"],
+                        label=r["label"],
+                        lyrics=r["lyrics"] if r["is_vocal"] else "",
+                        prompt=vp,
+                        frame_variant_prompt=strip_lyrics_from_image_prompt(spec.get("frame_variant_prompt") or vp),
+                        reuse_of=r.get("reuse_of"),
+                    ))
+                if segments:
+                    return segments
+            # rows empty or no segments → fall through to legacy path
+
         approx_min = max(1, int(total_duration // cap))
         approx_max = max(approx_min, int(total_duration // float(min_seg)))
 
@@ -841,27 +1146,51 @@ class MusicVideoPrompter:
             "performs the song on camera. Vary location, outfit detail, pose and "
             "background per segment for a dynamic video — but the SAME singer is the "
             "clear main subject in every segment.\n\n"
-            "CRITICAL for lip-sync: when a segment has sung lyrics, the singer's FACE "
-            "and MOUTH must be clearly visible and reasonably close — use medium "
-            "shot, medium close-up or close-up framing on the performer singing to "
-            "camera. Do NOT make a sung segment a wide landscape, a crowd, an empty "
-            "scene or an object/action shot without the singer's face visible — the "
-            "model can only lip-sync a visible mouth. Scenery/location is BACKGROUND "
-            "behind the singer, never a replacement for them. Instrumental segments "
-            "(Intro/Outro/no lyrics) may use wider establishing shots.\n\n"
+            "CRITICAL for lip-sync: when a segment has sung lyrics, the singer's MOUTH "
+            "must be clearly visible and readable — the model can only lip-sync a "
+            "visible mouth. Scenery/location is BACKGROUND behind the singer, never "
+            "a replacement for them.\n\n"
+            "VARY THE CAMERA per VOCAL segment for cinematic variety — do NOT repeat "
+            "the same framing. Mix freely across these allowed shot types:\n"
+            "  • close-up (face fills frame)\n"
+            "  • medium close-up (head + shoulders)\n"
+            "  • medium shot (waist up)\n"
+            "  • 3/4 angle (body turned ~30-45° but face still toward camera)\n"
+            "  • low angle looking up at singer\n"
+            "  • high angle looking down at singer\n"
+            "  • dutch tilt / canted angle\n"
+            "  • slow dolly-in or dolly-out\n"
+            "  • handheld with subtle drift\n"
+            "FORBIDDEN for VOCAL: pure 90° side profile (mouth occluded), back-of-head "
+            "shots, wide-landscape with singer as a small dot, crowd shot replacing "
+            "the singer, faceless object shots.\n\n"
+            "TWO SEGMENT KINDS — classify each section by whether it has sung lyrics:\n"
+            "1. VOCAL (has lyric lines: Verse/Chorus/Pre-Chorus/Bridge/etc.): the "
+            "recurring singer performs to camera, medium/close framing, face & mouth "
+            "visible for lip-sync (rules above). kind=\"vocal\".\n"
+            "2. STORY (instrumental: Intro/Outro/Build/Drop/Instrumental/Break/Fade — "
+            "no lyric lines): treat this like a SHORT FILM beat — a cinematic narrative "
+            "shot that advances the song's story/theme (e.g. the battle, the journey, "
+            "the world). The singer is NOT required here; it can be a wide establishing "
+            "shot, action, landscape or scene with no person. No lyrics. kind=\"story\".\n"
+            "This is a music video AND a story: vocal beats = performance, instrumental "
+            "beats = narrative cinema. Use the song's natural structure as the story arc.\n\n"
             "For EACH segment return:\n"
             "- label: short section name (e.g. Intro, Verse 1, Chorus).\n"
+            "- kind: \"vocal\" or \"story\" (per the rule above).\n"
             f"- duration: seconds, between {int(min_seg)} and 30 (hard maximum 30).\n"
-            "- video_prompt: the singer performing — describe the singer, their action, "
-            "camera motion, lighting, mood, and the background. If the segment is sung, "
-            "the singer is singing to camera (mouth moving, performing) and you MUST "
-            'include the exact lyrics in double quotes (e.g. he sings \"...\"). Compose '
-            "the END of the clip so it cuts cleanly to the next scene (hard cut, no fade).\n"
-            "- frame_variant_prompt: a single still-image description for this segment's "
-            "OPENING frame — the SAME recognizable singer (same face/hair/build), new "
-            "pose/outfit-detail/location. For sung segments this still MUST be a "
-            "medium/close framing with the singer's face clearly visible and forward; "
-            "moderate variation, never a different person, never a faceless scene.\n\n"
+            "- video_prompt: VOCAL → the singer singing to camera (mouth moving, "
+            "performing); describe singer, action, camera, lighting, mood, background, "
+            'and you MUST include the exact lyrics in double quotes (e.g. he sings \"...\"). '
+            "STORY → a cinematic narrative scene advancing the theme (NO singer needed, "
+            "NO lyrics quoted). Always compose the clip END for a clean hard cut (no fade).\n"
+            "- frame_variant_prompt: opening still for this segment. VOCAL → the SAME "
+            "recognizable singer (same face/hair/build), new pose/outfit/location, "
+            "medium/close, face clearly visible and forward (never a different person, "
+            "never faceless). STORY → a cinematic scene still matching the narrative "
+            "beat (singer optional/absent). NEVER include song lyrics or any quoted "
+            "text in this field — it is fed to a T2I image model which renders quoted "
+            "strings literally as on-screen caption text.\n\n"
             "The sum of all durations should be close to the song length. "
             "Always write every prompt in English regardless of input language.\n"
             "Return ONLY a JSON array of objects. No other text."
@@ -898,7 +1227,7 @@ class MusicVideoPrompter:
                 label=row.get("label", f"Segment {i + 1}"),
                 lyrics=row.get("lyrics", ""),
                 prompt=vp,
-                frame_variant_prompt=row.get("frame_variant_prompt") or vp,
+                frame_variant_prompt=strip_lyrics_from_image_prompt(row.get("frame_variant_prompt") or vp),
             ))
         return segments
 

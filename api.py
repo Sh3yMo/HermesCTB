@@ -27,6 +27,8 @@ from comfyui import (
     init_config,
     make_comfy_caller,
     queue_prompt_async,
+    queue_and_wait_with_recovery,
+    free_comfy,
     upload_file_to_comfy,
     wait_for_completion_async,
     load_workflow,
@@ -40,9 +42,11 @@ from music_video_pipeline import (
     clamp_song_duration,
     get_audio_duration,
     segment_audio,
+    strip_lyrics_from_image_prompt,
     to_ace_language,
     _extract_audio_clip,
 )
+from lyric_align import align_sections
 from short_film_pipeline import FilmPipeline
 from workflow_registry import load_registry
 
@@ -97,6 +101,11 @@ async def lifespan(app: FastAPI):
     if comfyui_env:
         CONFIG["comfyui_url"] = comfyui_env
     init_config(CONFIG)
+    # Bug #6 patch: adds absolute step-time ceiling to SlowdownMonitor so
+    # initial CPU-fallback (constant slowdown from step 1) is detected. Lives
+    # in a separate file because comfyui.py was OS-locked during the fix.
+    import comfyui_patches
+    comfyui_patches.apply_config(CONFIG)
     AUDIO_ENHANCER = AudioEnhancer(CONFIG["prompt_enhancer"])
     # openrouter_api_key lives under prompt_enhancer, NOT top-level — passing the
     # full CONFIG leaves api_key="" and silently kills every MV LLM call.
@@ -337,8 +346,11 @@ async def _generate_song(settings_dict: dict, idea: str) -> tuple[str, str | Non
     enriched = await AUDIO_ENHANCER.generate_song(settings, idea)
     workflow = load_workflow("ACE-Step 1.5")
     workflow = AUDIO_ENHANCER.inject_audio_settings(workflow, enriched)
-    prompt_id = await queue_prompt_async(workflow)
-    output_info = await wait_for_completion_async(prompt_id)
+    # Bug #6: pre-job /free so ACE-Step gets a clean VRAM state. Without this,
+    # fragmented VRAM from prior runs forces CPU-fallback (observed 132s/it
+    # ETA 3h39m vs normal ~1-2s/it). Symmetrical to the IA2V-loop free_every.
+    await free_comfy()
+    prompt_id, output_info = await queue_and_wait_with_recovery(workflow)
     out_path = await download_output_to_local(output_info, _outputs_dir())
     lyrics_path = enriched.export_lyrics(out_path)
     return out_path, lyrics_path
@@ -467,7 +479,16 @@ def _mca_cfg() -> dict:
         "output_node": str(c.get("output_node", "9")),
         "batch_size": int(c.get("mca_batch_size", 4)),
         "t2i_workflow": c.get("t2i_workflow", "Flux2 Klein 9B - T2I"),
+        "free_every": int(c.get("comfy_free_every", 3)),
     }
+
+
+# RC9: deterministic lip-sync booster appended to VOCAL segment prompts (LLM
+# may forget it; this guarantees it). Story/instrumental segments never get it.
+LIPSYNC_BOOSTER = (
+    "The lips are syncing naturally to the vocals. Every word is pronounced "
+    "perfectly, facial expressions are lively, diction and lip sync are perfect."
+)
 
 
 async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) -> str:
@@ -478,8 +499,7 @@ async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) ->
     if aspect_ratio:
         wf = inject_resolution(wf, aspect_ratio)
     wf = randomize_seeds(wf)
-    prompt_id = await queue_prompt_async(wf)
-    info = await wait_for_completion_async(prompt_id)
+    prompt_id, info = await queue_and_wait_with_recovery(wf)
     return await download_output_to_local(info, _outputs_dir())
 
 
@@ -562,24 +582,15 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
         wf[cfg["prompt_node"]]["inputs"]["prompts"] = "\n".join(p.strip() for p in chunk)
         wf = randomize_seeds(wf)
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            pr = await client.post(
-                f"{COMFYUI_URL}/prompt",
-                json={"prompt": wf, "client_id": str(uuid.uuid4())},
-            )
-            pr.raise_for_status()
-            prompt_id = pr.json()["prompt_id"]
-
-        outputs = None
-        for _ in range(120):
-            await asyncio.sleep(3)
-            async with httpx.AsyncClient(timeout=10) as client:
-                hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
-            if prompt_id in hist and hist[prompt_id].get("outputs"):
-                outputs = hist[prompt_id]["outputs"]
-                break
+        # Recovery-wrapped queue+wait. wait_for_completion_async's _extract_output
+        # returns a single primary output; MCA needs ALL images from a specific
+        # node, so we re-fetch full history after the wrapper confirms the job done.
+        prompt_id, _ = await queue_and_wait_with_recovery(wf)
+        async with httpx.AsyncClient(timeout=10) as client:
+            hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
+        outputs = hist.get(prompt_id, {}).get("outputs", {})
         if not outputs:
-            raise RuntimeError(f"[MCA] timeout waiting for prompt {prompt_id}")
+            raise RuntimeError(f"[MCA] history missing outputs for prompt {prompt_id}")
 
         images = outputs.get(cfg["output_node"], {}).get("images", [])
         for img in images:
@@ -649,9 +660,27 @@ async def _run_create_music_video(
             with open(lyrics_path, encoding="utf-8") as f:
                 lyrics_text = f.read()
 
-        # 2. Creative segment plan (dynamic lengths + per-segment frame variants).
+        # 2a. RC8: align lyrics to audio for REAL section timestamps (cuts on
+        #     section boundaries, not mid-vocal) + chorus reuse. Fail-soft:
+        #     None -> plan_segments uses legacy proportional segmentation.
+        aligned = None
+        if lyrics_path and os.path.exists(lyrics_path):
+            lang_code = to_ace_language(language, brief) or "en"
+            try:
+                aligned = await asyncio.to_thread(
+                    align_sections, audio_path, lyrics_path,
+                    total_duration, lang_code,
+                )
+            except Exception as e:
+                print(f"[create-mv] align_sections crashed (non-fatal): {e!r}")
+                aligned = None
+            print(f"[create-mv] lyric alignment: "
+                  f"{'OK ' + str(len(aligned)) + ' sections' if aligned else 'unavailable → proportional fallback'}")
+
+        # 2b. Creative segment plan (aligned timestamps if available).
         segments = await MV_PROMPTER.plan_segments(
-            lyrics_text, theme_eff, total_duration, genre=brief
+            lyrics_text, theme_eff, total_duration, genre=brief,
+            aligned_sections=aligned,
         )
 
         seg_dir = os.path.join(tmp_dir, "segments")
@@ -667,19 +696,43 @@ async def _run_create_music_video(
             source_description, theme_eff, lyrics_text, brief,
             aspect_ratio, consistent_character, tmp_dir,
         )
-        frames: list[str] = []
+        # RC8 chorus reuse: only generate MCA frames for non-repeated segments;
+        # repeated sections (seg.reuse_of) reuse their anchor's frame → fewer
+        # MCA gens + visually consistent recurring chorus.
+        frame_by_seg: dict[int, str] = {}
         if source:
-            frames = await _run_mca_variants(
-                source, [s.frame_variant_prompt or s.prompt for s in segments]
-            )
+            to_gen = [i for i, s in enumerate(segments) if s.reuse_of is None]
+            gen_prompts = [
+                strip_lyrics_from_image_prompt(
+                    segments[i].frame_variant_prompt or segments[i].prompt
+                )
+                for i in to_gen
+            ]
+            gen_frames = await _run_mca_variants(source, gen_prompts)
+            for k, i in enumerate(to_gen):
+                frame_by_seg[i] = gen_frames[k] if k < len(gen_frames) else source
+            for i, s in enumerate(segments):
+                if s.reuse_of is not None:
+                    frame_by_seg[i] = frame_by_seg.get(s.reuse_of, source)
 
         # 4. Per-segment IA2V render (fresh frame each segment, no chaining,
         #    no inject_resolution — IA2V resolution is driven by the input image).
         out_dir = _outputs_dir()
+        free_every = _mca_cfg()["free_every"]
         for i, seg in enumerate(segments):
+            # RC11: free VRAM BEFORE queuing this segment (not after the prior
+            # one) so the next queue command lands on a fresh state. Boundary
+            # is identical to the old RC10 placement; only the timing moved.
+            if free_every > 0 and i > 0 and i % free_every == 0:
+                await free_comfy()
             wf = load_workflow(video_workflow_id)
-            wf = inject_prompt(wf, seg.prompt)
-            frame = frames[i] if i < len(frames) else (source or "")
+            # RC9: vocal segments (have lyrics) get the lip-sync booster so the
+            # character actually sings; story/instrumental segments do not.
+            seg_prompt = seg.prompt
+            if (seg.lyrics or "").strip():
+                seg_prompt = f"{seg.prompt} {LIPSYNC_BOOSTER}"
+            wf = inject_prompt(wf, seg_prompt)
+            frame = frame_by_seg.get(i, source or "")
             if frame and os.path.exists(frame):
                 with open(frame, "rb") as fr:
                     up = await upload_file_to_comfy(fr.read(), os.path.basename(frame), "image")
@@ -692,8 +745,7 @@ async def _run_create_music_video(
             # wired compute chain that ignores a literal) — clips come out at the
             # workflow's fixed length there. Kept for workflows where it works.
             wf = inject_segment_duration(wf, seg.duration)
-            prompt_id = await queue_prompt_async(wf)
-            info = await wait_for_completion_async(prompt_id)
+            prompt_id, info = await queue_and_wait_with_recovery(wf)
             seg.video_clip = await download_output_to_local(info, os.path.join(out_dir, "seg_videos"))
             seg.status = "completed"
 

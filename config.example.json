@@ -4,9 +4,22 @@
   "comfy_view_timeout_seconds": 60,
   "comfy_view_retries": 3,
   "comfy_recovery": {
+    "enabled": true,
+    "restart_service_url": "http://host.docker.internal:8787/restart",
+    "restart_command": "C:\\Users\\SheyMo\\AppData\\Local\\Programs\\ComfyUI\\ComfyUI.exe",
+    "max_restarts_per_job": 2,
+    "healthcheck_timeout_seconds": 120,
+    "healthcheck_interval_seconds": 2,
     "job_timeout_seconds": 2400,
     "history_retry_attempts": 60,
-    "history_retry_delay_seconds": 3
+    "history_retry_delay_seconds": 3,
+    "slowdown_detection": {
+      "enabled": true,
+      "threshold_multiplier": 3.0,
+      "absolute_step_seconds": 120.0,
+      "grace_period_seconds": 120,
+      "min_steps_before_detection": 3
+    }
   },
   "prompt_enhancer": {
     "enabled": true,

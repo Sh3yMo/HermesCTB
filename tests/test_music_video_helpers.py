@@ -6,12 +6,84 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music_video_pipeline import (  # noqa: E402
     ACE_STEP_LANGS,
+    build_aligned_timeline,
     build_segment_timeline,
     chunk_list,
     clamp_song_duration,
     parse_segment_plan,
     to_ace_language,
 )
+
+
+def _al(label, lyrics, start, end, is_vocal=True, reuse_of=None):
+    return {"label": label, "lyrics": lyrics, "start": start, "end": end,
+            "is_vocal": is_vocal, "reuse_of": reuse_of}
+
+
+def test_aligned_basic_keeps_real_boundaries():
+    a = [_al("Verse 1", "x", 0.0, 12.0), _al("Chorus", "y", 12.0, 20.0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert [(r["start_time"], r["end_time"]) for r in rows] == [(0.0, 12.0), (12.0, 20.0)]
+    assert [r["label"] for r in rows] == ["Verse 1", "Chorus"]
+    assert all(r["is_vocal"] for r in rows)
+
+
+def test_aligned_splits_over_cap_within_span():
+    a = [_al("Long", "L", 0.0, 70.0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 3  # ceil(70/30)
+    assert rows[0]["start_time"] == 0.0 and rows[-1]["end_time"] == 70.0
+    assert rows[0]["lyrics"] == "L" and rows[1]["lyrics"] == "" and rows[2]["lyrics"] == ""
+    for x, y in zip(rows, rows[1:]):
+        assert y["start_time"] == x["end_time"]
+
+
+def test_aligned_merges_tiny_section_into_previous():
+    a = [_al("Verse", "v", 0.0, 12.0), _al("Stab", "", 12.0, 13.0, is_vocal=False)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 1
+    assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 13.0
+
+
+def test_aligned_carries_reuse_of_first_row_only():
+    a = [_al("Chorus", "c", 0.0, 12.0),
+         _al("Chorus2", "c", 40.0, 80.0, reuse_of=0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    reuse_rows = [r for r in rows if r.get("reuse_of") == 0]
+    assert len(reuse_rows) == 1  # only first sub-row of the repeated section
+    assert reuse_rows[0]["start_time"] == 40.0
+
+
+def test_aligned_empty_returns_empty():
+    assert build_aligned_timeline([], 8.0, 30.0) == []
+
+
+def test_aligned_zero_duration_first_section_absorbed():
+    """RC: an instrumental [Intro] with 0 duration (WhisperX gave it no time)
+    has no predecessor to merge into. It must be absorbed INTO the next section
+    so no 0-duration row reaches _extract_audio_clip (→ empty WAV → LTX crash)."""
+    a = [
+        _al("Intro", "", 0.0, 0.0, is_vocal=False),
+        _al("Verse 1", "v", 0.0, 12.0),
+        _al("Chorus", "c", 12.0, 24.0),
+    ]
+    rows = build_aligned_timeline(a, min_seg=4.0, max_seg=20.0)
+    assert rows, "expected non-empty timeline"
+    for r in rows:
+        assert (r["end_time"] - r["start_time"]) >= 0.05, f"degenerate row: {r}"
+    # the intro's time span is folded into the first kept row
+    assert rows[0]["start_time"] == 0.0
+
+
+def test_aligned_tiny_first_section_absorbed_forward():
+    """A short-but-nonzero leading section also merges forward (no predecessor)."""
+    a = [
+        _al("Intro", "", 0.0, 0.4, is_vocal=False),
+        _al("Verse 1", "v", 0.4, 12.0),
+    ]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 1
+    assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 12.0
 
 CAP = 30.0
 MIN = 8.0
