@@ -24,8 +24,9 @@ def test_vocal_role_tags_mixed():
     result = enh._build_vocal_role_tags(lyrics)
     assert "male vocals in verse" in result
     assert "female vocals in chorus" in result
-    assert "duet vocals in bridge" in result
-    assert "alternating male and female lead vocals" in result
+    assert "harmonizing simultaneously in bridge" in result
+    assert "both voices layered together in bridge" in result
+    assert "male and female vocal harmony" in result
 
 
 def test_vocal_role_tags_no_gender():
@@ -82,8 +83,8 @@ def test_inject_prepends_vocal_roles():
     tags = result["94"]["inputs"]["tags"]
     assert tags.startswith("male vocals in verse")
     assert "female vocals in chorus" in tags
-    assert "duet vocals in bridge" in tags
-    assert "alternating male and female lead vocals" in tags
+    assert "harmonizing simultaneously in bridge" in tags
+    assert "male and female vocal harmony" in tags
     assert "pop" in tags
 
 
