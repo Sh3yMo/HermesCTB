@@ -515,13 +515,13 @@ class AudioEnhancer:
     def _build_vocal_prompt(self, idea: str, settings_str: str, settings: AudioSettings) -> str:
         if settings.voice == "any":
             voice_rule = (
-                "- Vocal arrangement: decide creatively — mix male/female/duet across sections or go solo.\n"
-                "  Use compound tags: [Verse - male], [Chorus - female], [Bridge - duet].\n"
-                "  [Bridge - duet] means BOTH voices singing simultaneously in harmony — NOT alternating.\n"
+                "- Vocal arrangement: decide creatively — mix male/female/duet/choir across sections or go solo.\n"
+                "  Use compound tags: [Verse - male], [Chorus - female].\n"
+                "  For sections with BOTH voices SIMULTANEOUSLY (harmonized together) use: [Bridge - choir].\n"
+                "  For sections where voices alternate (call-and-response) use: [Bridge - duet].\n"
                 "  Vary textures: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered].\n"
-                "  Caption must describe section-specific vocal roles, e.g.:\n"
-                "  'male vocals in verse, female vocals in chorus, male and female voices harmonizing\n"
-                "   simultaneously in bridge, both voices layered together, vocal harmony'.\n"
+                "  Caption must describe section-specific vocal roles concisely, e.g.:\n"
+                "  'male vocals in verse, female vocals in chorus, choir in bridge'.\n"
                 "  Never just 'male and female vocals' — always specify which section each voice sings."
             )
         elif settings.voice == "male":
@@ -926,24 +926,20 @@ class AudioEnhancer:
             if len(parts) >= 2:
                 section = parts[0].split()[0]  # "verse 1" → "verse"
                 for part in parts[1:]:
-                    if part in ('male', 'female', 'duet'):
+                    if part in ('male', 'female', 'duet', 'choir'):
                         role_map.setdefault(section, part)
                         break
         if not role_map:
             return ""
         desc_parts = []
-        has_duet = False
         for section, gender in role_map.items():
-            if gender == "duet":
-                desc_parts.append(
-                    f"male and female voices harmonizing simultaneously in {section}, "
-                    f"both voices layered together in {section}, vocal harmony in {section}"
-                )
-                has_duet = True
+            if gender == "choir":
+                desc_parts.append(f"choir in {section}")
+            elif gender == "duet":
+                desc_parts.append(f"alternating male and female vocals in {section}")
             else:
                 desc_parts.append(f"{gender} vocals in {section}")
-        suffix = ", alternating male and female lead vocals" if not has_duet else ", male and female vocal harmony, layered dual vocals"
-        return ", ".join(desc_parts) + suffix
+        return ", ".join(desc_parts)
 
     def inject_audio_settings(self, workflow: Dict, settings: AudioSettings) -> Dict:
         """
