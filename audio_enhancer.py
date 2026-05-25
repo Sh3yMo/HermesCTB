@@ -518,10 +518,10 @@ class AudioEnhancer:
                 "- Vocal arrangement: decide creatively — mix male/female/duet across sections or go solo.\n"
                 "  Use compound tags: [Verse - male], [Chorus - female], [Bridge - duet].\n"
                 "  Vary textures: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered].\n"
-                "  Caption must describe section-specific vocal roles, e.g.:\n"
-                "  'male vocals in verse, female vocals in chorus, vocal duet in bridge,\n"
-                "   alternating male and female lead vocals'.\n"
-                "  Never just 'male and female vocals' — always specify which section each voice sings."
+                "  Caption MUST describe ONLY genre, era, instruments, timbre, production, mood —\n"
+                "  do NOT mention voice gender, vocal roles, or which voice sings which section.\n"
+                "  Voice-role info is auto-injected from your section tags; including it in caption\n"
+                "  causes duplicate phrasing that confuses the audio encoder."
             )
         elif settings.voice == "male":
             voice_rule = (
@@ -553,7 +553,7 @@ class AudioEnhancer:
             f"- Caption: richly describe the sound — include:\n"
             f"  • genre and era (e.g. '90s grunge', '80s synth-pop', 'modern trap', 'contemporary R&B')\n"
             f"  • instruments\n"
-            f"  • vocal characteristics (female vocal / male vocal / breathy / powerful / falsetto / raspy / choir)\n"
+            f"  • vocal texture (breathy / powerful / falsetto / raspy / choir) — NOT gender (auto-injected)\n"
             f"  • timbre (warm / bright / crisp / punchy / lush / raw)\n"
             f"  • production style (lo-fi / studio-polished / bedroom pop / live recording)\n"
             f"  • mood\n"

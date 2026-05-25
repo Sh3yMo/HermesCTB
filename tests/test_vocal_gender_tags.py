@@ -170,13 +170,14 @@ def test_inject_partial_encoder_config():
 
 # ─── LLM prompt wording ──────────────────────────────────────────────────────
 
-def test_build_vocal_prompt_any_section_specific():
-    """voice='any' voice_rule must demand section-specific description in caption."""
+def test_build_vocal_prompt_any_forbids_voice_in_caption():
+    """voice='any' voice_rule must FORBID voice gender in caption (auto-injected)."""
     enh = _make_enhancer()
     settings = AudioSettings()
     settings.voice = "any"
     prompt = enh._build_vocal_prompt("summer pop song", "genre: pop", settings)
-    # Must instruct the LLM to use section-specific vocal role descriptions
-    assert "section" in prompt.lower() or ("in verse" in prompt.lower() and "in chorus" in prompt.lower())
-    # Must explicitly forbid the generic phrasing
-    assert "never just" in prompt.lower() or "always specify" in prompt.lower()
+    # LLM still uses compound section tags
+    assert "[verse - male]" in prompt.lower() or "[chorus - female]" in prompt.lower()
+    # Caption rule must explicitly exclude voice/gender content
+    lower = prompt.lower()
+    assert "do not mention voice gender" in lower or "auto-injected" in lower
