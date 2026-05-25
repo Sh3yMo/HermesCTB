@@ -518,7 +518,10 @@ class AudioEnhancer:
                 "- Vocal arrangement: decide creatively — mix male/female/duet across sections or go solo.\n"
                 "  Use compound tags: [Verse - male], [Chorus - female], [Bridge - duet].\n"
                 "  Vary textures: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered].\n"
-                "  Caption must reflect the actual vocal mix (e.g. 'male and female vocals, duet chorus')."
+                "  Caption must describe section-specific vocal roles, e.g.:\n"
+                "  'male vocals in verse, female vocals in chorus, vocal duet in bridge,\n"
+                "   alternating male and female lead vocals'.\n"
+                "  Never just 'male and female vocals' — always specify which section each voice sings."
             )
         elif settings.voice == "male":
             voice_rule = (
@@ -911,6 +914,25 @@ class AudioEnhancer:
 
     # ─── Workflow Injection ──────────────────────────────────
 
+    def _build_vocal_role_tags(self, assembled_lyrics: str) -> str:
+        """Scan lyrics for gender-tagged sections; return explicit role description for the tags field."""
+        import re
+        pattern = re.compile(r'\[([^\]]+)\]')
+        role_map: dict = {}
+        for match in pattern.finditer(assembled_lyrics):
+            tag = match.group(1).lower()
+            parts = [p.strip() for p in tag.split('-')]
+            if len(parts) >= 2:
+                section = parts[0].split()[0]  # "verse 1" → "verse"
+                for part in parts[1:]:
+                    if part in ('male', 'female', 'duet'):
+                        role_map.setdefault(section, part)
+                        break
+        if not role_map:
+            return ""
+        desc_parts = [f"{gender} vocals in {section}" for section, gender in role_map.items()]
+        return ", ".join(desc_parts) + ", alternating male and female lead vocals"
+
     def inject_audio_settings(self, workflow: Dict, settings: AudioSettings) -> Dict:
         """
         Inject audio settings into ACE-Step 1.5 workflow JSON.
@@ -927,8 +949,12 @@ class AudioEnhancer:
                 effective_tags = f"{settings.genre}, {caption_rest}" if caption_rest else settings.genre
             else:
                 effective_tags = settings.caption or ""
+            assembled = settings.assemble_lyrics()
+            vocal_role_desc = self._build_vocal_role_tags(assembled)
+            if vocal_role_desc:
+                effective_tags = f"{vocal_role_desc}, {effective_tags}"
             node_94["tags"] = effective_tags
-            node_94["lyrics"] = settings.assemble_lyrics()
+            node_94["lyrics"] = assembled
 
             if settings.bpm:
                 node_94["bpm"] = settings.bpm
