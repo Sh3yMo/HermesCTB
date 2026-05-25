@@ -22,12 +22,16 @@ def test_vocal_role_tags_mixed():
     enh = _make_enhancer()
     lyrics = "[Verse - male]\nline\n\n[Chorus - female]\nline\n\n[Bridge - duet]\nline"
     result = enh._build_vocal_role_tags(lyrics)
-    assert "male vocals throughout verse" in result
-    assert "female vocals throughout chorus" in result
-    assert "duet vocals throughout bridge" in result
-    assert "consistent voice within each section" in result
-    # Must NOT contain the musically-loaded "alternating" wording
-    assert "alternating" not in result
+    assert result == "male verse, female chorus, duet bridge"
+
+
+def test_vocal_role_tags_swapped():
+    """Generizität: reverse gender mapping (female verse, male chorus) must also work."""
+    enh = _make_enhancer()
+    lyrics = "[Verse - female]\nline\n\n[Chorus - male]\nline"
+    result = enh._build_vocal_role_tags(lyrics)
+    assert "female verse" in result
+    assert "male chorus" in result
 
 
 def test_vocal_role_tags_no_gender():
@@ -50,7 +54,7 @@ def test_vocal_role_tags_deduplicates_section():
     enh = _make_enhancer()
     lyrics = "[Verse 1 - male]\nline\n\n[Verse 2 - male]\nline\n\n[Chorus - female]\nline"
     result = enh._build_vocal_role_tags(lyrics)
-    assert result.count("male vocals throughout verse") == 1
+    assert result.count("male verse") == 1
 
 
 # ─── inject_audio_settings ───────────────────────────────────────────────────
@@ -85,11 +89,13 @@ def test_inject_prepends_vocal_roles():
     wf = _workflow_with_node_94()
     result = enh.inject_audio_settings(wf, settings)
     tags = result["94"]["inputs"]["tags"]
-    assert tags.startswith("male vocals throughout verse")
-    assert "female vocals throughout chorus" in tags
-    assert "duet vocals throughout bridge" in tags
-    assert "consistent voice within each section" in tags
+    assert tags.startswith("male verse")
+    assert "female chorus" in tags
+    assert "duet bridge" in tags
     assert "pop" in tags
+    # Verbose phrasing must be gone
+    assert "throughout" not in tags
+    assert "consistent voice" not in tags
 
 
 def test_inject_single_voice_no_prepend():
