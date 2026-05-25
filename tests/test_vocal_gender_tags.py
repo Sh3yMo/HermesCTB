@@ -20,18 +20,12 @@ def _make_enhancer():
 
 def test_vocal_role_tags_mixed():
     enh = _make_enhancer()
-    lyrics = "[Verse - male]\nline\n\n[Chorus - female]\nline\n\n[Bridge - choir]\nline"
+    lyrics = "[Verse - male]\nline\n\n[Chorus - female]\nline\n\n[Bridge - duet]\nline"
     result = enh._build_vocal_role_tags(lyrics)
     assert "male vocals in verse" in result
     assert "female vocals in chorus" in result
-    assert "choir in bridge" in result
-
-
-def test_vocal_role_tags_duet_is_alternating():
-    enh = _make_enhancer()
-    lyrics = "[Verse - male]\nline\n\n[Bridge - duet]\nline"
-    result = enh._build_vocal_role_tags(lyrics)
-    assert "alternating male and female vocals in bridge" in result
+    assert "duet vocals in bridge" in result
+    assert "alternating male and female lead vocals" in result
 
 
 def test_vocal_role_tags_no_gender():
@@ -61,8 +55,11 @@ def test_vocal_role_tags_deduplicates_section():
 
 def _workflow_with_node_94():
     return {
+        "3": {"inputs": {"cfg": 3, "steps": 100, "sampler_name": "dpmpp_sde"}},
         "94": {"inputs": {"tags": "", "lyrics": "", "bpm": 120, "keyscale": "C major",
-                          "timesignature": "4", "language": "en", "duration": 60}},
+                          "timesignature": "4", "language": "en", "duration": 60,
+                          "cfg_scale": 4, "temperature": 0.85, "top_p": 0.9,
+                          "top_k": 0, "min_p": 0}},
         "98": {"inputs": {"seconds": 60}},
     }
 
@@ -77,18 +74,19 @@ def test_inject_prepends_vocal_roles():
     settings.key = "C major"
     settings.language = "en"
     settings.duration = 60
-    settings.structure = ["Verse 1 - male", "Chorus - female", "Bridge - choir"]
+    settings.structure = ["Verse 1 - male", "Chorus - female", "Bridge - duet"]
     settings.lyrics = {
         "Verse 1 - male": "line",
         "Chorus - female": "LINE",
-        "Bridge - choir": "both",
+        "Bridge - duet": "both",
     }
     wf = _workflow_with_node_94()
     result = enh.inject_audio_settings(wf, settings)
     tags = result["94"]["inputs"]["tags"]
     assert tags.startswith("male vocals in verse")
     assert "female vocals in chorus" in tags
-    assert "choir in bridge" in tags
+    assert "duet vocals in bridge" in tags
+    assert "alternating male and female lead vocals" in tags
     assert "pop" in tags
 
 
@@ -110,6 +108,64 @@ def test_inject_single_voice_no_prepend():
     tags = result["94"]["inputs"]["tags"]
     assert not tags.startswith("male vocals in")
     assert "rock" in tags
+
+
+# ─── Fix 14: Encoder parameter injection ─────────────────────────────────────
+
+def _make_enhancer_with_encoder_cfg(encoder_cfg):
+    config = {
+        "openrouter_api_key": "test",
+        "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "ace_step_encoder": encoder_cfg,
+    }
+    return AudioEnhancer(config)
+
+
+def _minimal_settings():
+    s = AudioSettings()
+    s.genre = "pop"
+    s.caption = "pop"
+    s.voice = "any"
+    s.duration = 60
+    s.structure = ["Verse 1 - male"]
+    s.lyrics = {"Verse 1 - male": "line"}
+    return s
+
+
+def test_inject_sets_encoder_params_from_config():
+    enh = _make_enhancer_with_encoder_cfg({
+        "cfg_scale": 6, "temperature": 0.7, "top_p": 0.85,
+        "top_k": 0, "min_p": 0, "ksampler_cfg": 5,
+    })
+    wf = _workflow_with_node_94()
+    result = enh.inject_audio_settings(wf, _minimal_settings())
+    assert result["94"]["inputs"]["cfg_scale"] == 6
+    assert result["94"]["inputs"]["temperature"] == 0.7
+    assert result["94"]["inputs"]["top_p"] == 0.85
+    assert result["94"]["inputs"]["top_k"] == 0
+    assert result["94"]["inputs"]["min_p"] == 0
+    assert result["3"]["inputs"]["cfg"] == 5
+
+
+def test_inject_uses_workflow_default_when_config_missing():
+    enh = _make_enhancer()  # no ace_step_encoder section
+    wf = _workflow_with_node_94()
+    result = enh.inject_audio_settings(wf, _minimal_settings())
+    # Workflow defaults must remain
+    assert result["94"]["inputs"]["cfg_scale"] == 4
+    assert result["94"]["inputs"]["temperature"] == 0.85
+    assert result["94"]["inputs"]["top_p"] == 0.9
+    assert result["3"]["inputs"]["cfg"] == 3
+
+
+def test_inject_partial_encoder_config():
+    """Only some keys set in config — others keep workflow default."""
+    enh = _make_enhancer_with_encoder_cfg({"cfg_scale": 7})
+    wf = _workflow_with_node_94()
+    result = enh.inject_audio_settings(wf, _minimal_settings())
+    assert result["94"]["inputs"]["cfg_scale"] == 7
+    assert result["94"]["inputs"]["temperature"] == 0.85  # untouched
+    assert result["3"]["inputs"]["cfg"] == 3  # untouched
 
 
 # ─── LLM prompt wording ──────────────────────────────────────────────────────
