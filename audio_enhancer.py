@@ -930,8 +930,8 @@ class AudioEnhancer:
                         break
         if not role_map:
             return ""
-        desc_parts = [f"{gender} vocals in {section}" for section, gender in role_map.items()]
-        return ", ".join(desc_parts) + ", alternating male and female lead vocals"
+        desc_parts = [f"{gender} vocals throughout {section}" for section, gender in role_map.items()]
+        return ", ".join(desc_parts) + ", consistent voice within each section"
 
     def inject_audio_settings(self, workflow: Dict, settings: AudioSettings) -> Dict:
         """
