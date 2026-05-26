@@ -14,6 +14,7 @@ from audio_gender_detect import (  # noqa: E402
     compare_with_lyrics_tags,
     detect_section_genders,
     refine_section_boundaries,
+    split_sections_at_mid_swaps,
 )
 
 
@@ -192,6 +193,111 @@ def test_refine_uses_alt_time_keys():
     refined = refine_section_boundaries(sections, segments)
     assert refined[0]["end_time"] == 10.0
     assert refined[1]["start_time"] == 10.0
+
+
+# ─── Fix 16: voice_end tail-bias ─────────────────────────────────────────────
+
+def test_refine_voice_end_adds_tail_bias():
+    """voice_end transition gets +0.5s tail offset (sustain/reverb compensation)."""
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.3},
+        {"label": "Interlude", "start": 10.3, "end": 20.0},
+    ]
+    # male ends at 10.0, then silence — voice_end transition @ 10.0
+    segments = [("male", 0.0, 10.0), ("noEnergy", 10.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    # whisperx 10.3, transition 10.0, shift 0.3 (close) → adopt + 0.5 tail = 10.5
+    assert abs(refined[0]["end"] - 10.5) < 0.01
+    assert abs(refined[1]["start"] - 10.5) < 0.01
+
+
+def test_refine_voice_start_no_bias():
+    """voice_start transition does NOT add tail offset (sharp onset)."""
+    sections = [
+        {"label": "Intro", "start": 0.0, "end": 5.3},
+        {"label": "V1", "start": 5.3, "end": 20.0},
+    ]
+    segments = [("noEnergy", 0.0, 5.0), ("male", 5.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    # voice_start @ 5.0, no offset → 5.0 exact
+    assert abs(refined[0]["end"] - 5.0) < 0.01
+
+
+def test_refine_gender_swap_no_bias():
+    """gender_swap transition is a sharp onset — no tail offset."""
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.3},
+        {"label": "C", "start": 10.3, "end": 20.0},
+    ]
+    segments = [("male", 0.0, 10.0), ("female", 10.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    assert abs(refined[0]["end"] - 10.0) < 0.01  # no +0.5
+
+
+# ─── Fix 17: split_sections_at_mid_swaps ─────────────────────────────────────
+
+def test_split_at_mid_swap_creates_two_subsections():
+    sections = [{"label": "Verse 2", "start": 0.0, "end": 16.0, "is_vocal": True,
+                 "lyrics": "line1\nline2"}]
+    segments = [("male", 0.0, 8.0), ("female", 8.0, 16.0)]
+    out = split_sections_at_mid_swaps(sections, segments, min_subsection_s=4.0)
+    assert len(out) == 2
+    assert out[0]["label"] == "Verse 2 - male"
+    assert out[1]["label"] == "Verse 2 - female"
+    assert out[0]["end"] == 8.0
+    assert out[1]["start"] == 8.0
+    assert out[1]["end"] == 16.0
+
+
+def test_split_skips_swap_if_subsection_too_short():
+    """Swap @ 2s but section starts at 0 → first half only 2s < min 4s → no split."""
+    sections = [{"label": "V1", "start": 0.0, "end": 16.0}]
+    segments = [("male", 0.0, 2.0), ("female", 2.0, 16.0)]
+    out = split_sections_at_mid_swaps(sections, segments, min_subsection_s=4.0)
+    assert len(out) == 1
+    assert out[0]["label"] == "V1"
+
+
+def test_split_preserves_lyrics_on_first_subsection():
+    sections = [{"label": "V2", "start": 0.0, "end": 16.0,
+                 "lyrics": "verse2 text", "reuse_of": "V1"}]
+    segments = [("male", 0.0, 8.0), ("female", 8.0, 16.0)]
+    out = split_sections_at_mid_swaps(sections, segments)
+    assert out[0]["lyrics"] == "verse2 text"
+    assert out[1]["lyrics"] == ""
+    assert out[0]["reuse_of"] == "V1"
+    assert out[1]["reuse_of"] is None
+
+
+def test_split_no_swap_returns_unchanged():
+    sections = [{"label": "V1", "start": 0.0, "end": 16.0}]
+    segments = [("male", 0.0, 16.0)]
+    out = split_sections_at_mid_swaps(sections, segments)
+    assert len(out) == 1
+    assert out[0]["label"] == "V1"
+
+
+def test_split_strips_existing_gender_suffix():
+    """Original label had '- male' but audio swapped — re-tag based on detected."""
+    sections = [{"label": "Verse 2 - male", "start": 0.0, "end": 16.0}]
+    segments = [("male", 0.0, 8.0), ("female", 8.0, 16.0)]
+    out = split_sections_at_mid_swaps(sections, segments)
+    assert out[0]["label"] == "Verse 2 - male"
+    assert out[1]["label"] == "Verse 2 - female"  # not "Verse 2 - male - female"
+
+
+def test_split_empty_inputs_safe():
+    assert split_sections_at_mid_swaps([], [("male", 0, 10)]) == []
+    assert split_sections_at_mid_swaps([{"label": "A", "start": 0, "end": 5}], []) == \
+           [{"label": "A", "start": 0, "end": 5}]
+
+
+def test_split_section_below_min_double_not_processed():
+    """Section length 7s < 2 * min(4) = 8s → not even considered for splitting."""
+    sections = [{"label": "V", "start": 0.0, "end": 7.0}]
+    segments = [("male", 0.0, 3.5), ("female", 3.5, 7.0)]
+    out = split_sections_at_mid_swaps(sections, segments, min_subsection_s=4.0)
+    assert len(out) == 1
 
 
 # ─── compare_with_lyrics_tags ────────────────────────────────────────────────
