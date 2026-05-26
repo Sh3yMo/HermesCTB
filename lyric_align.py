@@ -11,6 +11,10 @@ never raise into the pipeline.
 """
 from __future__ import annotations
 
+# Fix 15 windows bootstrap: register FFmpeg shared-DLL dir before demucs
+# subprocess invocation (demucs depends on torchaudio→torchcodec→avcodec).
+import _ffmpeg_init  # noqa: F401
+
 import difflib
 import os
 import re

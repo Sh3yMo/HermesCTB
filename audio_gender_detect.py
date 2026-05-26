@@ -10,6 +10,10 @@ disagree, because the audio is what the viewer actually hears.
 """
 from __future__ import annotations
 
+# Fix 15 windows bootstrap: register FFmpeg shared-DLL dir before any
+# torchcodec/torchaudio/TF imports (inaSpeechSegmenter chains those).
+import _ffmpeg_init  # noqa: F401
+
 from typing import Dict, List, Optional, Tuple
 
 # Module-level cache: Segmenter init is expensive (TF model load), do it once.
