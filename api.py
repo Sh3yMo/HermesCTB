@@ -693,6 +693,7 @@ async def _run_create_music_video(
                         _segment_audio,
                         _classify_section,
                         refine_section_boundaries,
+                        split_sections_at_mid_swaps,
                     )
                     from lyric_align import _demucs_vocals
                     with _tempfile.TemporaryDirectory(prefix="gender_detect_") as _gd_work:
@@ -705,7 +706,14 @@ async def _run_create_music_video(
                                 for _k in ("start", "end", "start_time", "end_time"):
                                     if _k in _new:
                                         aligned[_i][_k] = _new[_k]
-                            # Phase 2: classify gender per refined section
+                            # Fix 17: Split sections that contain a mid-section
+                            # voice swap into two sub-sections at the swap point.
+                            _pre_split_count = len(aligned)
+                            _split = split_sections_at_mid_swaps(aligned, _segments)
+                            mid_splits = len(_split) - _pre_split_count
+                            if mid_splits > 0:
+                                aligned[:] = _split
+                            # Phase 2: classify gender per (refined+split) section
                             detected = {}
                             for _sec in aligned:
                                 _label = _sec.get("label", "")
@@ -727,7 +735,8 @@ async def _run_create_music_video(
                                     corrections += 1
                             print(f"[create-mv] gender detection: {detected}; "
                                   f"gender corrections: {corrections}; "
-                                  f"boundary refinements applied")
+                                  f"mid-section splits: {mid_splits}; "
+                                  f"boundary refinements applied (voice_end tail +0.5s)")
                         else:
                             print("[create-mv] gender detection: demucs unavailable → skip")
                 except Exception as _e:
