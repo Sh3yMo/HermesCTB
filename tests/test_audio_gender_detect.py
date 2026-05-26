@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from audio_gender_detect import (  # noqa: E402
     _classify_section,
+    _find_voice_activity_transitions,
     compare_with_lyrics_tags,
     detect_section_genders,
+    refine_section_boundaries,
 )
 
 
@@ -108,6 +110,88 @@ def test_detect_section_genders_skips_invalid():
     with patch("audio_gender_detect._segment_audio", return_value=segs):
         result = detect_section_genders("/fake/vocals.wav", sections)
     assert result == {"Y": "male"}
+
+
+# ─── refine_section_boundaries (Fix 15c) ─────────────────────────────────────
+
+def test_transitions_detected_voice_start_end_swap():
+    segs = [
+        ("noEnergy", 0.0, 2.0),
+        ("male", 2.0, 10.0),
+        ("female", 10.0, 18.0),
+        ("noEnergy", 18.0, 20.0),
+    ]
+    trans = _find_voice_activity_transitions(segs)
+    # Expected: voice_start @2.0, gender_swap @10.0, voice_end @18.0
+    kinds = [t[1] for t in trans]
+    times = [t[0] for t in trans]
+    assert "voice_start" in kinds
+    assert "gender_swap" in kinds
+    assert "voice_end" in kinds
+    assert 2.0 in times and 10.0 in times and 18.0 in times
+
+
+def test_refine_snaps_to_close_transition():
+    """whisperx boundary at 10.3s; inaSpeech transition at 10.0s (shift 0.3s < 1.0) → snap to 10.0"""
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.3},
+        {"label": "C", "start": 10.3, "end": 20.0},
+    ]
+    segments = [("male", 0.0, 10.0), ("female", 10.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    assert refined[0]["end"] == 10.0
+    assert refined[1]["start"] == 10.0
+
+
+def test_refine_averages_when_moderate_shift():
+    """whisperx 10.0s, inaSpeech 11.5s (shift 1.5s, between close_threshold and max_shift) → avg 10.75"""
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.0},
+        {"label": "C", "start": 10.0, "end": 20.0},
+    ]
+    segments = [("male", 0.0, 11.5), ("female", 11.5, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    assert abs(refined[0]["end"] - 10.75) < 0.01
+    assert abs(refined[1]["start"] - 10.75) < 0.01
+
+
+def test_refine_keeps_whisperx_when_no_transition_in_window():
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.0},
+        {"label": "C", "start": 10.0, "end": 20.0},
+    ]
+    # transition far away (at 5s and 15s, but whisperx boundary at 10s, max_shift=2)
+    segments = [("male", 0.0, 5.0), ("noEnergy", 5.0, 15.0), ("female", 15.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments, max_shift_s=2.0)
+    assert refined[0]["end"] == 10.0  # unchanged
+    assert refined[1]["start"] == 10.0
+
+
+def test_refine_keeps_contiguous_no_gap():
+    sections = [
+        {"label": "V1", "start": 0.0, "end": 10.5},
+        {"label": "C", "start": 10.5, "end": 20.0},
+    ]
+    segments = [("male", 0.0, 10.0), ("female", 10.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    assert refined[0]["end"] == refined[1]["start"]
+
+
+def test_refine_empty_inputs_safe():
+    assert refine_section_boundaries([], [("male", 0, 10)]) == []
+    assert refine_section_boundaries([{"label": "A", "start": 0, "end": 5}], []) == \
+           [{"label": "A", "start": 0, "end": 5}]
+
+
+def test_refine_uses_alt_time_keys():
+    sections = [
+        {"label": "V1", "start_time": 0.0, "end_time": 10.3},
+        {"label": "C", "start_time": 10.3, "end_time": 20.0},
+    ]
+    segments = [("male", 0.0, 10.0), ("female", 10.0, 20.0)]
+    refined = refine_section_boundaries(sections, segments)
+    assert refined[0]["end_time"] == 10.0
+    assert refined[1]["start_time"] == 10.0
 
 
 # ─── compare_with_lyrics_tags ────────────────────────────────────────────────

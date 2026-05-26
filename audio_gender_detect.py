@@ -109,6 +109,97 @@ def detect_section_genders(
     return result
 
 
+def _find_voice_activity_transitions(
+    segments: List[Tuple[str, float, float]],
+) -> List[Tuple[float, str]]:
+    """Return list of (time, kind) for every voice-state transition in segments.
+
+    Transition kinds:
+      'voice_start' : noEnergy/music/noise -> male/female
+      'voice_end'   : male/female -> noEnergy/music/noise
+      'gender_swap' : male <-> female (vocal -> vocal but different gender)
+    """
+    transitions: List[Tuple[float, str]] = []
+    voice_set = {"male", "female"}
+    for i in range(len(segments) - 1):
+        cur_label, _, cur_end = segments[i]
+        nxt_label, _, _ = segments[i + 1]
+        cur_voice = cur_label in voice_set
+        nxt_voice = nxt_label in voice_set
+        if not cur_voice and nxt_voice:
+            transitions.append((cur_end, "voice_start"))
+        elif cur_voice and not nxt_voice:
+            transitions.append((cur_end, "voice_end"))
+        elif cur_voice and nxt_voice and cur_label != nxt_label:
+            transitions.append((cur_end, "gender_swap"))
+    return transitions
+
+
+def refine_section_boundaries(
+    sections: List[Dict],
+    segments: List[Tuple[str, float, float]],
+    max_shift_s: float = 2.0,
+    close_threshold_s: float = 1.0,
+) -> List[Dict]:
+    """Refine section start/end times using inaSpeech voice-activity transitions.
+
+    For each pair of adjacent sections, looks for a transition (voice_start /
+    voice_end / gender_swap) in `segments` within ±max_shift_s of the
+    whisperx-derived boundary:
+      - shift <= close_threshold_s : adopt the inaSpeech boundary (more precise)
+      - close < shift <= max_shift_s : average the two
+      - no transition in window : keep whisperx boundary
+
+    Returns a NEW list with adjusted start/end times. Original list untouched.
+    Each section's start aligns with the previous section's end (no gap, no
+    overlap) so downstream Segment-builders remain consistent.
+    """
+    if not sections or not segments:
+        return [dict(s) for s in sections]
+
+    transitions = _find_voice_activity_transitions(segments)
+    if not transitions:
+        return [dict(s) for s in sections]
+
+    refined = [dict(s) for s in sections]
+
+    for i in range(len(refined) - 1):
+        cur, nxt = refined[i], refined[i + 1]
+        # whisperx-boundary = cur.end == nxt.start (in aligned output)
+        wx_boundary = float(cur.get("end", cur.get("end_time", 0.0)))
+
+        # Pick nearest transition within window
+        best_shift = None
+        best_time = None
+        for t_time, _kind in transitions:
+            shift = abs(t_time - wx_boundary)
+            if shift > max_shift_s:
+                continue
+            if best_shift is None or shift < best_shift:
+                best_shift = shift
+                best_time = t_time
+
+        if best_time is None:
+            continue  # keep whisperx
+
+        if best_shift <= close_threshold_s:
+            new_boundary = best_time
+        else:
+            new_boundary = (wx_boundary + best_time) / 2.0
+
+        # Apply — overwrite cur.end and nxt.start so they remain contiguous
+        if "end" in cur:
+            cur["end"] = new_boundary
+        if "end_time" in cur:
+            cur["end_time"] = new_boundary
+        if "start" in nxt:
+            nxt["start"] = new_boundary
+        if "start_time" in nxt:
+            nxt["start_time"] = new_boundary
+
+    return refined
+
+
 def compare_with_lyrics_tags(
     detected: Dict[str, str],
     lyrics_role_extractor,
