@@ -106,7 +106,9 @@ async def lifespan(app: FastAPI):
     # in a separate file because comfyui.py was OS-locked during the fix.
     import comfyui_patches
     comfyui_patches.apply_config(CONFIG)
-    AUDIO_ENHANCER = AudioEnhancer(CONFIG["prompt_enhancer"])
+    _audio_cfg = dict(CONFIG["prompt_enhancer"])
+    _audio_cfg["ace_step_encoder"] = CONFIG.get("ace_step_encoder", {})
+    AUDIO_ENHANCER = AudioEnhancer(_audio_cfg)
     # openrouter_api_key lives under prompt_enhancer, NOT top-level — passing the
     # full CONFIG leaves api_key="" and silently kills every MV LLM call.
     MV_PROMPTER = MusicVideoPrompter(CONFIG["prompt_enhancer"])
@@ -676,6 +678,41 @@ async def _run_create_music_video(
                 aligned = None
             print(f"[create-mv] lyric alignment: "
                   f"{'OK ' + str(len(aligned)) + ' sections' if aligned else 'unavailable → proportional fallback'}")
+
+            # Fix 15: Audio-based gender detection overrides LLM lyrics-tag gender
+            # when audio reality differs. Graceful fallback on any failure
+            # (demucs/inaSpeechSegmenter unavailable -> keep LLM tags).
+            if aligned:
+                try:
+                    import re as _re
+                    import tempfile as _tempfile
+                    from audio_gender_detect import detect_section_genders
+                    from lyric_align import _demucs_vocals
+                    with _tempfile.TemporaryDirectory(prefix="gender_detect_") as _gd_work:
+                        _vocals = await asyncio.to_thread(_demucs_vocals, audio_path, _gd_work)
+                        if _vocals:
+                            detected = await asyncio.to_thread(
+                                detect_section_genders, _vocals, aligned
+                            )
+                            corrections = 0
+                            for _sec in aligned:
+                                _g = detected.get(_sec.get("label", ""))
+                                if not _g or _g == "unknown":
+                                    continue
+                                _label = _sec.get("label", "")
+                                # Rewrite "[... - male/female/duet]" suffix if mismatched
+                                _new_label = _re.sub(
+                                    r' - (male|female|duet)\b', f' - {_g}', _label, count=1
+                                )
+                                if _new_label != _label:
+                                    _sec["label"] = _new_label
+                                    corrections += 1
+                            print(f"[create-mv] gender detection: {detected}; "
+                                  f"corrections applied: {corrections}")
+                        else:
+                            print("[create-mv] gender detection: demucs unavailable → skip")
+                except Exception as _e:
+                    print(f"[create-mv] gender detection failed (non-fatal): {_e!r}")
 
         # 2b. Creative segment plan (aligned timestamps if available).
         segments = await MV_PROMPTER.plan_segments(
