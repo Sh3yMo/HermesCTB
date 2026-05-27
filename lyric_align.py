@@ -58,11 +58,13 @@ def _known_tokens(sections: List[Dict[str, Any]]):
 
 
 def _demucs_vocals(audio_path: str, work: str) -> Optional[str]:
+    # Fix 18: use sys.executable so Windows (no `python3`) and venvs both work.
+    import sys
     try:
         subprocess.run(
-            ["python3", "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs",
+            [sys.executable, "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs",
              "-o", work, audio_path],
-            check=True, capture_output=True, text=True, timeout=900,
+            check=True, capture_output=True, timeout=900,
         )
         base = os.path.splitext(os.path.basename(audio_path))[0]
         voc = os.path.join(work, "htdemucs", base, "vocals.wav")
