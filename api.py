@@ -830,6 +830,36 @@ async def _run_create_music_video(
         )
         final_path = os.path.join(out_dir, f"music_video_{jid[:8]}.mp4")
         assemble_video(session, final_path)
+
+        # Fix 18 Component A: persist per-segment plan as JSON sidecar for
+        # post-run analysis tools (analyze_mv_run.py).
+        try:
+            import re as _re_a
+            def _portrait_role(label: str) -> str:
+                m = _re_a.search(r' - (male|female|duet)\b', (label or "").lower())
+                return m.group(1) if m else "story"
+            seg_records = []
+            for s in segments:
+                lbl = getattr(s, "label", "") or ""
+                seg_records.append({
+                    "index": int(getattr(s, "index", 0)),
+                    "start": float(getattr(s, "start_time", 0.0)),
+                    "end": float(getattr(s, "end_time", 0.0)),
+                    "section_label": lbl,
+                    "is_vocal": bool(getattr(s, "lyrics", "")),
+                    "portrait_role": _portrait_role(lbl),
+                    "video_path": getattr(s, "video_clip", "") or "",
+                    "prompt_snippet": (getattr(s, "prompt", "") or "")[:200],
+                    "reuse_of": getattr(s, "reuse_of", None),
+                    "status": getattr(s, "status", "completed"),
+                })
+            seg_json_path = os.path.join(out_dir, f"segments_{jid[:8]}.json")
+            with open(seg_json_path, "w", encoding="utf-8") as _f:
+                json.dump(seg_records, _f, ensure_ascii=False, indent=2)
+            print(f"[create-mv] segments plan written: {seg_json_path} ({len(seg_records)} segments)")
+        except Exception as _e:
+            print(f"[create-mv] segments JSON write failed (non-fatal): {_e!r}")
+
         _job_done(jid, final_path, lyrics_path)
     except Exception as e:
         _job_failed(jid, str(e))
