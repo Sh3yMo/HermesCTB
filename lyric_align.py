@@ -125,6 +125,41 @@ def _section_times_from_words(words, sections):
     return {si: (round(v[0], 2), round(v[1], 2)) for si, v in times.items()}
 
 
+def _proportional_fallback(
+    sections: List[Dict[str, Any]], audio_dur: float
+) -> Optional[List[Dict[str, Any]]]:
+    """Distribute audio_dur across sections without word alignment.
+
+    Vocal sections weighted by lyric length; instrumental sections get a small
+    fixed share. CRITICAL: preserves the gender-suffix labels from
+    parse_sections so portrait routing still works. Boundaries are coarse —
+    inaSpeech VAD (Fix 15c/16) refines them downstream.
+    """
+    if not sections or audio_dur <= 0:
+        return None
+    vocal_lens = [len(s["lyrics"]) for s in sections if s["is_vocal"] and s["lyrics"]]
+    avg_vocal = (sum(vocal_lens) / len(vocal_lens)) if vocal_lens else 40.0
+    weights: List[float] = []
+    for s in sections:
+        if s["is_vocal"]:
+            weights.append(float(max(1, len(s["lyrics"]))))
+        else:
+            weights.append(0.3 * avg_vocal)  # short instrumental beat
+    total_w = sum(weights) or 1.0
+    out: List[Dict[str, Any]] = []
+    cursor = 0.0
+    for s, w in zip(sections, weights):
+        dur = audio_dur * (w / total_w)
+        d = dict(s)
+        d["start"] = round(cursor, 2)
+        d["end"] = round(min(cursor + dur, audio_dur), 2)
+        cursor = d["end"]
+        out.append(d)
+    if out:
+        out[-1]["end"] = round(audio_dur, 2)  # absorb rounding drift
+    return out
+
+
 def align_sections(
     audio_path: str,
     lyrics_path: str,
@@ -148,11 +183,17 @@ def align_sections(
             target = voc or audio_path  # fall back to mix if demucs unavailable
             words = _whisperx_words(target, lang)
         if not words:
-            return None
+            # Fix 21: no word alignment (whisperx missing / failed). Don't lose
+            # gender routing — emit proportional sections that KEEP the
+            # gender-suffix labels. Downstream inaSpeech VAD (Fix 15c/16)
+            # refines the coarse boundaries.
+            print("[lyric_align] no whisperx words → proportional gender fallback")
+            return _proportional_fallback(sections, audio_dur)
 
         vtimes = _section_times_from_words(words, sections)
         if not vtimes:
-            return None
+            print("[lyric_align] no word-to-section matches → proportional gender fallback")
+            return _proportional_fallback(sections, audio_dur)
 
         # Order vocal anchors; sanity: monotonic-ish, within track.
         n = len(sections)
