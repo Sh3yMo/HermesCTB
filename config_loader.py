@@ -121,4 +121,10 @@ def load_config(config_path: str = "config.json") -> dict:
     if not enhancer.get("openrouter_api_key"):
         enhancer["openrouter_api_key"] = os.environ.get("OPENROUTER_API_KEY", "")
 
+    # Fix 23: same fallback for a top-level key, so the `sk-` secret can live in
+    # the OPENROUTER_API_KEY env var instead of config.json — that keeps the
+    # string Bitdefender quarantined out of the file entirely.
+    if not config.get("openrouter_api_key"):
+        config["openrouter_api_key"] = os.environ.get("OPENROUTER_API_KEY", "")
+
     return config

@@ -1,9 +1,12 @@
 """Unit tests for pure music-video planning helpers (no ComfyUI / network)."""
+import asyncio
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import httpx  # noqa: E402
+import music_video_pipeline as mvp  # noqa: E402
 from music_video_pipeline import (  # noqa: E402
     ACE_STEP_LANGS,
     Segment,
@@ -397,6 +400,116 @@ def test_partition_by_role_all_unannotated_single_bucket():
     segs = [_seg(0, "Verse 1"), _seg(1, "Chorus"), _seg(2, "Outro")]
     parts = partition_anchors_by_role(segs)
     assert parts == {None: [0, 1, 2]}
+
+
+# ---------------------------------------------------------------------------
+# Fix 23: LLM-failure hardening (portrait fallback + _call_openrouter retry)
+# ---------------------------------------------------------------------------
+
+def test_portrait_empty_llm_returns_lyrics_free_default():
+    """Fix 23: empty LLM response must NOT leak the raw-lyrics seed onto the
+    portrait — it must return the neutral studio default."""
+    prompter = mvp.MusicVideoPrompter({})
+
+    async def _empty(*a, **k):
+        return ""
+    prompter._call_openrouter = _empty
+    seed = "Rain on the midnight glass\nWatching the neon pass"  # raw lyric lines
+    out = asyncio.run(prompter.generate_character_portrait_prompt(seed, "synthwave"))
+    assert out == "front-facing studio portrait of a singer, neutral grey background"
+    assert "midnight glass" not in out
+
+
+def test_portrait_uses_llm_response_when_present():
+    prompter = mvp.MusicVideoPrompter({})
+
+    async def _resp(*a, **k):
+        return "a woman with red hair, plain studio portrait"
+    prompter._call_openrouter = _resp
+    out = asyncio.run(prompter.generate_character_portrait_prompt("lyrics", ""))
+    assert out == "a woman with red hair, plain studio portrait"
+
+
+class _FakeResp:
+    def __init__(self, status_code, content):
+        self.status_code = status_code
+        self._content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("err", request=None, response=self)
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+def _patch_httpx(monkeypatch, decide):
+    """Patch mvp.httpx.AsyncClient so post() outcome is decided by `decide(model)`."""
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return decide(json["model"])
+    monkeypatch.setattr(mvp.httpx, "AsyncClient", lambda *a, **k: _Client())
+
+
+def test_call_openrouter_retries_429_then_falls_back_to_next_model(monkeypatch):
+    calls = []
+
+    def decide(model):
+        calls.append(model)
+        if model == "primary":
+            return _FakeResp(429, "")          # primary always rate-limited
+        return _FakeResp(200, f"out-{model}")  # fallback succeeds
+    _patch_httpx(monkeypatch, decide)
+
+    prompter = mvp.MusicVideoPrompter({
+        "openrouter_model": "primary",
+        "fallback_models": ["secondary"],
+        "max_retries": 2,
+        "retry_backoff_seconds": [0, 0],
+    })
+    result = asyncio.run(prompter._call_openrouter([{"role": "user", "content": "x"}]))
+    assert result == "out-secondary"
+    assert calls.count("primary") == 2   # retried up to max_retries before giving up
+    assert "secondary" in calls
+
+
+def test_call_openrouter_all_429_returns_empty(monkeypatch):
+    def decide(model):
+        return _FakeResp(429, "")
+    _patch_httpx(monkeypatch, decide)
+    prompter = mvp.MusicVideoPrompter({
+        "openrouter_model": "primary",
+        "fallback_models": ["secondary"],
+        "max_retries": 1,
+        "retry_backoff_seconds": [0],
+    })
+    result = asyncio.run(prompter._call_openrouter([{"role": "user", "content": "x"}]))
+    assert result == ""
+
+
+def test_call_openrouter_explicit_model_does_not_walk_fallbacks(monkeypatch):
+    calls = []
+
+    def decide(model):
+        calls.append(model)
+        return _FakeResp(429, "")
+    _patch_httpx(monkeypatch, decide)
+    prompter = mvp.MusicVideoPrompter({
+        "openrouter_model": "primary",
+        "fallback_models": ["secondary"],
+        "max_retries": 1,
+        "retry_backoff_seconds": [0],
+    })
+    result = asyncio.run(prompter._call_openrouter(
+        [{"role": "user", "content": "x"}], model="pinned"))
+    assert result == ""
+    assert calls == ["pinned"]  # only the pinned model, no fallback walk
 
 
 # ---- enforce_performer_role -------------------------------------------------

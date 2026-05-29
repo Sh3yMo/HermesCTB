@@ -5,6 +5,7 @@ Splits audio into segments, generates video clips per segment via IA2V
 ComfyUI workflows, and assembles clips into a final music video.
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -1143,6 +1144,12 @@ class MusicVideoPrompter:
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         self.max_tokens = int(config.get("enhancement_max_tokens", 1200))
         self.disable_reasoning = config.get("disable_reasoning", True)
+        # Fix 23: harden against transient OpenRouter 429 (shared upstream rate
+        # limit, is_byok:false) — burst MV runs hit it and used to silently get
+        # "" → lyrics leaked onto portraits / theme-only segments.
+        self.fallback_models = config.get("fallback_models", []) or []
+        self.max_retries = int(config.get("max_retries", 3))
+        self.retry_backoff = config.get("retry_backoff_seconds", [1, 3, 8]) or [1, 3, 8]
 
     async def _call_openrouter(
         self,
@@ -1150,35 +1157,53 @@ class MusicVideoPrompter:
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """Call OpenRouter API. Returns response text."""
-        model = model or self.text_model
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens or self.max_tokens,
-        }
-        if self.disable_reasoning:
-            payload["reasoning"] = {"effort": "none"}
+        """Call OpenRouter API. Returns response text, or "" if all attempts fail.
 
+        Fix 23: retry transient 429/5xx with backoff, then walk fallback_models.
+        429 is the common burst failure ("temporarily rate-limited upstream");
+        giving up immediately let empty responses leak lyrics onto portraits.
+        An explicit `model` arg pins one model (no fallback walk).
+        """
+        models_to_try = [model] if model else [self.text_model, *self.fallback_models]
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(self.base_url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            print(f"OpenRouter API error ({model}): {e}")
-            return ""
-
-        choices = data.get("choices", [])
-        if not choices:
-            return ""
-        result = choices[0].get("message", {}).get("content", "").strip()
-        return result
+        for mdl in models_to_try:
+            payload = {
+                "model": mdl,
+                "messages": messages,
+                "max_tokens": max_tokens or self.max_tokens,
+            }
+            if self.disable_reasoning:
+                payload["reasoning"] = {"effort": "none"}
+            for attempt in range(max(1, self.max_retries)):
+                try:
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        resp = await client.post(self.base_url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    content = (choices[0].get("message", {}).get("content", "").strip()
+                               if choices else "")
+                    if content:
+                        return content
+                    break  # 200 but empty → try next model, no point retrying
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code
+                    retryable = code == 429 or 500 <= code < 600
+                    if retryable and attempt + 1 < max(1, self.max_retries):
+                        wait = self.retry_backoff[min(attempt, len(self.retry_backoff) - 1)]
+                        print(f"OpenRouter {code} on {mdl} "
+                              f"(attempt {attempt + 1}/{self.max_retries}); retry in {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    print(f"OpenRouter {code} on {mdl}; giving up on this model.")
+                    break  # non-retryable or retries exhausted → next model
+                except Exception as e:
+                    print(f"OpenRouter API error ({mdl}): {e}")
+                    break  # network/parse error → next model
+        return ""
 
     async def generate_segment_prompts(
         self,
@@ -1589,7 +1614,10 @@ class MusicVideoPrompter:
             ],
             max_tokens=200,
         )
-        return response if response else (seed or "front-facing studio portrait of a singer, neutral grey background")
+        # Fix 23: on empty LLM response, NEVER fall back to `seed` — it contains
+        # raw lyrics (lyrics[:600]+theme) and the portrait path runs no
+        # strip_lyrics, so the T2I model would paint the lyrics onto the portrait.
+        return response or "front-facing studio portrait of a singer, neutral grey background"
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""
