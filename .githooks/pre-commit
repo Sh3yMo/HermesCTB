@@ -1,0 +1,8 @@
+#!/bin/sh
+# Keep config.backup.json (secret-free snapshot of config.json) in sync on every
+# commit, then stage it. Never block a commit if the backup step fails.
+py -3 scripts/backup_config.py 2>/dev/null \
+  || python scripts/backup_config.py 2>/dev/null \
+  || true
+git add config.backup.json 2>/dev/null || true
+exit 0
