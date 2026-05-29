@@ -6,12 +6,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music_video_pipeline import (  # noqa: E402
     ACE_STEP_LANGS,
+    Segment,
     build_aligned_timeline,
     build_segment_timeline,
     chunk_list,
     clamp_song_duration,
+    enforce_performer_role,
+    extract_section_role,
     parse_segment_plan,
+    partition_anchors_by_role,
     to_ace_language,
+    _segment_video_prompt,
 )
 
 
@@ -84,6 +89,69 @@ def test_aligned_tiny_first_section_absorbed_forward():
     rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
     assert len(rows) == 1
     assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 12.0
+
+
+def test_aligned_closes_gap_between_sections():
+    """Bug 2: VAD boundary-refinement can leave a hole between a section's end
+    and the next section's start. The timeline MUST tile contiguously — gaps
+    make the assembled video shorter than the audio → A/V desync."""
+    a = [_al("Verse", "v", 0.0, 12.0),
+         _al("Chorus", "c", 18.0, 30.0)]  # 6s gap 12.0 -> 18.0
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    for x, y in zip(rows, rows[1:]):
+        assert y["start_time"] == x["end_time"], f"gap/overlap: {x} -> {y}"
+    assert rows[0]["start_time"] == 0.0
+
+
+def test_aligned_closes_real_run_gap_regression():
+    """Regression for the observed run (segments_02360422.json): Instrumental
+    ended at 70.62, Bridge started at 75.43 → 4.81s uncovered → video 5s short."""
+    a = [_al("Instrumental", "", 65.8, 70.62, is_vocal=False),
+         _al("Bridge", "b", 75.43, 90.56)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    for x, y in zip(rows, rows[1:]):
+        assert y["start_time"] == x["end_time"], f"gap/overlap: {x} -> {y}"
+
+
+def test_aligned_snaps_last_end_to_total_duration():
+    """When total_duration is given, the final row's end is snapped to it so
+    sum(segment spans) == audio length (no trailing gap → -shortest truncates)."""
+    a = [_al("Verse", "v", 0.0, 12.0),
+         _al("Chorus", "c", 12.0, 20.0)]  # ends at 20 but song is 24s
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0, total_duration=24.0)
+    assert rows[0]["start_time"] == 0.0
+    assert rows[-1]["end_time"] == 24.0
+    for x, y in zip(rows, rows[1:]):
+        assert y["start_time"] == x["end_time"]
+
+
+def test_aligned_total_duration_none_preserves_last_end():
+    """Without total_duration the last end is left as-is (back-compat)."""
+    a = [_al("Verse", "v", 0.0, 12.0), _al("Chorus", "c", 12.0, 20.0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert rows[-1]["end_time"] == 20.0
+
+
+# --- Bug 1: segment video prompt never falls back to raw lyrics -----------
+
+def test_segment_video_prompt_uses_scene_description():
+    spec = {"video_prompt": "Close-up of singer on a neon rooftop", "lyrics": "la la la"}
+    assert _segment_video_prompt(spec, "theme") == "Close-up of singer on a neon rooftop"
+
+
+def test_segment_video_prompt_empty_falls_back_to_theme_not_lyrics():
+    # The regression: empty spec must NOT yield the raw lyrics.
+    spec = {"video_prompt": "", "lyrics": "I AM THE LIGHT IN THE RAIN"}
+    assert _segment_video_prompt(spec, "neon synthwave city") == "neon synthwave city"
+
+
+def test_segment_video_prompt_missing_key_falls_back_to_theme():
+    assert _segment_video_prompt({}, "theme") == "theme"
+
+
+def test_segment_video_prompt_whitespace_only_falls_back():
+    assert _segment_video_prompt({"video_prompt": "   "}, "theme") == "theme"
+
 
 CAP = 30.0
 MIN = 8.0
@@ -259,3 +327,219 @@ def test_timeline_short_total_single_segment():
     segs = build_segment_timeline([], 12.0, MIN, CAP)
     _check_contiguous(segs, 12.0)
     assert len(segs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Role-aware multi-singer routing (extract_section_role + partition + prompt sanitization)
+# ---------------------------------------------------------------------------
+
+def test_extract_section_role_male_female_duet():
+    assert extract_section_role("Verse - male") == "male"
+    assert extract_section_role("Chorus - female") == "female"
+    assert extract_section_role("Bridge - duet") == "duet"
+    assert extract_section_role("Chorus - both") == "duet"
+    assert extract_section_role("Outro - together") == "duet"
+    # case-insensitive
+    assert extract_section_role("VERSE 1 - MALE") == "male"
+    assert extract_section_role("verse 2 - Female") == "female"
+    # extra whitespace around dash
+    assert extract_section_role("Verse  -  male") == "male"
+
+
+def test_extract_section_role_returns_none_for_unannotated():
+    assert extract_section_role("Chorus") is None
+    assert extract_section_role("Verse 1") is None
+    assert extract_section_role("Intro") is None
+    assert extract_section_role("Bridge - instrumental") is None
+    assert extract_section_role("") is None
+    assert extract_section_role(None) is None  # type: ignore[arg-type]
+
+
+def _seg(idx: int, label: str, reuse_of=None) -> Segment:
+    return Segment(index=idx, start_time=float(idx), end_time=float(idx + 1),
+                   label=label, reuse_of=reuse_of)
+
+
+def test_partition_by_role_male_female_mix():
+    # Intro (none), Verse - male, Chorus - female, Verse 2 - male, Chorus repeat, Outro
+    segs = [
+        _seg(0, "Intro"),
+        _seg(1, "Verse 1 - male"),
+        _seg(2, "Chorus - female"),
+        _seg(3, "Verse 2 - male"),
+        _seg(4, "Chorus - female", reuse_of=2),
+        _seg(5, "Outro"),
+    ]
+    parts = partition_anchors_by_role(segs)
+    assert parts["male"] == [1, 3]
+    assert parts["female"] == [2]
+    assert parts[None] == [0, 5]
+    # repeat at idx 4 must not appear anywhere
+    all_idxs = [i for v in parts.values() for i in v]
+    assert 4 not in all_idxs
+
+
+def test_partition_by_role_with_duet_section():
+    segs = [
+        _seg(0, "Verse - male"),
+        _seg(1, "Chorus - female"),
+        _seg(2, "Bridge - duet"),
+        _seg(3, "Chorus - female", reuse_of=1),
+    ]
+    parts = partition_anchors_by_role(segs)
+    assert parts["male"] == [0]
+    assert parts["female"] == [1]
+    assert parts["duet"] == [2]
+    assert None not in parts
+
+
+def test_partition_by_role_all_unannotated_single_bucket():
+    segs = [_seg(0, "Verse 1"), _seg(1, "Chorus"), _seg(2, "Outro")]
+    parts = partition_anchors_by_role(segs)
+    assert parts == {None: [0, 1, 2]}
+
+
+# ---- enforce_performer_role -------------------------------------------------
+
+def test_enforce_role_male_strips_female_clauses():
+    p = "He walks on the beach. She sings to him in the sunset. The waves crash."
+    out = enforce_performer_role(p, "male")
+    assert "she" not in out.lower()
+    assert "He walks" in out
+    assert "waves crash" in out.lower() or "waves" in out.lower()
+
+
+def test_enforce_role_female_strips_male_clauses():
+    p = "She dances by the palm trees. The man approaches from behind. Sunset glow fills the sky."
+    out = enforce_performer_role(p, "female")
+    assert "the man" not in out.lower()
+    assert "She dances" in out
+
+
+def test_enforce_role_duet_is_noop():
+    p = "He sings to her on the beach as she sings back to him."
+    assert enforce_performer_role(p, "duet") == p
+
+
+def test_enforce_role_none_is_noop():
+    p = "Anything goes here."
+    assert enforce_performer_role(p, None) == p
+
+
+def test_enforce_role_gender_neutral_unchanged():
+    p = "The ocean glows golden at sunset behind swaying palms."
+    assert enforce_performer_role(p, "male") == p
+    assert enforce_performer_role(p, "female") == p
+
+
+def test_enforce_role_falls_back_to_original_when_empty():
+    # entire prompt is female references → stripping would empty it
+    p = "She sings. Her dress flows. The woman dances."
+    out = enforce_performer_role(p, "male")
+    assert out == p  # fallback to original
+
+
+def test_enforce_role_already_clean_prompt_unchanged_text():
+    p = "He stands in the water at golden hour, palm trees behind him."
+    out = enforce_performer_role(p, "male")
+    # "him" trailing — strip module keeps it because it's not at clause start
+    # at minimum no information added; check the visible male content remains
+    assert "He stands" in out
+
+
+# ---------------------------------------------------------------------------
+# Fix 8: Intro/Outro standalone-unless-shorter-than-3s
+# ---------------------------------------------------------------------------
+
+def test_intro_4s_stays_standalone():
+    # Intro 0-4s is above the 3.0s intro/outro threshold → keep as own row
+    # even though normal min_seg/2 (=4.0) would absorb it. min_seg=8 → tiny=4
+    a = [_al("Intro", "", 0.0, 4.0, is_vocal=False),
+         _al("Verse 1 - male", "v", 4.0, 16.0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    labels = [r["label"] for r in rows]
+    assert "Intro" in labels  # standalone
+    assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 4.0
+
+
+def test_intro_2s_merges_forward():
+    # Intro 0-2s falls below the 3.0s threshold → absorbed into the next row
+    a = [_al("Intro", "", 0.0, 2.0, is_vocal=False),
+         _al("Verse 1 - male", "v", 2.0, 14.0)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 1
+    assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 14.0
+    # absorbed forward, so the surviving label is the Verse
+    assert "Verse" in rows[0]["label"]
+
+
+def test_outro_4s_stays_standalone():
+    # Outro 50-54s (4s, above intro/outro threshold) standalone
+    a = [_al("Verse 1 - male", "v", 0.0, 50.0),
+         _al("Outro", "", 50.0, 54.0, is_vocal=False)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    labels = [r["label"] for r in rows]
+    assert "Outro" in labels
+    # Outro is the LAST row
+    assert rows[-1]["start_time"] == 50.0
+
+
+def test_fade_below_3s_merges_back():
+    # Fade Out 60.0-60.5s (below 3s) merges into preceding row
+    a = [_al("Outro", "", 50.0, 60.0, is_vocal=False),
+         _al("Fade Out", "", 60.0, 60.5, is_vocal=False)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 1
+    assert rows[0]["start_time"] == 50.0 and rows[0]["end_time"] == 60.5
+
+
+# ---------------------------------------------------------------------------
+# Fix 10: camera-move rules must stay section-type-aware in both system prompts
+# ---------------------------------------------------------------------------
+
+from music_video_pipeline import _SEG_DIRECTOR_RULES, MusicVideoPrompter  # noqa: E402
+import inspect  # noqa: E402
+
+
+_FORBIDDEN_VOCAL_PHRASES = (
+    "dolly-out",
+    "zoom-out-then-zoom-in",
+    "face must remain in frame and recognizable",
+)
+_STORY_LATITUDE_PHRASES = (
+    "STORY-section allowed shot types",
+    "wide-landscape, drone-style aerial",
+)
+
+
+def test_seg_director_rules_contains_vocal_forbidden_line():
+    for phrase in _FORBIDDEN_VOCAL_PHRASES:
+        assert phrase in _SEG_DIRECTOR_RULES, f"_SEG_DIRECTOR_RULES missing: {phrase!r}"
+
+
+def test_seg_director_rules_contains_story_latitude_section():
+    for phrase in _STORY_LATITUDE_PHRASES:
+        assert phrase in _SEG_DIRECTOR_RULES, f"_SEG_DIRECTOR_RULES missing: {phrase!r}"
+
+
+def test_plan_segments_inline_prompt_contains_vocal_forbidden_line():
+    # The longer inline system prompt lives inside MusicVideoPrompter.plan_segments.
+    # Grab the source and assert both rule blocks survived.
+    src = inspect.getsource(MusicVideoPrompter.plan_segments)
+    for phrase in _FORBIDDEN_VOCAL_PHRASES:
+        assert phrase in src, f"plan_segments inline prompt missing: {phrase!r}"
+
+
+def test_plan_segments_inline_prompt_contains_story_latitude_section():
+    src = inspect.getsource(MusicVideoPrompter.plan_segments)
+    for phrase in _STORY_LATITUDE_PHRASES:
+        assert phrase in src, f"plan_segments inline prompt missing: {phrase!r}"
+
+
+def test_non_intro_short_section_uses_min_seg_half():
+    # A non-intro/outro 3.5s section should still merge (3.5 < min_seg/2 = 4)
+    a = [_al("Verse", "v", 0.0, 12.0),
+         _al("Stab", "", 12.0, 15.5, is_vocal=False)]
+    rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
+    assert len(rows) == 1  # Stab absorbed because 3.5 < tiny(=4) for non-intro/outro
+    assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 15.5

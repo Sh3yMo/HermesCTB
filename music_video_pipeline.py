@@ -287,6 +287,123 @@ def _segment_fixed_length(total_duration: float, segment_length: float) -> List[
     return segments
 
 
+_ROLE_RE = re.compile(
+    r"-\s*(male|female|duet|both|together)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_section_role(label: str) -> Optional[str]:
+    """Parse a per-section performer-role hint from a Segment label.
+
+    LLM-authored section labels carry role annotations like
+    "Verse - male", "Chorus - female", "Bridge - duet", "Chorus - both".
+    Returns one of "male" | "female" | "duet" | None. "both" and "together"
+    normalize to "duet".
+    """
+    if not label:
+        return None
+    m = _ROLE_RE.search(label)
+    if not m:
+        return None
+    raw = m.group(1).lower()
+    if raw in ("both", "together"):
+        return "duet"
+    return raw
+
+
+def nearest_annotated_role(
+    segments: List["Segment"], idx: int
+) -> Optional[str]:
+    """Find the role of the closest segment to `idx` that has an annotated role.
+
+    Scans forward first (rest of the song), then backward (toward the start),
+    returning the first annotated role encountered. Used to route Intro/Outro/
+    Fade-Out segments to whichever singer dominates the adjacent music body
+    so they reuse an existing portrait instead of triggering an extra MCA pass.
+    Returns None if no segment in the song has an annotated role.
+    """
+    n = len(segments)
+    if not n or idx < 0 or idx >= n:
+        return None
+    for j in range(idx + 1, n):
+        r = extract_section_role(segments[j].label)
+        if r:
+            return r
+    for j in range(idx - 1, -1, -1):
+        r = extract_section_role(segments[j].label)
+        if r:
+            return r
+    return None
+
+
+def partition_anchors_by_role(
+    segments: List["Segment"],
+) -> Dict[Optional[str], list[int]]:
+    """Group non-reuse anchor segment indices by their per-section role.
+
+    Anchor = segment whose `reuse_of` is None (first occurrence of its
+    section). Reuse rows inherit the anchor's frame downstream.
+
+    Returns a dict keyed by role ("male" | "female" | "duet" | None). When
+    the dict has ≥2 non-None keys, the pipeline activates multi-portrait
+    rendering — one portrait per role, plus a Flux2-M-I-Edit duet portrait
+    when "duet" is among the keys. With only one role (or None), the
+    pipeline behaves single-portrait as before.
+    """
+    out: Dict[Optional[str], list[int]] = {}
+    for i, s in enumerate(segments):
+        if s.reuse_of is not None:
+            continue
+        role = extract_section_role(s.label)
+        out.setdefault(role, []).append(i)
+    return out
+
+
+# Clauses introducing the "opposite" performer that should be dropped from
+# an MCA prompt routed to a single-gender portrait. Keep conservative so we
+# don't strip narrative scenery.
+_FEMALE_REF_RE = re.compile(
+    r"(?:(?<=^)|(?<=[.!?;,]\s))"
+    r"(?:she|her|the\s+female(?:\s+singer|\s+vocalist|\s+performer)?|"
+    r"the\s+woman|the\s+girl|a\s+female\s+(?:singer|vocalist|performer))"
+    r"\b[^.!?;]*[.!?;]?",
+    re.IGNORECASE,
+)
+_MALE_REF_RE = re.compile(
+    r"(?:(?<=^)|(?<=[.!?;,]\s))"
+    r"(?:he|him|his|the\s+male(?:\s+singer|\s+vocalist|\s+performer)?|"
+    r"the\s+man|the\s+guy|a\s+male\s+(?:singer|vocalist|performer))"
+    r"\b[^.!?;]*[.!?;]?",
+    re.IGNORECASE,
+)
+
+
+def enforce_performer_role(prompt: str, role: Optional[str]) -> str:
+    """Strip clauses describing the opposite performer for single-role frames.
+
+    role="male"   → drop "she/her/the woman/the female singer …" clauses
+    role="female" → drop "he/him/the man/the male singer …" clauses
+    role="duet"   → no-op (duet frames legitimately depict both)
+    role=None     → no-op (backwards compat)
+
+    Conservative: if stripping produces an empty result, return the original
+    so MCA always has something to render.
+    """
+    if not prompt or role in (None, "duet"):
+        return prompt
+    if role == "male":
+        cleaned = _FEMALE_REF_RE.sub("", prompt)
+    elif role == "female":
+        cleaned = _MALE_REF_RE.sub("", prompt)
+    else:
+        return prompt
+    if cleaned == prompt:
+        return prompt
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;:.")
+    return cleaned if cleaned else prompt
+
+
 def clamp_song_duration(d: Any, default: int = 150, lo: int = 20, hi: int = 300) -> int:
     """Clamp a requested song duration (seconds) into the supported range.
 
@@ -401,6 +518,18 @@ def parse_segment_plan(response_text: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _segment_video_prompt(spec: Dict[str, Any], theme: str) -> str:
+    """Pick a segment's video prompt from an LLM spec.
+
+    Bug 1: NEVER fall back to the raw lyrics. A T2V model renders raw lyric
+    text as literal on-screen captions / garbled scenes (the "rain behind
+    glass", interior-less car artefacts). Use the LLM scene description if
+    present, otherwise the visual theme. Lyrics reach the clip only via the
+    separate LIPSYNC handling, never as the visual prompt.
+    """
+    return (str(spec.get("video_prompt", "")).strip()) or theme
+
+
 def build_segment_timeline(
     specs: List[Dict[str, Any]],
     total_duration: float,
@@ -496,7 +625,9 @@ _SEG_DIRECTOR_RULES = (
     "MOUTH clearly visible and readable — the model can only lip-sync a visible "
     "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
     "VARY THE CAMERA per segment for cinematic variety — do NOT repeat the same "
-    "framing. Mix freely across these allowed shot types:\n"
+    "framing. Camera-move latitude depends on section KIND (see below):\n\n"
+    "VOCAL-section allowed shot types (the singer's face MUST stay in frame "
+    "the entire clip, otherwise identity drifts):\n"
     "  • close-up (face fills frame)\n"
     "  • medium close-up (head + shoulders)\n"
     "  • medium shot (waist up)\n"
@@ -504,11 +635,20 @@ _SEG_DIRECTOR_RULES = (
     "  • low angle looking up at singer\n"
     "  • high angle looking down at singer\n"
     "  • dutch tilt / canted angle\n"
-    "  • slow dolly-in or dolly-out\n"
+    "  • subtle dolly-in only (small push forward)\n"
     "  • handheld with subtle drift\n"
     "FORBIDDEN for VOCAL: pure 90° side profile (mouth occluded), back-of-head "
     "shots, wide-landscape with singer as a small dot, crowd shot replacing the "
-    "singer, faceless object shots.\n\n"
+    "singer, faceless object shots, dolly-out / pull-back / zoom-out, "
+    "zoom-out-then-zoom-in moves, flyovers, rack-focus away from the face. The "
+    "singer's face must remain in frame and recognizable for the ENTIRE clip — "
+    "any move that loses the face mid-shot breaks identity continuity.\n\n"
+    "STORY-section allowed shot types (no singer required; identity does NOT "
+    "need to be preserved across the clip — these are scenery/narrative beats):\n"
+    "  • wide-landscape, drone-style aerial, dolly-out / pull-back\n"
+    "  • slow pan across environment, rack-focus to scenery\n"
+    "  • establishing shots, montage cuts, object/detail close-ups\n"
+    "  • everything in the VOCAL list above is also fine for STORY\n\n"
     "TWO KINDS:\n"
     "- VOCAL (has lyric lines): singer performs to camera, close framing, "
     "face/mouth visible; video_prompt MUST include the exact lyrics in double "
@@ -532,6 +672,7 @@ def build_aligned_timeline(
     aligned: List[Dict[str, Any]],
     min_seg: float,
     max_seg: float,
+    total_duration: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """RC8: turn lyric_align sections (real [start,end]) into timeline rows.
 
@@ -540,17 +681,34 @@ def build_aligned_timeline(
     very short sections (< min_seg/2) are merged into the previous row. Pure /
     deterministic — unit-testable. Rows carry label/lyrics/is_vocal and
     reuse_of (only on the FIRST row of a section; sub-rows never reuse).
+
+    Bug 2: the returned rows ALWAYS tile contiguously — VAD boundary-refinement
+    (Fix 15c) can leave a hole between a section's end and the next start;
+    untouched, the assembled video ends up shorter than the audio → the
+    -shortest mux truncates the audio → A/V desync from the gap onward. Each
+    gap/overlap is closed by extending the earlier row's end to the next row's
+    start (keeps vocal onsets aligned). When total_duration is given, the last
+    row's end is snapped to it so sum(spans) == audio length exactly.
     """
     if not aligned:
         return []
     cap = min(float(max_seg), 30.0)
     tiny = max(1.0, float(min_seg) / 2.0)
+    # Intro/Outro/Fade get a tighter (3.0s) merge floor so they stay
+    # standalone when present in the actual audio, but still absorb forward
+    # when the LLM declared a phantom intro the song never actually plays.
+    intro_outro_tiny = 3.0
+
+    def _is_intro_outro(label: str) -> bool:
+        lab = (label or "").lower()
+        return "intro" in lab or "outro" in lab or "fade" in lab
 
     # 1. merge tiny sections forward into the previous kept section
     merged: List[Dict[str, Any]] = []
     for s in aligned:
         dur = float(s["end"]) - float(s["start"])
-        if merged and dur < tiny:
+        threshold = intro_outro_tiny if _is_intro_outro(s.get("label", "")) else tiny
+        if merged and dur < threshold:
             merged[-1]["end"] = s["end"]  # absorb time; keep prev label/lyrics
         else:
             merged.append(dict(s))
@@ -558,8 +716,14 @@ def build_aligned_timeline(
     # 1b. The first section has no predecessor to merge into. An instrumental
     # [Intro] often gets near-zero time from WhisperX — left alone it produces a
     # 0-duration row → empty audio clip → LTX LTXVAudioVAEEncode crash. Absorb a
-    # too-short leading section INTO the next one instead.
-    while len(merged) > 1 and (float(merged[0]["end"]) - float(merged[0]["start"])) < tiny:
+    # too-short leading section INTO the next one instead. Use the intro/outro
+    # threshold for intro-labeled leads so a real 4s instrumental intro is
+    # preserved as its own segment.
+    def _leading_threshold(label: str) -> float:
+        return intro_outro_tiny if _is_intro_outro(label) else tiny
+    while len(merged) > 1 and (
+        float(merged[0]["end"]) - float(merged[0]["start"])
+    ) < _leading_threshold(merged[0].get("label", "")):
         merged[1]["start"] = merged[0]["start"]
         merged.pop(0)
 
@@ -583,6 +747,26 @@ def build_aligned_timeline(
                 "reuse_of": s.get("reuse_of") if k == 0 else None,
                 "sec_index": sec_i,
             })
+
+    # 3. Bug 2: enforce contiguous tiling. Close any gap/overlap so each row's
+    # start == previous row's end; snap the final end to the audio length.
+    if rows:
+        if total_duration is not None:
+            rows[0]["start_time"] = 0.0
+        for i in range(len(rows) - 1):
+            cur, nxt = rows[i], rows[i + 1]
+            boundary = nxt["start_time"]
+            if boundary <= cur["start_time"] + 0.05:
+                # gap-less degenerate / overlap: keep a safe minimum span
+                boundary = round(cur["start_time"] + 0.05, 3)
+                nxt["start_time"] = boundary
+            cur["end_time"] = boundary
+        if total_duration is not None:
+            last = rows[-1]
+            end = round(float(total_duration), 3)
+            if end <= last["start_time"] + 0.05:
+                end = round(last["start_time"] + 0.05, 3)
+            last["end_time"] = end
     return rows
 
 
@@ -1089,7 +1273,7 @@ class MusicVideoPrompter:
 
         # ---- RC8 aligned mode: fixed real-timestamp rows ------------------
         if aligned_sections:
-            rows = build_aligned_timeline(aligned_sections, min_seg, cap)
+            rows = build_aligned_timeline(aligned_sections, min_seg, cap, total_duration)
             if rows:
                 listing = "\n".join(
                     f'{i}. [{ "VOCAL" if r["is_vocal"] else "STORY" }] '
@@ -1113,29 +1297,42 @@ class MusicVideoPrompter:
                     f"Sections (return exactly {len(rows)} objects, same order):\n"
                     f"{listing}\n\nReturn the JSON array now."
                 )
-                resp = await self._call_openrouter(
-                    messages=[{"role": "system", "content": aligned_system},
-                              {"role": "user", "content": aligned_user}],
-                    max_tokens=6000,
-                )
+                aligned_msgs = [{"role": "system", "content": aligned_system},
+                                {"role": "user", "content": aligned_user}]
+                resp = await self._call_openrouter(messages=aligned_msgs, max_tokens=10000)
                 specs = parse_segment_plan(resp)
-                segments: List[Segment] = []
-                for i, r in enumerate(rows):
-                    spec = specs[i] if i < len(specs) else {}
-                    vp = spec.get("video_prompt") or r["lyrics"] or theme
-                    segments.append(Segment(
-                        index=i,
-                        start_time=r["start_time"],
-                        end_time=r["end_time"],
-                        label=r["label"],
-                        lyrics=r["lyrics"] if r["is_vocal"] else "",
-                        prompt=vp,
-                        frame_variant_prompt=strip_lyrics_from_image_prompt(spec.get("frame_variant_prompt") or vp),
-                        reuse_of=r.get("reuse_of"),
-                    ))
-                if segments:
-                    return segments
-            # rows empty or no segments → fall through to legacy path
+                # Bug 1: a short/empty plan means the LLM scene descriptions are
+                # missing. Retry once (logging the raw response so the cause is
+                # diagnosable next run); if still short, fall through to the
+                # legacy proportional path — which produces real scene prompts —
+                # rather than degrading to raw lyrics.
+                if len(specs) < len(rows):
+                    print(f"Warning: aligned segment plan returned {len(specs)}/{len(rows)} "
+                          f"specs; retrying once.\nFull response:\n{resp}")
+                    resp = await self._call_openrouter(messages=aligned_msgs, max_tokens=10000)
+                    specs = parse_segment_plan(resp)
+                if len(specs) >= len(rows):
+                    segments: List[Segment] = []
+                    for i, r in enumerate(rows):
+                        spec = specs[i]
+                        vp = _segment_video_prompt(spec, theme)
+                        fvp = str(spec.get("frame_variant_prompt", "")).strip() or vp
+                        segments.append(Segment(
+                            index=i,
+                            start_time=r["start_time"],
+                            end_time=r["end_time"],
+                            label=r["label"],
+                            lyrics=r["lyrics"] if r["is_vocal"] else "",
+                            prompt=vp,
+                            frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
+                            reuse_of=r.get("reuse_of"),
+                        ))
+                    if segments:
+                        return segments
+                print(f"Warning: aligned segment plan unusable "
+                      f"({len(specs)}/{len(rows)} specs) after retry → falling back to "
+                      f"legacy proportional planning (scene prompts, not raw lyrics).")
+            # rows empty / aligned plan failed → fall through to legacy path
 
         approx_min = max(1, int(total_duration // cap))
         approx_max = max(approx_min, int(total_duration // float(min_seg)))
@@ -1151,7 +1348,10 @@ class MusicVideoPrompter:
             "visible mouth. Scenery/location is BACKGROUND behind the singer, never "
             "a replacement for them.\n\n"
             "VARY THE CAMERA per VOCAL segment for cinematic variety — do NOT repeat "
-            "the same framing. Mix freely across these allowed shot types:\n"
+            "the same framing. Camera-move latitude depends on section KIND (see "
+            "below):\n\n"
+            "VOCAL-section allowed shot types (the singer's face MUST stay in frame "
+            "the entire clip, otherwise identity drifts):\n"
             "  • close-up (face fills frame)\n"
             "  • medium close-up (head + shoulders)\n"
             "  • medium shot (waist up)\n"
@@ -1159,11 +1359,20 @@ class MusicVideoPrompter:
             "  • low angle looking up at singer\n"
             "  • high angle looking down at singer\n"
             "  • dutch tilt / canted angle\n"
-            "  • slow dolly-in or dolly-out\n"
+            "  • subtle dolly-in only (small push forward)\n"
             "  • handheld with subtle drift\n"
             "FORBIDDEN for VOCAL: pure 90° side profile (mouth occluded), back-of-head "
             "shots, wide-landscape with singer as a small dot, crowd shot replacing "
-            "the singer, faceless object shots.\n\n"
+            "the singer, faceless object shots, dolly-out / pull-back / zoom-out, "
+            "zoom-out-then-zoom-in moves, flyovers, rack-focus away from the face. "
+            "The singer's face must remain in frame and recognizable for the ENTIRE "
+            "clip — any move that loses the face mid-shot breaks identity continuity.\n\n"
+            "STORY-section allowed shot types (no singer required; identity does NOT "
+            "need to be preserved across the clip — these are scenery/narrative beats):\n"
+            "  • wide-landscape, drone-style aerial, dolly-out / pull-back\n"
+            "  • slow pan across environment, rack-focus to scenery\n"
+            "  • establishing shots, montage cuts, object/detail close-ups\n"
+            "  • everything in the VOCAL list above is also fine for STORY\n\n"
             "TWO SEGMENT KINDS — classify each section by whether it has sung lyrics:\n"
             "1. VOCAL (has lyric lines: Verse/Chorus/Pre-Chorus/Bridge/etc.): the "
             "recurring singer performs to camera, medium/close framing, face & mouth "

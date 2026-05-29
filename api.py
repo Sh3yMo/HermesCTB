@@ -40,12 +40,19 @@ from music_video_pipeline import (
     Segment,
     assemble_video,
     clamp_song_duration,
+    enforce_performer_role,
+    extract_section_role,
     get_audio_duration,
+    nearest_annotated_role,
+    partition_anchors_by_role,
     segment_audio,
     strip_lyrics_from_image_prompt,
     to_ace_language,
     _extract_audio_clip,
 )
+
+
+_nearest_annotated_role = nearest_annotated_role  # local alias for routing block
 from lyric_align import align_sections
 from short_film_pipeline import FilmPipeline
 from workflow_registry import load_registry
@@ -550,6 +557,168 @@ async def _resolve_source_image(
     return None
 
 
+_ROLE_SEED_PREFIX = {
+    "male": (
+        "Performer for sections sung by a MALE vocalist — a man, visually "
+        "distinct from any female performer in this song; he leads only his "
+        "own sections. Lyrics/theme context: "
+    ),
+    "female": (
+        "Performer for sections sung by a FEMALE vocalist — a woman, visually "
+        "distinct from any male performer in this song; she leads only her "
+        "own sections. Lyrics/theme context: "
+    ),
+}
+
+
+async def _resolve_singer_portrait(
+    role: str,
+    theme: str,
+    lyrics_text: str,
+    genre: str,
+    aspect_ratio: str,
+) -> Optional[str]:
+    """Generate a clean front-facing portrait for a specific performer role.
+
+    role: "male" | "female" — forces the LLM portrait seed with an identity-
+    locking prefix so dual-role songs produce two distinct portraits instead
+    of collapsing to whichever performer the LLM picks first.
+    """
+    prefix = _ROLE_SEED_PREFIX.get(role)
+    if not prefix:
+        raise ValueError(f"_resolve_singer_portrait: unsupported role {role!r}")
+    try:
+        seed_body = (lyrics_text[:600] + "\n" + theme).strip() or theme
+        seed = prefix + seed_body
+        t2i = await MV_PROMPTER.generate_character_portrait_prompt(seed, genre)
+        return await _generate_still(_mca_cfg()["t2i_workflow"], t2i, aspect_ratio)
+    except Exception as e:
+        print(f"[create-mv] {role} portrait generation failed: {e}")
+    return None
+
+
+# Flux2 Klein M-I Edit workflow node IDs for the multi-reference chain.
+# See Workflows/Flux2 Klein M-I Edit.json — pipeline 2 (SaveImage 80):
+#   LoadImage 33 + 34 + 36 → VAEEncode → 3x ReferenceLatent → CFGGuider → SamplerCustomAdvanced 13
+#   CLIPTextEncode at node 30 carries the positive prompt
+# Pipeline 1 (SaveImage 19) and the SeedVR2 upscale branch are stripped at
+# queue-time so a 2-input duet portrait runs cheaply.
+_FLUX2_MIEDIT = {
+    "workflow": "Flux2 Klein M-I Edit.json",
+    "load_img_a": "33",
+    "load_img_b": "34",
+    "load_img_c": "36",
+    "prompt_node": "30",
+    "save_node": "80",
+}
+
+
+def _strip_flux2_miedit_unused(wf: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only nodes reachable from the M-I Edit SaveImage (node 80).
+
+    Drops Pipeline 1 (SaveImage 19), the SeedVR2 upscaler branches (nodes 25
+    + 70 + their dependencies), and any Image Comparer nodes. Avoids
+    FileNotFoundError from stale default LoadImage names in unused branches.
+    """
+    keep: set[str] = set()
+    stack = [_FLUX2_MIEDIT["save_node"]]
+    while stack:
+        nid = stack.pop()
+        if nid in keep or nid not in wf:
+            continue
+        keep.add(nid)
+        for v in (wf[nid].get("inputs") or {}).values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                stack.append(v[0])
+    return {k: v for k, v in wf.items() if k in keep}
+
+
+async def _resolve_duet_portrait(
+    male_image_path: str,
+    female_image_path: str,
+    theme: str,
+    genre: str,
+) -> Optional[str]:
+    """Generate a duet portrait depicting both performers together using the
+    Flux2 Klein M-I Edit workflow. Takes the already-rendered male + female
+    single-singer portraits as reference images so the faces stay consistent.
+
+    Returns a local PNG path or None on failure (caller falls back to None
+    portrait for duet segments → MCA generates from segment prompt alone).
+    """
+    try:
+        from comfyui import randomize_seeds
+        wf_path = os.path.join(CONFIG.get("workflows_dir", "./Workflows"),
+                               _FLUX2_MIEDIT["workflow"])
+        if not os.path.exists(wf_path):
+            raise FileNotFoundError(f"Flux2 M-I Edit workflow missing: {wf_path}")
+        with open(wf_path, encoding="utf-8") as f:
+            wf = json.load(f)
+        wf = _strip_flux2_miedit_unused(wf)
+
+        prompt = await MV_PROMPTER.generate_character_portrait_prompt(
+            "Two performers (one male, one female) shown TOGETHER as a single "
+            "front-facing couple portrait, both faces clearly visible side by "
+            "side, same neutral studio background and lighting as the input "
+            "reference images, no scenery beyond plain studio backdrop. "
+            f"Theme: {theme}",
+            genre,
+        )
+
+        male_bytes = open(male_image_path, "rb").read()
+        female_bytes = open(female_image_path, "rb").read()
+        male_name = f"duet_m_{uuid.uuid4().hex}.png"
+        female_name = f"duet_f_{uuid.uuid4().hex}.png"
+        male_name_b = f"duet_m2_{uuid.uuid4().hex}.png"
+        async with httpx.AsyncClient(timeout=30) as client:
+            for name, blob in (
+                (male_name, male_bytes),
+                (female_name, female_bytes),
+                (male_name_b, male_bytes),
+            ):
+                up = await client.post(
+                    f"{COMFYUI_URL}/upload/image",
+                    files={"image": (name, blob, "image/png")},
+                    data={"overwrite": "true"},
+                )
+                up.raise_for_status()
+
+        wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = male_name
+        wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = female_name
+        wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = male_name_b
+        wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = prompt or (
+            "two performers standing side by side as a front-facing couple "
+            "portrait, neutral studio background"
+        )
+        wf = randomize_seeds(wf)
+
+        prompt_id, _ = await queue_and_wait_with_recovery(wf)
+        async with httpx.AsyncClient(timeout=10) as client:
+            hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
+        outputs = hist.get(prompt_id, {}).get("outputs", {})
+        images = outputs.get(_FLUX2_MIEDIT["save_node"], {}).get("images", [])
+        if not images:
+            raise RuntimeError(f"[duet] history missing SaveImage {_FLUX2_MIEDIT['save_node']} output")
+
+        img = images[0]
+        out_dir = os.path.join(_outputs_dir(), "duet_portraits")
+        os.makedirs(out_dir, exist_ok=True)
+        local = os.path.join(out_dir, f"duet_{uuid.uuid4().hex}.png")
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(
+                f"{COMFYUI_URL}/view",
+                params={"filename": img["filename"], "type": img.get("type", "output"),
+                        "subfolder": img.get("subfolder", "")},
+            )
+            r.raise_for_status()
+            with open(local, "wb") as f:
+                f.write(r.content)
+        return local
+    except Exception as e:
+        print(f"[create-mv] duet portrait generation failed: {e}")
+        return None
+
+
 async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) -> list[str]:
     """One source image -> N variant stills via F2K9B MCA, in VRAM-safe chunks.
 
@@ -566,6 +735,10 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
     src_bytes = open(source_image_path, "rb").read()
     out_dir = os.path.join(_outputs_dir(), "mca_frames")
     os.makedirs(out_dir, exist_ok=True)
+    # Unique per-call batch id so concurrent or sequential invocations don't
+    # overwrite each other's frame_NNN.png files. Critical for multi-role
+    # rendering where this helper is called once per role group.
+    batch_id = uuid.uuid4().hex[:8]
     results: list[str] = []
     idx = 0
 
@@ -606,7 +779,7 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
                     },
                 )
                 view.raise_for_status()
-            dest = os.path.join(out_dir, f"frame_{idx:03d}.png")
+            dest = os.path.join(out_dir, f"frame_{batch_id}_{idx:03d}.png")
             with open(dest, "wb") as fh:
                 fh.write(view.content)
             results.append(dest)
@@ -712,6 +885,7 @@ async def _run_create_music_video(
                             _split = split_sections_at_mid_swaps(aligned, _segments)
                             mid_splits = len(_split) - _pre_split_count
                             if mid_splits > 0:
+                                # Replace aligned IN PLACE so downstream code sees subsections
                                 aligned[:] = _split
                             # Phase 2: classify gender per (refined+split) section
                             detected = {}
@@ -755,34 +929,119 @@ async def _run_create_music_video(
             _extract_audio_clip(audio_path, seg.start_time, seg.end_time, clip)
             seg.audio_clip = clip
 
-        # 3. Source image + per-segment MCA variant frames.
-        source = await _resolve_source_image(
-            source_mode, source_image_bytes, source_image_name,
-            source_description, theme_eff, lyrics_text, brief,
-            aspect_ratio, consistent_character, tmp_dir,
+        # 3. Source image(s) + per-segment MCA variant frames.
+        # Role hints come from LLM-authored section labels like
+        # "[Verse - male]" / "[Chorus - female]" / "[Bridge - duet]". When the
+        # song annotates ≥2 distinct roles AND consistent_character is on AND
+        # source_mode is generative, render one portrait per role; for "duet",
+        # combine the male+female portraits via the Flux2 M-I Edit workflow.
+        role_groups = partition_anchors_by_role(segments)
+        roles_present = {r for r in role_groups.keys() if r is not None}
+        is_multi_role = (
+            consistent_character
+            and len(roles_present) >= 2
+            and source_mode in ("auto", "describe")
         )
-        # RC8 chorus reuse: only generate MCA frames for non-repeated segments;
-        # repeated sections (seg.reuse_of) reuse their anchor's frame → fewer
-        # MCA gens + visually consistent recurring chorus.
+
+        portraits: Dict[str, Optional[str]] = {}
+        if is_multi_role:
+            for role in ("male", "female"):
+                if role in roles_present:
+                    portraits[role] = await _resolve_singer_portrait(
+                        role, theme_eff, lyrics_text, brief, aspect_ratio,
+                    )
+                    await free_comfy()
+            if "duet" in roles_present:
+                male_p = portraits.get("male")
+                female_p = portraits.get("female")
+                if male_p and female_p:
+                    portraits["duet"] = await _resolve_duet_portrait(
+                        male_p, female_p, theme_eff, brief,
+                    )
+                    await free_comfy()
+            source: Optional[str] = (
+                portraits.get("male")
+                or portraits.get("female")
+                or next((v for v in portraits.values() if v), None)
+            )
+        else:
+            # Legacy single-portrait path (upload/none source modes or only one role).
+            source = await _resolve_source_image(
+                source_mode, source_image_bytes, source_image_name,
+                source_description, theme_eff, lyrics_text, brief,
+                aspect_ratio, consistent_character, tmp_dir,
+            )
+
+        # RC8 chorus reuse: only generate MCA frames for non-repeated segments.
+        # Multi-role path: each anchor gets the portrait matching its role.
+        # None-role anchors (Intro/Outro/Fade) are reassigned to their nearest
+        # annotated neighbour's role so they share the same portrait instead
+        # of triggering an extra MCA batch from the fallback `source`.
         frame_by_seg: dict[int, str] = {}
         if source:
-            to_gen = [i for i, s in enumerate(segments) if s.reuse_of is None]
-            gen_prompts = [
-                strip_lyrics_from_image_prompt(
-                    segments[i].frame_variant_prompt or segments[i].prompt
-                )
-                for i in to_gen
-            ]
-            gen_frames = await _run_mca_variants(source, gen_prompts)
-            for k, i in enumerate(to_gen):
-                frame_by_seg[i] = gen_frames[k] if k < len(gen_frames) else source
+            effective_role_groups: Dict[Optional[str], list[int]] = {
+                r: list(idxs) for r, idxs in role_groups.items()
+            }
+            if is_multi_role and None in effective_role_groups:
+                none_idxs = effective_role_groups.pop(None)
+                for i in none_idxs:
+                    target = _nearest_annotated_role(segments, i)
+                    if target is None or target not in effective_role_groups:
+                        # No annotated neighbour at all (degenerate). Fall back
+                        # to whichever portrait exists; insert into first bucket.
+                        target = next(iter(effective_role_groups), None)
+                        if target is None:
+                            effective_role_groups[None] = [i]
+                            continue
+                    effective_role_groups.setdefault(target, []).append(i)
+                # Keep each bucket's indices in original segment order so the
+                # returned MCA frame list aligns with frame_by_seg lookups.
+                for r in effective_role_groups:
+                    effective_role_groups[r].sort()
+
+            for role, idxs in effective_role_groups.items():
+                if not idxs:
+                    continue
+                portrait = portraits.get(role) if role else None
+                portrait = portrait or source
+                prompts = [
+                    enforce_performer_role(
+                        strip_lyrics_from_image_prompt(
+                            segments[i].frame_variant_prompt or segments[i].prompt
+                        ),
+                        role,
+                    )
+                    for i in idxs
+                ]
+                if is_multi_role:
+                    await free_comfy()  # RC10 VRAM hygiene between MCA passes
+                frames = await _run_mca_variants(portrait, prompts)
+                for k, i in enumerate(idxs):
+                    frame_by_seg[i] = frames[k] if k < len(frames) else portrait
             for i, s in enumerate(segments):
                 if s.reuse_of is not None:
                     frame_by_seg[i] = frame_by_seg.get(s.reuse_of, source)
 
+        # Optional pause gate: lets the operator hold a job here (after T2I +
+        # Flux2 + MCA, before the loud LTX video loop kicks off) by touching
+        # the flag file. Job stays in "running" state but sits idle until the
+        # flag disappears. Useful when wanting to time the noisy video phase.
+        pause_flag = os.environ.get("MV_PAUSE_FLAG", "/tmp/mv_pause_before_ltx")
+        if os.path.exists(pause_flag):
+            print(f"[create-mv] pause flag {pause_flag} present — holding before LTX video loop")
+            while os.path.exists(pause_flag):
+                await asyncio.sleep(15)
+            print("[create-mv] pause flag cleared — entering LTX video loop")
+
         # 4. Per-segment IA2V render (fresh frame each segment, no chaining,
         #    no inject_resolution — IA2V resolution is driven by the input image).
         out_dir = _outputs_dir()
+        # Multi-role runs piled up T2I + Flux2 M-I Edit + ≥3 MCA passes before
+        # LTX starts; without a defrag the first IA2V segment lands in LOWVRAM
+        # mode (model partially offloaded to CPU → ~7 min/iter). One free here
+        # tides the loop into the existing per-N free_every cadence.
+        if is_multi_role:
+            await free_comfy()
         free_every = _mca_cfg()["free_every"]
         for i, seg in enumerate(segments):
             # RC11: free VRAM BEFORE queuing this segment (not after the prior
@@ -882,7 +1141,14 @@ async def create_music_video(
     consistent_character: bool = Form(True),
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
-    callers pass a topic in `brief`, never finished lyrics."""
+    callers pass a topic in `brief`, never finished lyrics.
+
+    Multi-singer rendering is automatic: when ACE-Step-authored lyrics annotate
+    section labels with role hints (e.g. "[Verse - male]", "[Chorus - female]",
+    "[Bridge - duet]"), the pipeline generates one portrait per detected role
+    and routes each segment to the matching portrait. Duet portraits use the
+    Flux2 M-I Edit workflow with the male+female portraits as references.
+    """
     tmp_dir = tempfile.mkdtemp(prefix="ctb_cmv_")
     song_path = None
     if song is not None:
