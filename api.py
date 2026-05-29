@@ -39,6 +39,7 @@ from music_video_pipeline import (
     MusicVideoPrompter,
     Segment,
     assemble_video,
+    build_duet_portrait_prompt,
     clamp_song_duration,
     enforce_performer_role,
     extract_section_role,
@@ -656,19 +657,18 @@ async def _resolve_duet_portrait(
             wf = json.load(f)
         wf = _strip_flux2_miedit_unused(wf)
 
-        prompt = await MV_PROMPTER.generate_character_portrait_prompt(
-            "Two performers (one male, one female) shown TOGETHER as a single "
-            "front-facing couple portrait, both faces clearly visible side by "
-            "side, same neutral studio background and lighting as the input "
-            "reference images, no scenery beyond plain studio backdrop. "
-            f"Theme: {theme}",
-            genre,
-        )
+        # Fix 24A: deterministic identity-neutral prompt — no LLM call. See
+        # build_duet_portrait_prompt() docstring for the rationale.
+        prompt = build_duet_portrait_prompt(theme)
 
         male_bytes = open(male_image_path, "rb").read()
         female_bytes = open(female_image_path, "rb").read()
         male_name = f"duet_m_{uuid.uuid4().hex}.png"
         female_name = f"duet_f_{uuid.uuid4().hex}.png"
+        # Fix 24B (status quo): the Flux2 Klein M-I Edit workflow requires 3
+        # LoadImage inputs feeding 3 sequential ReferenceLatent nodes. We
+        # intentionally re-upload the male bytes as the 3rd reference; the
+        # resulting male-side weight bias is acceptable and documented.
         male_name_b = f"duet_m2_{uuid.uuid4().hex}.png"
         async with httpx.AsyncClient(timeout=30) as client:
             for name, blob in (
@@ -686,10 +686,7 @@ async def _resolve_duet_portrait(
         wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = male_name
         wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = female_name
         wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = male_name_b
-        wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = prompt or (
-            "two performers standing side by side as a front-facing couple "
-            "portrait, neutral studio background"
-        )
+        wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = prompt
         wf = randomize_seeds(wf)
 
         prompt_id, _ = await queue_and_wait_with_recovery(wf)

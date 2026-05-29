@@ -656,3 +656,33 @@ def test_non_intro_short_section_uses_min_seg_half():
     rows = build_aligned_timeline(a, min_seg=8.0, max_seg=30.0)
     assert len(rows) == 1  # Stab absorbed because 3.5 < tiny(=4) for non-intro/outro
     assert rows[0]["start_time"] == 0.0 and rows[0]["end_time"] == 15.5
+
+
+# ─── Fix 24A: build_duet_portrait_prompt ─────────────────────────────────────
+
+def test_duet_prompt_locks_identity_to_reference_images():
+    """Fix 24A: prompt must explicitly instruct the T2I model to preserve
+    face/hair/skin from the reference images — that's the whole point of the
+    deterministic duet prompt."""
+    p = mvp.build_duet_portrait_prompt("neon city, synthwave")
+    assert "Preserve each performer" in p
+    assert "face" in p and "hair" in p and "skin tone" in p
+    assert "reference images" in p
+    assert "do not restyle or recolour" in p
+
+
+def test_duet_prompt_does_not_invent_identity_attributes():
+    """Fix 24A regression guard: the LLM-driven path invented attributes like
+    'blonde hair' / 'dark waves' that competed with the references and caused
+    drift. The deterministic prompt MUST NOT contain colour/style attributes."""
+    p = mvp.build_duet_portrait_prompt("80s synthwave duo").lower()
+    for forbidden in ("blonde", "brunette", "redhead", "dark waves",
+                      "wavy hair", "curly", "tattoo", "beard", "moustache"):
+        assert forbidden not in p, f"prompt invented identity attribute: {forbidden!r}"
+
+
+def test_duet_prompt_embeds_theme_when_given_and_omits_when_empty():
+    with_theme = mvp.build_duet_portrait_prompt("rainy neon street")
+    assert "Theme context: rainy neon street." in with_theme
+    no_theme = mvp.build_duet_portrait_prompt("")
+    assert "Theme context:" not in no_theme

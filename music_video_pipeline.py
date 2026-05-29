@@ -47,6 +47,30 @@ def strip_lyrics_from_image_prompt(prompt: str) -> str:
     return cleaned.strip(" ,.;:")
 
 
+def build_duet_portrait_prompt(theme: str) -> str:
+    """Fix 24A: deterministic identity-neutral prompt for the duet portrait.
+
+    The previous duet path called the SINGLE-portrait LLM prompt generator,
+    whose system prompt told the model to "establish face/hair/skin tone" —
+    so the LLM invented identity attributes (e.g. "blonde hair / dark waves")
+    that competed with the actual reference images and produced visible drift
+    vs. the two single-singer portraits. The reference images supply identity;
+    this prompt only describes composition, framing, background and lighting,
+    plus an explicit identity-lock clause for the T2I model.
+    """
+    theme_clause = f" Theme context: {theme}." if theme else ""
+    return (
+        "Two performers standing side-by-side as a single front-facing "
+        "couple portrait, shown from head to waist, both faces and mouths "
+        "clearly visible and in sharp focus. Plain neutral white-to-light-"
+        "grey studio background, even soft studio lighting, no shadows, "
+        "no props or scenery, no other people. Preserve each performer's "
+        "face, hair colour, hair style, skin tone and build EXACTLY as in "
+        "the reference images; do not restyle or recolour them."
+        f"{theme_clause}"
+    )
+
+
 @dataclass
 class Segment:
     index: int
