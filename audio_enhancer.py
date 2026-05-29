@@ -915,23 +915,29 @@ class AudioEnhancer:
     # ─── Workflow Injection ──────────────────────────────────
 
     def _build_vocal_role_tags(self, assembled_lyrics: str) -> str:
-        """Scan lyrics for gender-tagged sections; return explicit role description for the tags field."""
+        """Scan lyrics for gender-tagged sections; return explicit role description
+        for the tags field. Dedups on (section, role) so a section type sung by two
+        genders (Verse 1 male + Verse 2 female) keeps BOTH; hyphenated section names
+        (pre-chorus) stay intact — only the trailing instance number is dropped."""
         import re
-        pattern = re.compile(r'\[([^\]]+)\]')
-        role_map: dict = {}
-        for match in pattern.finditer(assembled_lyrics):
-            tag = match.group(1).lower()
-            parts = [p.strip() for p in tag.split('-')]
-            if len(parts) >= 2:
-                section = parts[0].split()[0]  # "verse 1" → "verse"
-                for part in parts[1:]:
-                    if part in ('male', 'female', 'duet'):
-                        role_map.setdefault(section, part)
-                        break
-        if not role_map:
-            return ""
-        desc_parts = [f"{gender} {section}" for section, gender in role_map.items()]
-        return ", ".join(desc_parts)
+        seen = set()
+        out = []
+        for match in re.finditer(r'\[([^\]]+)\]', assembled_lyrics):
+            inner = match.group(1).lower().strip()
+            # Role is the trailing "- male|female|duet"; section name is everything before.
+            m = re.match(r'^(.*?)\s*-\s*(male|female|duet)\s*$', inner)
+            if not m:
+                continue
+            section = re.sub(r'\s+\d+\s*$', '', m.group(1).strip())  # "verse 1"→"verse"; keep "pre-chorus"
+            role = m.group(2)
+            if not section:
+                continue
+            key = (section, role)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f"{role} {section}")
+        return ", ".join(out)
 
     def inject_audio_settings(self, workflow: Dict, settings: AudioSettings) -> Dict:
         """

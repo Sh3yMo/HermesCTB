@@ -57,6 +57,33 @@ def test_vocal_role_tags_deduplicates_section():
     assert result.count("male verse") == 1
 
 
+def test_vocal_role_tags_same_section_different_gender_keeps_both():
+    """Fix 22: Verse 1 male + Verse 2 female must keep BOTH (no female-drop)."""
+    enh = _make_enhancer()
+    lyrics = "[Verse 1 - male]\nline\n\n[Verse 2 - female]\nline\n\n[Chorus - duet]\nline"
+    result = enh._build_vocal_role_tags(lyrics)
+    assert "male verse" in result
+    assert "female verse" in result
+    assert "duet chorus" in result
+
+
+def test_vocal_role_tags_hyphenated_section_not_truncated():
+    """Fix 22: 'Pre-Chorus - female' must keep the full hyphenated name, not 'female pre'."""
+    enh = _make_enhancer()
+    lyrics = "[Pre-Chorus - female]\nline"
+    result = enh._build_vocal_role_tags(lyrics)
+    assert "female pre-chorus" in result
+    assert result != "female pre"
+
+
+def test_vocal_role_tags_multiword_section_preserved():
+    """Fix 22: 'Final Chorus - male' → 'male final chorus' (multi-word section kept)."""
+    enh = _make_enhancer()
+    lyrics = "[Final Chorus - male]\nline"
+    result = enh._build_vocal_role_tags(lyrics)
+    assert "male final chorus" in result
+
+
 # ─── inject_audio_settings ───────────────────────────────────────────────────
 
 def _workflow_with_node_94():
