@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import uuid
 import httpx
@@ -457,6 +458,10 @@ async def _run_music_video(
     except Exception as e:
         _job_failed(jid, str(e))
         raise
+    finally:
+        # Fix 25: clean per-job tmp_dir so /tmp/ctb_mv_* (host or container)
+        # does not leak — accumulating leaks grow the WSL2 VHDX on I:.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.post("/generate/music-video")
@@ -1120,6 +1125,9 @@ async def _run_create_music_video(
     except Exception as e:
         _job_failed(jid, str(e))
         raise
+    finally:
+        # Fix 25: clean per-job tmp_dir (ctb_cmv_*) to stop accumulating leaks.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.post("/create/music-video")
@@ -1175,6 +1183,7 @@ async def _run_short_film(
     target_duration: float,
     director_mode: str,
     audio_path: Optional[str],
+    tmp_dir: Optional[str] = None,
 ) -> None:
     _job_running(jid)
     try:
@@ -1192,6 +1201,10 @@ async def _run_short_film(
     except Exception as e:
         _job_failed(jid, str(e))
         raise
+    finally:
+        # Fix 25: clean per-job tmp_dir (ctb_sf_*) to stop accumulating leaks.
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.post("/generate/short-film")
@@ -1203,6 +1216,7 @@ async def generate_short_film(
     audio: Optional[UploadFile] = File(None),
 ):
     audio_path = None
+    tmp_dir: Optional[str] = None
     if audio:
         tmp_dir = tempfile.mkdtemp(prefix="ctb_sf_")
         audio_path = os.path.join(tmp_dir, audio.filename or "audio.wav")
@@ -1210,7 +1224,7 @@ async def generate_short_film(
             f.write(await audio.read())
 
     jid = _new_job()
-    asyncio.create_task(_run_short_film(jid, premise, style, duration, director_mode, audio_path))
+    asyncio.create_task(_run_short_film(jid, premise, style, duration, director_mode, audio_path, tmp_dir))
     return {"job_id": jid}
 
 
