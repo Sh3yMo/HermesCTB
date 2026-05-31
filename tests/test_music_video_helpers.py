@@ -18,6 +18,8 @@ from music_video_pipeline import (  # noqa: E402
     extract_section_role,
     parse_segment_plan,
     partition_anchors_by_role,
+    plan_same_gender_portraits,
+    same_gender_veto,
     to_ace_language,
     _segment_video_prompt,
 )
@@ -400,6 +402,88 @@ def test_partition_by_role_all_unannotated_single_bucket():
     segs = [_seg(0, "Verse 1"), _seg(1, "Chorus"), _seg(2, "Outro")]
     parts = partition_anchors_by_role(segs)
     assert parts == {None: [0, 1, 2]}
+
+
+# ---------------------------------------------------------------------------
+# Fix 27 — same-gender duet routing (plan_same_gender_portraits + veto)
+# ---------------------------------------------------------------------------
+
+def test_plan_same_gender_ff_with_duet():
+    # two women + shared duet chorus → lead "female", partner "female2", build duet
+    assert plan_same_gender_portraits(
+        "ff", {"female", "duet"}, consistent_character=True, source_mode="auto"
+    ) == ("female", "female2", True)
+
+
+def test_plan_same_gender_mm_with_duet():
+    assert plan_same_gender_portraits(
+        "mm", {"male", "duet"}, consistent_character=True, source_mode="describe"
+    ) == ("male", "male2", True)
+
+
+def test_plan_same_gender_no_duet_section_still_two_portraits():
+    # solos only, no duet label → still lead + partner, but no duet portrait
+    assert plan_same_gender_portraits(
+        "ff", {"female"}, consistent_character=True, source_mode="auto"
+    ) == ("female", "female2", False)
+
+
+def test_plan_same_gender_disabled_returns_none():
+    # empty intent → standard path
+    assert plan_same_gender_portraits(
+        "", {"female", "duet"}, consistent_character=True, source_mode="auto"
+    ) is None
+    # invalid intent → standard path
+    assert plan_same_gender_portraits(
+        "xx", {"female"}, consistent_character=True, source_mode="auto"
+    ) is None
+
+
+def test_plan_same_gender_requires_consistent_character_and_generative_mode():
+    assert plan_same_gender_portraits(
+        "ff", {"female", "duet"}, consistent_character=False, source_mode="auto"
+    ) is None
+    assert plan_same_gender_portraits(
+        "ff", {"female", "duet"}, consistent_character=True, source_mode="upload"
+    ) is None
+
+
+def test_same_gender_veto_all_female_no_veto():
+    # ff intent, every vocal section detected female → no opposite presence → no veto
+    sections = [("female", 12.0), ("female", 8.0), ("female", 14.0)]
+    assert same_gender_veto(sections, "ff") is False
+
+
+def test_same_gender_veto_stray_male_below_threshold_no_veto():
+    # one short male window amid lots of female → below 15% duration → no veto
+    sections = [("female", 40.0), ("female", 40.0), ("male", 5.0)]
+    assert same_gender_veto(sections, "ff") is False
+
+
+def test_same_gender_veto_sustained_male_triggers():
+    # a genuine male section ~33% of vocal duration → veto, fall back to mixed
+    sections = [("female", 20.0), ("male", 20.0), ("female", 20.0)]
+    assert same_gender_veto(sections, "ff") is True
+
+
+def test_same_gender_veto_mm_symmetric():
+    sections = [("male", 20.0), ("female", 20.0), ("male", 20.0)]
+    assert same_gender_veto(sections, "mm") is True
+    assert same_gender_veto([("male", 30.0), ("male", 30.0)], "mm") is False
+
+
+def test_same_gender_veto_ignores_unknown():
+    # "unknown" windows are dropped from the denominator; pure female → no veto
+    sections = [("female", 20.0), ("unknown", 30.0)]
+    assert same_gender_veto(sections, "ff") is False
+
+
+def test_same_gender_veto_detected_duet_means_opposite_present():
+    # _classify_section returns "duet" only when BOTH genders ≥20% → a male is
+    # present (e.g. a man sings the shared chorus). An ff request must veto so
+    # the man gets his own portrait via the mixed path.
+    sections = [("female", 20.0), ("female", 20.0), ("duet", 20.0)]
+    assert same_gender_veto(sections, "ff") is True
 
 
 # ---------------------------------------------------------------------------

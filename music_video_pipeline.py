@@ -385,6 +385,68 @@ def partition_anchors_by_role(
     return out
 
 
+def plan_same_gender_portraits(
+    duet: str,
+    roles_present: set,
+    consistent_character: bool,
+    source_mode: str,
+) -> Optional[tuple]:
+    """Fix 27: decide the portrait plan for an explicit same-gender duet request.
+
+    `duet` is the user-supplied intent: "ff" (two women) | "mm" (two men).
+    Section labels stay plain ("female"/"duet") — the two characters are a
+    PORTRAIT-routing concern only. The solo sections are always sung by the
+    same lead character (audio cannot tell female1 from female2); a SECOND
+    "partner" portrait is rendered purely so the shared-duet frame depicts both
+    distinct people instead of falling back to the lead twice.
+
+    Returns (base_role, partner_role, make_duet) when same-gender rendering
+    applies, or None to use the standard male/female routing. `make_duet` is
+    True only when a "duet" section actually exists.
+    """
+    if duet not in ("ff", "mm"):
+        return None
+    if not consistent_character or source_mode not in ("auto", "describe"):
+        return None
+    base = "female" if duet == "ff" else "male"
+    partner = base + "2"
+    make_duet = "duet" in roles_present
+    return (base, partner, make_duet)
+
+
+def same_gender_veto(
+    sections: List[tuple],
+    duet: str,
+    min_fraction: float = 0.15,
+) -> bool:
+    """Fix 27: decide whether to ABANDON the same-gender request because the
+    audio analysis found sustained opposite-gender vocals.
+
+    `sections` is a list of (detected_gender, duration_seconds) for the vocal
+    sections, where detected_gender comes from audio_gender_detect (already
+    aggregated per section, so a single stray window won't flip a section).
+    `duet` is "ff" | "mm". Veto fires when the opposite gender occupies at
+    least `min_fraction` of the classified (non-unknown) vocal duration — a
+    proportional threshold so one short borderline section doesn't silently
+    flip the whole feature to mixed routing.
+    """
+    if duet not in ("ff", "mm"):
+        return False
+    opposite = "male" if duet == "ff" else "female"
+    # A "duet" classification means BOTH genders were ≥20% present in that
+    # section (audio_gender_detect._classify_section) → the opposite gender IS
+    # there (e.g. a man singing the shared chorus). It therefore counts toward
+    # the opposite measure. Two same-gender singers never classify as "duet"
+    # (no opposite present → plain "female"/"male"), so this can't trip the
+    # intended case.
+    opp_dur = sum(d for g, d in sections if g == opposite or g == "duet")
+    # Denominator: only sections classified as a concrete gender (drop unknown).
+    classified = sum(d for g, d in sections if g in ("male", "female", "duet"))
+    if classified <= 0:
+        return False
+    return (opp_dur / classified) >= min_fraction
+
+
 # Clauses introducing the "opposite" performer that should be dropped from
 # an MCA prompt routed to a single-gender portrait. Keep conservative so we
 # don't strip narrative scenery.

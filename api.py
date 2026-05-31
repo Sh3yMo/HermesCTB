@@ -47,6 +47,8 @@ from music_video_pipeline import (
     get_audio_duration,
     nearest_annotated_role,
     partition_anchors_by_role,
+    plan_same_gender_portraits,
+    same_gender_veto,
     segment_audio,
     strip_lyrics_from_image_prompt,
     to_ace_language,
@@ -574,6 +576,36 @@ _ROLE_SEED_PREFIX = {
         "distinct from any male performer in this song; she leads only her "
         "own sections. Lyrics/theme context: "
     ),
+    # Fix 27: lead + partner portraits for an explicit same-gender duet. The
+    # brief describes two same-gender singers; the "1" seed steers the LEAD to
+    # the FIRST described person (the generic "female"/"male" prefix has no
+    # "one of two" framing, so without this the lead and partner can collapse to
+    # the same look). The "2" seed renders the SECOND, visually distinct, and is
+    # used only in the shared duet frame.
+    "female1": (
+        "Performer for the FIRST of two FEMALE singers in this duet — a woman "
+        "matching the first female described in the brief (her ethnicity, skin "
+        "tone, hair and build); she sings all the solo sections and is one half "
+        "of the shared duet. Lyrics/theme context: "
+    ),
+    "male1": (
+        "Performer for the FIRST of two MALE singers in this duet — a man "
+        "matching the first male described in the brief (his ethnicity, skin "
+        "tone, hair and build); he sings all the solo sections and is one half "
+        "of the shared duet. Lyrics/theme context: "
+    ),
+    "female2": (
+        "Performer for the SECOND of two FEMALE singers in this duet — a woman "
+        "visually DISTINCT from the first female singer (different ethnicity, "
+        "skin tone, hair and build as described in the brief); she appears only "
+        "in the shared duet. Lyrics/theme context: "
+    ),
+    "male2": (
+        "Performer for the SECOND of two MALE singers in this duet — a man "
+        "visually DISTINCT from the first male singer (different ethnicity, "
+        "skin tone, hair and build as described in the brief); he appears only "
+        "in the shared duet. Lyrics/theme context: "
+    ),
 }
 
 
@@ -586,9 +618,11 @@ async def _resolve_singer_portrait(
 ) -> Optional[str]:
     """Generate a clean front-facing portrait for a specific performer role.
 
-    role: "male" | "female" — forces the LLM portrait seed with an identity-
-    locking prefix so dual-role songs produce two distinct portraits instead
-    of collapsing to whichever performer the LLM picks first.
+    role: "male" | "female" (mixed duet) | "female2" | "male2" (Fix 27 — the
+    SECOND singer of an explicit same-gender duet). The role forces the LLM
+    portrait seed with an identity-locking prefix so multi-singer songs produce
+    distinct portraits instead of collapsing to whichever performer the LLM
+    picks first.
     """
     prefix = _ROLE_SEED_PREFIX.get(role)
     if not prefix:
@@ -640,14 +674,22 @@ def _strip_flux2_miedit_unused(wf: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _resolve_duet_portrait(
-    male_image_path: str,
-    female_image_path: str,
+    portrait_a: str,
+    portrait_b: str,
     theme: str,
     genre: str,
 ) -> Optional[str]:
     """Generate a duet portrait depicting both performers together using the
-    Flux2 Klein M-I Edit workflow. Takes the already-rendered male + female
-    single-singer portraits as reference images so the faces stay consistent.
+    Flux2 Klein M-I Edit workflow. Takes any two already-rendered single-singer
+    portraits as reference images so the faces stay consistent — works for
+    male+female (mixed) and, since Fix 27, female+female / male+male.
+
+    `portrait_a` is the lead reference (e.g. the male in a mixed duet, or the
+    solo lead in a same-gender duet); `portrait_b` is the partner. The workflow
+    needs 3 LoadImage inputs, so `portrait_a` is duplicated into slot 36
+    (status-quo Fix 24B). This gives `portrait_a` a ~2:1 reference weight — an
+    acceptable, documented lead bias; if a same-gender duet leans too hard
+    toward the lead, alternating the duplicated ref is the mitigation.
 
     Returns a local PNG path or None on failure (caller falls back to None
     portrait for duet segments → MCA generates from segment prompt alone).
@@ -666,20 +708,21 @@ async def _resolve_duet_portrait(
         # build_duet_portrait_prompt() docstring for the rationale.
         prompt = build_duet_portrait_prompt(theme)
 
-        male_bytes = open(male_image_path, "rb").read()
-        female_bytes = open(female_image_path, "rb").read()
-        male_name = f"duet_m_{uuid.uuid4().hex}.png"
-        female_name = f"duet_f_{uuid.uuid4().hex}.png"
+        a_bytes = open(portrait_a, "rb").read()
+        b_bytes = open(portrait_b, "rb").read()
+        a_name = f"duet_a_{uuid.uuid4().hex}.png"
+        b_name = f"duet_b_{uuid.uuid4().hex}.png"
         # Fix 24B (status quo): the Flux2 Klein M-I Edit workflow requires 3
         # LoadImage inputs feeding 3 sequential ReferenceLatent nodes. We
-        # intentionally re-upload the male bytes as the 3rd reference; the
-        # resulting male-side weight bias is acceptable and documented.
-        male_name_b = f"duet_m2_{uuid.uuid4().hex}.png"
+        # intentionally re-upload the lead (portrait_a) bytes as the 3rd
+        # reference; the resulting lead-side weight bias is acceptable and
+        # documented (see Fix 27 docstring).
+        a_name_dup = f"duet_a2_{uuid.uuid4().hex}.png"
         async with httpx.AsyncClient(timeout=30) as client:
             for name, blob in (
-                (male_name, male_bytes),
-                (female_name, female_bytes),
-                (male_name_b, male_bytes),
+                (a_name, a_bytes),
+                (b_name, b_bytes),
+                (a_name_dup, a_bytes),
             ):
                 up = await client.post(
                     f"{COMFYUI_URL}/upload/image",
@@ -688,9 +731,9 @@ async def _resolve_duet_portrait(
                 )
                 up.raise_for_status()
 
-        wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = male_name
-        wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = female_name
-        wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = male_name_b
+        wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = a_name
+        wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = b_name
+        wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = a_name_dup
         wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = prompt
         wf = randomize_seeds(wf)
 
@@ -806,6 +849,7 @@ async def _run_create_music_video(
     language: str,
     consistent_character: bool,
     tmp_dir: str,
+    duet: str = "",
 ) -> None:
     _job_running(jid)
     try:
@@ -828,7 +872,19 @@ async def _run_create_music_video(
             }
             if lang:
                 settings_dict["language"] = lang
-            audio_path, lyrics_path = await _generate_song(settings_dict, brief)
+            # Fix 27: steer the lyric author toward solo+duet structure for an
+            # explicit same-gender request. Goes into the lyric-author `idea`
+            # (NOT the ACE caption, which must not name voice gender).
+            song_idea = brief
+            if duet in ("ff", "mm"):
+                g = "female" if duet == "ff" else "male"
+                opp = "male" if duet == "ff" else "female"
+                song_idea = (
+                    f"{brief}\n\n[arrangement] Two {g} vocalists only: each solo "
+                    f"section labelled [Verse - {g}] (one consistent lead voice), "
+                    f"shared choruses labelled [Chorus - duet]; no {opp} voice."
+                )
+            audio_path, lyrics_path = await _generate_song(settings_dict, song_idea)
 
         total_duration = get_audio_duration(audio_path)
         theme_eff = theme or brief
@@ -897,18 +953,47 @@ async def _run_create_music_video(
                                 _e = float(_sec.get("end", _sec.get("end_time", 0.0)))
                                 if _label and _e > _s:
                                     detected[_label] = _classify_section(_s, _e, _segments)
+                            # Fix 27: same-gender request reconciliation. Audio
+                            # cannot tell two women (or two men) apart, and a
+                            # same-gender duet chorus reads as plain "female"/
+                            # "male" to inaSpeech (the "duet" class needs BOTH
+                            # genders ≥20%). So in same-gender mode the audio
+                            # acts only as a VETO: if it finds sustained
+                            # opposite-gender vocals the request is a mismatch →
+                            # fall back to mixed routing (run the normal
+                            # override). Otherwise keep the LLM labels verbatim
+                            # so the "duet" choruses survive.
+                            same_gender = duet in ("ff", "mm")
+                            if same_gender:
+                                _vsecs = []
+                                for _sec in aligned:
+                                    _g2 = detected.get(_sec.get("label", ""))
+                                    if not _g2:
+                                        continue
+                                    _s2 = float(_sec.get("start", _sec.get("start_time", 0.0)))
+                                    _e2 = float(_sec.get("end", _sec.get("end_time", 0.0)))
+                                    _vsecs.append((_g2, max(0.0, _e2 - _s2)))
+                                if same_gender_veto(_vsecs, duet):
+                                    print(f"[create-mv] same-gender duet={duet!r} VETOED by audio "
+                                          f"(sustained opposite-gender vocals) → mixed routing")
+                                    duet = ""
+                                    same_gender = False
+                                else:
+                                    print(f"[create-mv] same-gender duet={duet!r} confirmed by audio "
+                                          f"→ keeping LLM labels (no gender override)")
                             corrections = 0
-                            for _sec in aligned:
-                                _g = detected.get(_sec.get("label", ""))
-                                if not _g or _g == "unknown":
-                                    continue
-                                _label = _sec.get("label", "")
-                                _new_label = _re.sub(
-                                    r' - (male|female|duet)\b', f' - {_g}', _label, count=1
-                                )
-                                if _new_label != _label:
-                                    _sec["label"] = _new_label
-                                    corrections += 1
+                            if not same_gender:
+                                for _sec in aligned:
+                                    _g = detected.get(_sec.get("label", ""))
+                                    if not _g or _g == "unknown":
+                                        continue
+                                    _label = _sec.get("label", "")
+                                    _new_label = _re.sub(
+                                        r' - (male|female|duet)\b', f' - {_g}', _label, count=1
+                                    )
+                                    if _new_label != _label:
+                                        _sec["label"] = _new_label
+                                        corrections += 1
                             print(f"[create-mv] gender detection: {detected}; "
                                   f"gender corrections: {corrections}; "
                                   f"mid-section splits: {mid_splits}; "
@@ -939,40 +1024,77 @@ async def _run_create_music_video(
         # combine the male+female portraits via the Flux2 M-I Edit workflow.
         role_groups = partition_anchors_by_role(segments)
         roles_present = {r for r in role_groups.keys() if r is not None}
-        is_multi_role = (
-            consistent_character
-            and len(roles_present) >= 2
-            and source_mode in ("auto", "describe")
+
+        # Fix 27: an explicit same-gender duet (ff/mm) takes a dedicated path —
+        # ONE consistent lead portrait for all solo sections + a distinct
+        # partner portrait that feeds ONLY the shared-duet frame. Section labels
+        # stay "female"/"duet", so the per-segment routing below is unchanged.
+        sg_plan = plan_same_gender_portraits(
+            duet, roles_present, consistent_character, source_mode,
         )
 
         portraits: Dict[str, Optional[str]] = {}
-        if is_multi_role:
-            for role in ("male", "female"):
-                if role in roles_present:
-                    portraits[role] = await _resolve_singer_portrait(
-                        role, theme_eff, lyrics_text, brief, aspect_ratio,
-                    )
-                    await free_comfy()
-            if "duet" in roles_present:
-                male_p = portraits.get("male")
-                female_p = portraits.get("female")
-                if male_p and female_p:
+        if sg_plan is not None:
+            is_multi_role = True
+            base, partner, make_duet = sg_plan
+            # Lead portrait is stored under the plain section role ("female"/
+            # "male") so per-segment routing finds it, but it's SEEDED with the
+            # "1" prefix so the LLM steers it to the FIRST of the two described
+            # singers (distinct from the partner).
+            portraits[base] = await _resolve_singer_portrait(
+                base + "1", theme_eff, lyrics_text, brief, aspect_ratio,
+            )
+            await free_comfy()
+            # Partner = the SECOND same-gender singer; appears only in the duet
+            # frame, never routed to a solo section. Skip it entirely when the
+            # song has no duet chorus (nothing would use it).
+            if make_duet:
+                portraits[partner] = await _resolve_singer_portrait(
+                    partner, theme_eff, lyrics_text, brief, aspect_ratio,
+                )
+                await free_comfy()
+                if portraits.get(base) and portraits.get(partner):
                     portraits["duet"] = await _resolve_duet_portrait(
-                        male_p, female_p, theme_eff, brief,
+                        portraits[base], portraits[partner], theme_eff, brief,
                     )
                     await free_comfy()
             source: Optional[str] = (
-                portraits.get("male")
-                or portraits.get("female")
+                portraits.get(base)
                 or next((v for v in portraits.values() if v), None)
             )
         else:
-            # Legacy single-portrait path (upload/none source modes or only one role).
-            source = await _resolve_source_image(
-                source_mode, source_image_bytes, source_image_name,
-                source_description, theme_eff, lyrics_text, brief,
-                aspect_ratio, consistent_character, tmp_dir,
+            is_multi_role = (
+                consistent_character
+                and len(roles_present) >= 2
+                and source_mode in ("auto", "describe")
             )
+            if is_multi_role:
+                for role in ("male", "female"):
+                    if role in roles_present:
+                        portraits[role] = await _resolve_singer_portrait(
+                            role, theme_eff, lyrics_text, brief, aspect_ratio,
+                        )
+                        await free_comfy()
+                if "duet" in roles_present:
+                    male_p = portraits.get("male")
+                    female_p = portraits.get("female")
+                    if male_p and female_p:
+                        portraits["duet"] = await _resolve_duet_portrait(
+                            male_p, female_p, theme_eff, brief,
+                        )
+                        await free_comfy()
+                source = (
+                    portraits.get("male")
+                    or portraits.get("female")
+                    or next((v for v in portraits.values() if v), None)
+                )
+            else:
+                # Legacy single-portrait path (upload/none source modes or only one role).
+                source = await _resolve_source_image(
+                    source_mode, source_image_bytes, source_image_name,
+                    source_description, theme_eff, lyrics_text, brief,
+                    aspect_ratio, consistent_character, tmp_dir,
+                )
 
         # RC8 chorus reuse: only generate MCA frames for non-repeated segments.
         # Multi-role path: each anchor gets the portrait matching its role.
@@ -1144,6 +1266,7 @@ async def create_music_video(
     aspect_ratio: str = Form("16:9"),
     language: str = Form(""),
     consistent_character: bool = Form(True),
+    duet: str = Form(""),
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -1152,8 +1275,16 @@ async def create_music_video(
     section labels with role hints (e.g. "[Verse - male]", "[Chorus - female]",
     "[Bridge - duet]"), the pipeline generates one portrait per detected role
     and routes each segment to the matching portrait. Duet portraits use the
-    Flux2 M-I Edit workflow with the male+female portraits as references.
+    Flux2 M-I Edit workflow with the two singer portraits as references.
+
+    `duet` (Fix 27) is an explicit SAME-GENDER intent: "ff" = two female
+    vocalists, "mm" = two male vocalists. When set (and the audio analysis does
+    not contradict it with sustained opposite-gender vocals), solo sections are
+    rendered with one consistent lead character and a SECOND distinct partner
+    portrait is generated so the shared-duet frame depicts both people. Empty
+    string keeps the standard male/female routing.
     """
+    duet = duet if duet in ("ff", "mm") else ""
     tmp_dir = tempfile.mkdtemp(prefix="ctb_cmv_")
     song_path = None
     if song is not None:
@@ -1167,7 +1298,7 @@ async def create_music_video(
     asyncio.create_task(_run_create_music_video(
         jid, brief, song_path, theme, source_mode, src_bytes, src_name,
         source_description, duration, video_workflow_id, crossfade_duration,
-        aspect_ratio, language, consistent_character, tmp_dir,
+        aspect_ratio, language, consistent_character, tmp_dir, duet,
     ))
     return {"job_id": jid}
 
