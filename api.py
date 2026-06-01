@@ -850,6 +850,7 @@ async def _run_create_music_video(
     consistent_character: bool,
     tmp_dir: str,
     duet: str = "",
+    time_of_day_arc: str = "",
 ) -> None:
     _job_running(jid)
     try:
@@ -1004,9 +1005,12 @@ async def _run_create_music_video(
                     print(f"[create-mv] gender detection failed (non-fatal): {_e!r}")
 
         # 2b. Creative segment plan (aligned timestamps if available).
+        # Fix 29: pass user-supplied time-of-day arc override through. Empty
+        # string → plan_segments runs the LLM mini-call (or genre default).
         segments = await MV_PROMPTER.plan_segments(
             lyrics_text, theme_eff, total_duration, genre=brief,
             aligned_sections=aligned,
+            time_of_day_arc=(time_of_day_arc or None),
         )
 
         seg_dir = os.path.join(tmp_dir, "segments")
@@ -1267,6 +1271,7 @@ async def create_music_video(
     language: str = Form(""),
     consistent_character: bool = Form(True),
     duet: str = Form(""),
+    time_of_day_arc: str = Form(""),
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -1285,6 +1290,13 @@ async def create_music_video(
     string keeps the standard male/female routing.
     """
     duet = duet if duet in ("ff", "mm") else ""
+    # Fix 29: validate against known arcs in the pipeline module; pass empty
+    # string when caller's value is not recognized (pipeline will LLM-pick).
+    try:
+        from music_video_pipeline import TIME_OF_DAY_ARCS as _TOD_ARCS
+        tod_arc = time_of_day_arc if time_of_day_arc in _TOD_ARCS else ""
+    except Exception:
+        tod_arc = ""
     tmp_dir = tempfile.mkdtemp(prefix="ctb_cmv_")
     song_path = None
     if song is not None:
@@ -1298,7 +1310,7 @@ async def create_music_video(
     asyncio.create_task(_run_create_music_video(
         jid, brief, song_path, theme, source_mode, src_bytes, src_name,
         source_description, duration, video_workflow_id, crossfade_duration,
-        aspect_ratio, language, consistent_character, tmp_dir, duet,
+        aspect_ratio, language, consistent_character, tmp_dir, duet, tod_arc,
     ))
     return {"job_id": jid}
 

@@ -15,7 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -704,6 +704,157 @@ def build_segment_timeline(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Fix 29 — Time-of-Day Coherence
+#
+# Lighting state per segment is determined deterministically BEFORE the LLM
+# generates segment prompts: an arc is selected (LLM mini-call or override),
+# expanded proportionally to the segment count, and each per-segment light
+# state is both injected into the segment-planning system prompt AND
+# appended to the final video_prompt / frame_variant_prompt as a guarantee.
+# ---------------------------------------------------------------------------
+
+TIME_OF_DAY_STATES: Dict[str, str] = {
+    "pre_dawn":         "pre-dawn — deep cool blue twilight, faint horizon glow, ambient blue cast",
+    "dawn":             "dawn — soft pink and orange horizon, long cool shadows, low warm-cool mixed light",
+    "early_sunrise":    "early sunrise — low warm sun just above horizon, long shadows, golden-pink rim light",
+    "morning_golden":   "morning golden hour — warm low sun, golden rim light, long soft shadows, hazy air",
+    "bright_morning":   "bright mid-morning — clear high light, crisp shadows, cool clean daylight",
+    "midday":           "midday — high overhead sun, short hard shadows, bright neutral daylight",
+    "afternoon":        "warm afternoon — angled warm sun, medium shadows, slightly amber daylight",
+    "golden_hour_late": "late golden hour — low warm orange sun, long shadows, saturated amber tones",
+    "sunset":           "sunset — vivid orange and magenta sky, silhouettes against bright horizon",
+    "blue_hour":        "blue hour — deep saturated blue sky after sunset, glowing horizon, cool ambient light",
+    "night":            "night — deep dark sky, practical and ambient light sources, cool moonlight rim",
+    "moonlit":          "moonlit night — soft cool blue moonlight, deep shadows, silvery highlights",
+    "overcast":         "overcast — flat soft diffused daylight, no hard shadows, cool grey-white tone",
+    "stormy":           "stormy daylight — dark cloud cover, dramatic diffused light, occasional shafts of sun",
+}
+
+
+# Each arc is a template list. _expand_tod_plan() resamples it to the segment
+# count so progression scales naturally for songs of any length. Progression
+# is always forward in time (or constant) — never jumps backward.
+TIME_OF_DAY_ARCS: Dict[str, List[str]] = {
+    "single_golden_hour":      ["morning_golden"],
+    "single_midday":           ["midday"],
+    "single_afternoon":        ["afternoon"],
+    "single_blue_hour":        ["blue_hour"],
+    "single_night":            ["night"],
+    "single_moonlit":          ["moonlit"],
+    "overcast_constant":       ["overcast"],
+    "stormy_constant":         ["stormy"],
+    "sunrise_to_morning":      ["dawn", "early_sunrise", "morning_golden", "bright_morning"],
+    "morning_to_midday":       ["morning_golden", "bright_morning", "midday"],
+    "midday_to_afternoon":     ["midday", "afternoon", "golden_hour_late"],
+    "golden_hour_to_blue_hour":["morning_golden", "afternoon", "golden_hour_late", "sunset", "blue_hour"],
+    "afternoon_to_sunset":     ["afternoon", "golden_hour_late", "sunset"],
+    "sunset_to_night":         ["golden_hour_late", "sunset", "blue_hour", "night"],
+    "night_to_dawn":           ["night", "moonlit", "pre_dawn", "dawn"],
+    "blue_hour_to_night":      ["blue_hour", "night", "moonlit"],
+}
+
+
+# Genre substring → arc-key fallback (lower-case prefix match). First hit
+# wins. Used when the LLM mini-call fails AND no user override is provided.
+_GENRE_TIME_OF_DAY_DEFAULT: List[Tuple[str, str]] = [
+    ("reggae",       "golden_hour_to_blue_hour"),
+    ("ska",          "golden_hour_to_blue_hour"),
+    ("tropical",     "golden_hour_to_blue_hour"),
+    ("surf",         "morning_to_midday"),
+    ("country",      "morning_to_midday"),
+    ("folk",         "morning_to_midday"),
+    ("acoustic",     "morning_to_midday"),
+    ("ambient",      "blue_hour_to_night"),
+    ("synthwave",    "blue_hour_to_night"),
+    ("cyberpunk",    "single_night"),
+    ("darkwave",     "single_night"),
+    ("industrial",   "single_night"),
+    ("metal",        "stormy_constant"),
+    ("doom",         "stormy_constant"),
+    ("gothic",       "blue_hour_to_night"),
+    ("trance",       "sunset_to_night"),
+    ("techno",       "single_night"),
+    ("house",        "sunset_to_night"),
+    ("edm",          "sunset_to_night"),
+    ("rnb",          "blue_hour_to_night"),
+    ("soul",         "afternoon_to_sunset"),
+    ("jazz",         "blue_hour_to_night"),
+    ("blues",        "afternoon_to_sunset"),
+    ("hip hop",      "single_night"),
+    ("rap",          "single_night"),
+    ("lofi",         "afternoon_to_sunset"),
+    ("classical",    "morning_to_midday"),
+    ("orchestral",   "golden_hour_to_blue_hour"),
+    ("pop",          "midday_to_afternoon"),
+    ("rock",         "afternoon_to_sunset"),
+    ("punk",         "midday_to_afternoon"),
+    ("indie",        "afternoon_to_sunset"),
+]
+
+_DEFAULT_TIME_OF_DAY_ARC = "golden_hour_to_blue_hour"
+
+
+def _expand_tod_plan(arc_key: str, n_segments: int) -> List[str]:
+    """Expand an arc template to exactly n_segments states, monotonic forward.
+
+    A single-state arc returns [state] * n. A multi-state template is
+    resampled by mapping each segment index to its proportional position in
+    the template (floor), so longer songs stretch the progression smoothly.
+    Falls back to the default arc if arc_key is unknown.
+    """
+    if n_segments <= 0:
+        return []
+    template = TIME_OF_DAY_ARCS.get(arc_key) or TIME_OF_DAY_ARCS[_DEFAULT_TIME_OF_DAY_ARC]
+    if len(template) == 1:
+        return [template[0]] * n_segments
+    out: List[str] = []
+    m = len(template)
+    for i in range(n_segments):
+        # Map segment i to template slot via floor; last segment always hits
+        # the final template state so the arc lands on its closing light.
+        if n_segments == 1:
+            idx = m - 1
+        else:
+            idx = min(m - 1, int(round(i * (m - 1) / (n_segments - 1))))
+        out.append(template[idx])
+    return out
+
+
+def _genre_default_tod_arc(genre: str) -> str:
+    g = (genre or "").lower()
+    for substr, arc in _GENRE_TIME_OF_DAY_DEFAULT:
+        if substr in g:
+            return arc
+    return _DEFAULT_TIME_OF_DAY_ARC
+
+
+def _light_tag_suffix(state_key: str) -> str:
+    """Return the ', lit by ...' suffix appended to every prompt as a guard."""
+    text = TIME_OF_DAY_STATES.get(state_key) or ""
+    if not text:
+        return ""
+    return f", lit by {text}"
+
+
+def _append_light_tag(prompt: str, state_key: str) -> str:
+    """Append the light-state suffix idempotently to a prompt string.
+
+    If the prompt already contains the exact suffix (or the state key as a
+    word), the prompt is returned unchanged so re-runs and partial overlap
+    do not pile up duplicate lighting tails.
+    """
+    suffix = _light_tag_suffix(state_key)
+    if not suffix:
+        return prompt
+    base = (prompt or "").rstrip()
+    if not base:
+        return suffix.lstrip(", ").capitalize()
+    if suffix.strip(", ") in base:
+        return base
+    return base.rstrip(".") + suffix
+
+
 _SEG_DIRECTOR_RULES = (
     "You are a creative music video director. The video features ONE recurring "
     "singer/performer; vary location, outfit detail, pose and background per "
@@ -765,7 +916,27 @@ _SEG_DIRECTOR_RULES = (
     "'Medium close-up of ', 'Medium shot of ', '3/4 angle of ', "
     "'Low-angle shot of ', 'High-angle shot of '. The matching VOCAL "
     "frame_variant_prompt MUST start with the same framing phrase so the "
-    "opening still is already close — never let the clip begin distant. "
+    "opening still is already close — never let the clip begin distant.\n\n"
+    "UNIVERSAL SCENE-FRAMING RULE (Fix 29 — applies to BOTH vocal and story "
+    "segments; overrides any creative impulse): "
+    "FORBIDDEN in every segment (intro, outro, build, drop, instrumental, "
+    "vocal — all of them): anonymous distant figures walking toward or away "
+    "from the camera (silhouettes, 'two people approaching', crowd-as-backdrop "
+    "with no role); stock-establisher tropes such as 'two women walking along "
+    "the beach in the distance', 'silhouettes approaching across the field at "
+    "sunrise', 'long-lens dot-in-landscape of people'; aerial/drone shots that "
+    "contain identifiable people in mid- or long-distance — drone shots must "
+    "either contain NO people, or show people only top-down as part of the "
+    "environment, not as recognizable characters. "
+    "ALLOWED (story beats with narrative purpose): named or clearly identified "
+    "characters performing a specific action — e.g. a Rastafari DJ at his "
+    "turntables, a dancer on the sand, a surfer riding a wave, a fisherman "
+    "pulling nets, a child building a sandcastle. Such characters may appear "
+    "at any framing (close, medium, wide) as long as they are described as a "
+    "specific subject with a role, never as anonymous figures. "
+    "TEST: if the scene subject can be replaced with 'two unnamed people "
+    "walking' and you lose nothing, the scene is FORBIDDEN. If the scene "
+    "depends on WHO the character is and WHAT they are doing, it is ALLOWED.\n\n"
     "Always write every prompt in English regardless of input language."
 )
 
@@ -1373,6 +1544,63 @@ class MusicVideoPrompter:
         print(f"Full response:\n{response}")
         return [theme] * len(segments)
 
+    async def _pick_time_of_day_arc(
+        self,
+        theme: str,
+        genre: str,
+        lyrics_text: str,
+        total_duration: float,
+    ) -> str:
+        """Fix 29 — LLM-pick a coherent time-of-day arc for the whole song.
+
+        Returns an arc-key from TIME_OF_DAY_ARCS. Falls back to the genre
+        default (then global default) when the LLM call fails or returns
+        something unrecognized.
+        """
+        arc_keys = list(TIME_OF_DAY_ARCS.keys())
+        fallback = _genre_default_tod_arc(genre)
+        lyrics_sample = (lyrics_text or "").strip()
+        if len(lyrics_sample) > 1200:
+            lyrics_sample = lyrics_sample[:1200] + " […]"
+        system = (
+            "You are a music-video lighting designer. Choose ONE time-of-day "
+            "arc that best fits the song's theme, genre, and lyrical mood. "
+            "The arc lights the WHOLE video coherently — no random jumps. "
+            "Pick the single arc key that fits best. Return ONLY the key, "
+            "no quotes, no extra text. Allowed keys:\n  - "
+            + "\n  - ".join(arc_keys)
+        )
+        user = (
+            f"Theme/style: {theme or 'unspecified'}\n"
+            f"Genre: {genre or 'unspecified'}\n"
+            f"Song length: {int(total_duration)} seconds\n"
+            f"Lyrics (with [section] tags):\n{lyrics_sample or '(instrumental — no lyrics)'}\n\n"
+            "Return only the arc key."
+        )
+        try:
+            resp = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=40,
+            )
+        except Exception as e:
+            print(f"[Fix 29] time-of-day arc pick failed ({e!r}); using genre default '{fallback}'.")
+            return fallback
+        # Normalize: first whitespace-stripped token, lowercased, drop quotes.
+        token = (resp or "").strip().splitlines()[0:1]
+        token = (token[0] if token else "").strip().strip("'\"`").lower()
+        # Sometimes the model wraps in backticks or adds 'arc: ' prefix.
+        for prefix in ("arc:", "key:", "answer:", "tod:", "time-of-day:"):
+            if token.startswith(prefix):
+                token = token[len(prefix):].strip()
+        if token in TIME_OF_DAY_ARCS:
+            print(f"[Fix 29] time-of-day arc: '{token}' (LLM-picked).")
+            return token
+        print(f"[Fix 29] LLM returned unknown arc '{token!r}'; using genre default '{fallback}'.")
+        return fallback
+
     async def plan_segments(
         self,
         lyrics_text: str,
@@ -1382,6 +1610,7 @@ class MusicVideoPrompter:
         min_seg: float = 8.0,
         max_seg: float = 30.0,
         aligned_sections: Optional[List[Dict[str, Any]]] = None,
+        time_of_day_arc: Optional[str] = None,
     ) -> List[Segment]:
         """Plan creative, variably-sized segments from lyrics + theme.
 
@@ -1397,29 +1626,65 @@ class MusicVideoPrompter:
         """
         cap = min(float(max_seg), 30.0)
 
+        # ---- Fix 29: resolve the song-wide time-of-day arc once. ----------
+        # User override (API param) > LLM mini-call > genre default. The
+        # resolved arc is later expanded to a per-segment lighting plan
+        # injected into the LLM prompt AND appended to each final prompt.
+        if time_of_day_arc and time_of_day_arc in TIME_OF_DAY_ARCS:
+            arc_key = time_of_day_arc
+            print(f"[Fix 29] time-of-day arc: '{arc_key}' (caller override).")
+        else:
+            if time_of_day_arc:
+                print(f"[Fix 29] caller passed unknown arc '{time_of_day_arc}'; "
+                      f"falling back to LLM pick.")
+            arc_key = await self._pick_time_of_day_arc(
+                theme=theme, genre=genre,
+                lyrics_text=lyrics_text, total_duration=total_duration,
+            )
+        arc_template_states = TIME_OF_DAY_ARCS.get(arc_key) or TIME_OF_DAY_ARCS[_DEFAULT_TIME_OF_DAY_ARC]
+        arc_human = " → ".join(arc_template_states)
+
         # ---- RC8 aligned mode: fixed real-timestamp rows ------------------
         if aligned_sections:
             rows = build_aligned_timeline(aligned_sections, min_seg, cap, total_duration)
             if rows:
+                tod_plan = _expand_tod_plan(arc_key, len(rows))
+                tod_listing = "\n".join(
+                    f"  {i}. {state} — {TIME_OF_DAY_STATES.get(state, '')}"
+                    for i, state in enumerate(tod_plan)
+                )
                 listing = "\n".join(
                     f'{i}. [{ "VOCAL" if r["is_vocal"] else "STORY" }] '
-                    f'{r["label"]} ({round(r["end_time"]-r["start_time"],1)}s)'
+                    f'{r["label"]} ({round(r["end_time"]-r["start_time"],1)}s) '
+                    f'[lighting: {tod_plan[i]}]'
                     + (f' lyrics: "{r["lyrics"][:160]}"' if r["is_vocal"] and r["lyrics"] else "")
                     for i, r in enumerate(rows)
                 )
                 aligned_system = (
                     _SEG_DIRECTOR_RULES + "\n\n"
+                    "TIME-OF-DAY COHERENCE (Fix 29 — graded): this video has a "
+                    "FIXED time-of-day plan, one lighting state per segment. "
+                    "You MUST describe lighting in BOTH video_prompt and "
+                    "frame_variant_prompt that is consistent with the assigned "
+                    "lighting state for that segment. Do NOT introduce "
+                    "contradictory lighting (e.g. no 'bright sunshine' in a "
+                    "'blue_hour' segment, no 'sunset' in a 'midday' segment). "
+                    "Lighting only moves forward in the day — never jump "
+                    "backward in time across segments.\n\n"
                     "You are given a FIXED ordered list of sections with their "
-                    "kind (VOCAL/STORY) and lyrics. Return a JSON array with "
-                    "EXACTLY one object per listed section, in the SAME order — "
-                    "do NOT add, remove, reorder, merge or change durations. "
-                    "For each: video_prompt + frame_variant_prompt per the "
-                    "VOCAL/STORY rules above (VOCAL must quote its exact lyrics; "
-                    "STORY is cinematic narrative, no singer/lyrics). "
+                    "kind (VOCAL/STORY), lyrics, and lighting state. Return a "
+                    "JSON array with EXACTLY one object per listed section, in "
+                    "the SAME order — do NOT add, remove, reorder, merge or "
+                    "change durations. For each: video_prompt + "
+                    "frame_variant_prompt per the VOCAL/STORY rules above "
+                    "(VOCAL must quote its exact lyrics; STORY is cinematic "
+                    "narrative, no singer/lyrics). "
                     "Return ONLY the JSON array, no other text."
                 )
                 aligned_user = (
                     f"Visual theme/style: {theme}\nGenre: {genre or 'unspecified'}\n\n"
+                    f"Time-of-day arc: {arc_key} ({arc_human})\n"
+                    f"Per-segment lighting plan:\n{tod_listing}\n\n"
                     f"Sections (return exactly {len(rows)} objects, same order):\n"
                     f"{listing}\n\nReturn the JSON array now."
                 )
@@ -1443,6 +1708,12 @@ class MusicVideoPrompter:
                         spec = specs[i]
                         vp = _segment_video_prompt(spec, theme)
                         fvp = str(spec.get("frame_variant_prompt", "")).strip() or vp
+                        # Fix 29 post-injection: append the light-state suffix
+                        # to both prompts so the T2V/T2I model receives the
+                        # locked lighting even if the LLM ignored the rule.
+                        state = tod_plan[i]
+                        vp = _append_light_tag(vp, state)
+                        fvp = _append_light_tag(fvp, state)
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -1454,6 +1725,8 @@ class MusicVideoPrompter:
                             reuse_of=r.get("reuse_of"),
                         ))
                     if segments:
+                        print(f"[Fix 29] aligned lighting plan applied: "
+                              f"{[tod_plan[i] for i in range(len(segments))]}")
                         return segments
                 print(f"Warning: aligned segment plan unusable "
                       f"({len(specs)}/{len(rows)} specs) after retry → falling back to "
@@ -1549,9 +1822,23 @@ class MusicVideoPrompter:
             f"Visual theme/style: {theme}\n"
             f"Genre: {genre or 'unspecified'}\n"
             f"Song length: {int(total_duration)} seconds\n"
-            f"Aim for roughly {approx_min}-{approx_max} segments.\n\n"
+            f"Aim for roughly {approx_min}-{approx_max} segments.\n"
+            f"Time-of-day arc (Fix 29 — graded): {arc_key} ({arc_human}). "
+            f"Lighting progresses through this arc across the video; every "
+            f"segment must describe lighting consistent with its position in "
+            f"the arc. Never jump backward in time.\n\n"
             f"Lyrics (with [section] tags):\n{lyrics_text or '(instrumental — no lyrics)'}\n\n"
             "Return the JSON array now."
+        )
+
+        # Inject TIME-OF-DAY rule block into legacy-path system prompt too.
+        system_prompt = system_prompt + (
+            "\nTIME-OF-DAY COHERENCE (Fix 29 — graded): the song is locked to "
+            f"the '{arc_key}' arc ({arc_human}). Earlier segments use the "
+            "earlier states of the arc; later segments use the later states. "
+            "Lighting only moves FORWARD across segments — never jump "
+            "backward in time. Mention the appropriate lighting in BOTH "
+            "video_prompt and frame_variant_prompt for each segment."
         )
 
         response = await self._call_openrouter(
@@ -1567,9 +1854,16 @@ class MusicVideoPrompter:
         if not timeline:
             timeline = build_segment_timeline([], total_duration, min_seg, cap)
 
+        # Fix 29: per-segment lighting plan + post-injection guard.
+        tod_plan = _expand_tod_plan(arc_key, len(timeline))
         segments: List[Segment] = []
         for i, row in enumerate(timeline):
             vp = row.get("video_prompt") or theme
+            fvp = row.get("frame_variant_prompt") or vp
+            state = tod_plan[i] if i < len(tod_plan) else (tod_plan[-1] if tod_plan else "")
+            if state:
+                vp = _append_light_tag(vp, state)
+                fvp = _append_light_tag(fvp, state)
             segments.append(Segment(
                 index=i,
                 start_time=row["start_time"],
@@ -1577,8 +1871,10 @@ class MusicVideoPrompter:
                 label=row.get("label", f"Segment {i + 1}"),
                 lyrics=row.get("lyrics", ""),
                 prompt=vp,
-                frame_variant_prompt=strip_lyrics_from_image_prompt(row.get("frame_variant_prompt") or vp),
+                frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
             ))
+        if tod_plan:
+            print(f"[Fix 29] legacy lighting plan applied: {tod_plan}")
         return segments
 
     async def analyze_frame(self, frame_path: str) -> str:
