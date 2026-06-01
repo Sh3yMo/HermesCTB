@@ -678,6 +678,7 @@ async def _resolve_duet_portrait(
     portrait_b: str,
     theme: str,
     genre: str,
+    wardrobe_slot: str = "",
 ) -> Optional[str]:
     """Generate a duet portrait depicting both performers together using the
     Flux2 Klein M-I Edit workflow. Takes any two already-rendered single-singer
@@ -706,7 +707,10 @@ async def _resolve_duet_portrait(
 
         # Fix 24A: deterministic identity-neutral prompt — no LLM call. See
         # build_duet_portrait_prompt() docstring for the rationale.
-        prompt = build_duet_portrait_prompt(theme)
+        # Fix 30 (B1): pass the active wardrobe slot through so the duet
+        # portrait anchors clothing to the same outfit as surrounding solo
+        # segments. Empty string keeps the legacy generic-costume prompt.
+        prompt = build_duet_portrait_prompt(theme, wardrobe_slot=wardrobe_slot)
 
         a_bytes = open(portrait_a, "rb").read()
         b_bytes = open(portrait_b, "rb").read()
@@ -851,6 +855,7 @@ async def _run_create_music_video(
     tmp_dir: str,
     duet: str = "",
     time_of_day_arc: str = "",
+    wardrobe_arc: str = "",
 ) -> None:
     _job_running(jid)
     try:
@@ -1005,12 +1010,14 @@ async def _run_create_music_video(
                     print(f"[create-mv] gender detection failed (non-fatal): {_e!r}")
 
         # 2b. Creative segment plan (aligned timestamps if available).
-        # Fix 29: pass user-supplied time-of-day arc override through. Empty
-        # string → plan_segments runs the LLM mini-call (or genre default).
+        # Fix 29 + Fix 30: pass user-supplied time-of-day and wardrobe arc
+        # overrides through. Empty string → plan_segments runs the LLM
+        # mini-call (or genre default) for each.
         segments = await MV_PROMPTER.plan_segments(
             lyrics_text, theme_eff, total_duration, genre=brief,
             aligned_sections=aligned,
             time_of_day_arc=(time_of_day_arc or None),
+            wardrobe_arc=(wardrobe_arc or None),
         )
 
         seg_dir = os.path.join(tmp_dir, "segments")
@@ -1058,8 +1065,17 @@ async def _run_create_music_video(
                 )
                 await free_comfy()
                 if portraits.get(base) and portraits.get(partner):
+                    # Fix 30 (B1): anchor the duet portrait to the wardrobe
+                    # slot of the first duet segment so clothing matches the
+                    # solo frames. Fallback: first segment's slot.
+                    duet_slot = next(
+                        (s.wardrobe_slot for s in segments
+                         if extract_section_role(s.label) == "duet" and s.wardrobe_slot),
+                        "",
+                    ) or (segments[0].wardrobe_slot if segments else "")
                     portraits["duet"] = await _resolve_duet_portrait(
                         portraits[base], portraits[partner], theme_eff, brief,
+                        wardrobe_slot=duet_slot,
                     )
                     await free_comfy()
             source: Optional[str] = (
@@ -1083,8 +1099,16 @@ async def _run_create_music_video(
                     male_p = portraits.get("male")
                     female_p = portraits.get("female")
                     if male_p and female_p:
+                        # Fix 30 (B1): anchor duet portrait to first duet
+                        # segment's wardrobe slot for clothing continuity.
+                        duet_slot = next(
+                            (s.wardrobe_slot for s in segments
+                             if extract_section_role(s.label) == "duet" and s.wardrobe_slot),
+                            "",
+                        ) or (segments[0].wardrobe_slot if segments else "")
                         portraits["duet"] = await _resolve_duet_portrait(
                             male_p, female_p, theme_eff, brief,
+                            wardrobe_slot=duet_slot,
                         )
                         await free_comfy()
                 source = (
@@ -1272,6 +1296,7 @@ async def create_music_video(
     consistent_character: bool = Form(True),
     duet: str = Form(""),
     time_of_day_arc: str = Form(""),
+    wardrobe_arc: str = Form(""),
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -1290,13 +1315,18 @@ async def create_music_video(
     string keeps the standard male/female routing.
     """
     duet = duet if duet in ("ff", "mm") else ""
-    # Fix 29: validate against known arcs in the pipeline module; pass empty
+    # Fix 29 + Fix 30: validate arc form params against known arcs. Pass empty
     # string when caller's value is not recognized (pipeline will LLM-pick).
     try:
-        from music_video_pipeline import TIME_OF_DAY_ARCS as _TOD_ARCS
+        from music_video_pipeline import (
+            TIME_OF_DAY_ARCS as _TOD_ARCS,
+            WARDROBE_ARCS as _WARDROBE_ARCS,
+        )
         tod_arc = time_of_day_arc if time_of_day_arc in _TOD_ARCS else ""
+        wardrobe_arc_eff = wardrobe_arc if wardrobe_arc in _WARDROBE_ARCS else ""
     except Exception:
         tod_arc = ""
+        wardrobe_arc_eff = ""
     tmp_dir = tempfile.mkdtemp(prefix="ctb_cmv_")
     song_path = None
     if song is not None:
@@ -1311,6 +1341,7 @@ async def create_music_video(
         jid, brief, song_path, theme, source_mode, src_bytes, src_name,
         source_description, duration, video_workflow_id, crossfade_duration,
         aspect_ratio, language, consistent_character, tmp_dir, duet, tod_arc,
+        wardrobe_arc_eff,
     ))
     return {"job_id": jid}
 

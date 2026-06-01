@@ -47,8 +47,8 @@ def strip_lyrics_from_image_prompt(prompt: str) -> str:
     return cleaned.strip(" ,.;:")
 
 
-def build_duet_portrait_prompt(theme: str) -> str:
-    """Fix 24A: deterministic identity-neutral prompt for the duet portrait.
+def build_duet_portrait_prompt(theme: str, wardrobe_slot: str = "") -> str:
+    """Fix 24A + Fix 30: deterministic identity-neutral prompt for the duet portrait.
 
     The previous duet path called the SINGLE-portrait LLM prompt generator,
     whose system prompt told the model to "establish face/hair/skin tone" —
@@ -57,16 +57,37 @@ def build_duet_portrait_prompt(theme: str) -> str:
     vs. the two single-singer portraits. The reference images supply identity;
     this prompt only describes composition, framing, background and lighting,
     plus an explicit identity-lock clause for the T2I model.
+
+    Fix 30 — duet identity hardening:
+    - B1: when wardrobe_slot is provided, anchor BOTH performers' outfits to
+      the established wardrobe slot description so clothing matches the
+      surrounding solo segments (clothing acts as a re-identification cue).
+    - B3: stronger identity-preservation clause covering eye colour,
+      eyebrow/nose/lip shape, jawline, body proportions and height.
     """
     theme_clause = f" Theme context: {theme}." if theme else ""
+    wardrobe_text = WARDROBE_STATES.get(wardrobe_slot or "", "")
+    wardrobe_clause = (
+        f" Both performers wear their established costumes from the reference "
+        f"images, matching the wardrobe slot ({wardrobe_text}); DO NOT change "
+        f"clothing colour, cut or style between the references and the duet."
+        if wardrobe_text else
+        " Both performers wear their established costumes from the reference "
+        "images; DO NOT change clothing colour, cut or style."
+    )
     return (
         "Two performers standing side-by-side as a single front-facing "
         "couple portrait, shown from head to waist, both faces and mouths "
         "clearly visible and in sharp focus. Plain neutral white-to-light-"
         "grey studio background, even soft studio lighting, no shadows, "
         "no props or scenery, no other people. Preserve each performer's "
-        "face, hair colour, hair style, skin tone and build EXACTLY as in "
-        "the reference images; do not restyle or recolour them."
+        "face, hair colour, hair style, skin tone, build, eye colour, "
+        "eyebrow shape, nose shape, lip shape, jawline, body proportions "
+        "and height EXACTLY as in the reference images; do not restyle or "
+        "recolour them. The result must be recognizable as the SAME two "
+        "people as in the reference images, NOT new performers in a "
+        "similar style."
+        f"{wardrobe_clause}"
         f"{theme_clause}"
     )
 
@@ -88,6 +109,7 @@ class Segment:
     transition: str = "cut"  # "cut" or "crossfade"
     status: str = "pending"  # "pending", "generating", "completed"
     reuse_of: Optional[int] = None  # RC8: reuse this earlier segment's MCA frame (repeated chorus)
+    wardrobe_slot: str = ""  # Fix 30: wardrobe slot key for this segment (identity anchor)
 
     @property
     def duration(self) -> float:
@@ -855,10 +877,165 @@ def _append_light_tag(prompt: str, state_key: str) -> str:
     return base.rstrip(".") + suffix
 
 
+# ---------------------------------------------------------------------------
+# Fix 30 — Wardrobe Coherence
+#
+# Per-song wardrobe arc determined deterministically BEFORE the LLM
+# generates segment prompts: an arc is selected (LLM mini-call or override),
+# expanded proportionally to the segment count, and each per-segment outfit
+# slot is both injected into the segment-planning system prompt AND
+# appended to the final video_prompt / frame_variant_prompt as a guarantee.
+# ---------------------------------------------------------------------------
+
+WARDROBE_STATES: Dict[str, str] = {
+    "casual_beachwear":        "flowing white cotton sundress with thin straps, knee-length, barefoot, simple gold necklace",
+    "bohemian_summer":         "tan crochet crop top and ivory wide-leg linen pants, layered beaded necklaces, leather sandals",
+    "casual_evening":          "fitted black silk camisole and dark high-waisted denim jeans, ankle boots, small gold hoop earrings",
+    "tropical_relaxed":        "loose pastel-yellow off-shoulder blouse and white cotton shorts, woven straw hat, leather sandals",
+    "streetwear_urban":        "oversized graphic tee and baggy black cargo pants, white chunky sneakers, silver chain necklace",
+    "streetwear_neon":         "neon-pink cropped hoodie and black biker shorts, white platform sneakers, tinted sunglasses",
+    "athletic_active":         "fitted black sports top and matching high-waisted leggings, white running shoes, slick high ponytail",
+    "performance_stage":       "black sequined halter bodysuit and matching shorts, black ankle boots, statement silver earrings",
+    "performance_glam":        "shimmering gold mini dress with thin straps, gold strappy heels, bold red lip",
+    "intimate_indoor":         "soft cream knit sweater and faded blue jeans, barefoot, hair down naturally",
+    "formal_evening":          "deep-burgundy long satin gown with thin straps, simple silver necklace, hair swept to one side",
+    "vintage_retro_70s":       "high-waisted flared jeans and a fitted floral-print blouse with bell sleeves, tan suede boots",
+    "denim_classic":           "fitted blue denim jacket, white tee underneath, dark wash skinny jeans, brown leather boots",
+    "rocker_edgy":             "black leather biker jacket, vintage band tee, ripped black skinny jeans, scuffed black boots",
+    "country_western":         "blue denim shirt knotted at the waist, white cutoff shorts, brown leather cowboy boots, leather belt",
+    "elegant_cocktail":        "fitted black sleeveless cocktail dress at the knee, simple pearl earrings, classic black pumps",
+}
+
+
+# Each arc is a template list of slot keys. _expand_wardrobe_plan() resamples
+# it to the segment count so progression scales naturally. The wardrobe
+# changes only at slot boundaries — within a slot, all segments share the
+# same outfit, so identity is anchored by clothing colour and cut.
+WARDROBE_ARCS: Dict[str, List[str]] = {
+    "single_outfit_beachwear":    ["casual_beachwear"],
+    "single_outfit_performance":  ["performance_stage"],
+    "single_outfit_streetwear":   ["streetwear_urban"],
+    "single_outfit_intimate":     ["intimate_indoor"],
+    "single_outfit_formal":       ["formal_evening"],
+    "daywear_to_evening":         ["casual_beachwear", "bohemian_summer", "casual_evening"],
+    "beachwear_to_glam":          ["casual_beachwear", "tropical_relaxed", "performance_glam"],
+    "casual_to_intimate":         ["casual_beachwear", "intimate_indoor"],
+    "casual_to_performance":      ["intimate_indoor", "performance_stage"],
+    "performance_to_intimate":    ["performance_stage", "intimate_indoor"],
+    "streetwear_to_performance":  ["streetwear_urban", "performance_stage"],
+    "streetwear_neon_to_stage":   ["streetwear_neon", "performance_glam"],
+    "vintage_journey":            ["vintage_retro_70s", "country_western", "denim_classic"],
+    "rocker_evening":             ["rocker_edgy", "performance_stage"],
+    "country_arc":                ["country_western", "denim_classic", "casual_evening"],
+    "athletic_to_intimate":       ["athletic_active", "intimate_indoor"],
+    "cocktail_evening":           ["elegant_cocktail", "formal_evening"],
+}
+
+
+_GENRE_WARDROBE_DEFAULT: List[Tuple[str, str]] = [
+    ("reggae",       "daywear_to_evening"),
+    ("ska",          "daywear_to_evening"),
+    ("tropical",     "beachwear_to_glam"),
+    ("surf",         "daywear_to_evening"),
+    ("country",      "country_arc"),
+    ("folk",         "casual_to_intimate"),
+    ("acoustic",     "casual_to_intimate"),
+    ("ambient",      "intimate_indoor"),
+    ("synthwave",    "streetwear_neon_to_stage"),
+    ("cyberpunk",    "streetwear_neon_to_stage"),
+    ("darkwave",     "rocker_evening"),
+    ("industrial",   "rocker_evening"),
+    ("metal",        "rocker_evening"),
+    ("doom",         "rocker_evening"),
+    ("gothic",       "rocker_evening"),
+    ("trance",       "streetwear_to_performance"),
+    ("techno",       "streetwear_to_performance"),
+    ("house",        "streetwear_to_performance"),
+    ("edm",          "streetwear_to_performance"),
+    ("rnb",          "casual_to_performance"),
+    ("soul",         "cocktail_evening"),
+    ("jazz",         "cocktail_evening"),
+    ("blues",        "denim_classic"),
+    ("hip hop",      "streetwear_urban"),
+    ("rap",          "streetwear_urban"),
+    ("lofi",         "casual_to_intimate"),
+    ("classical",    "formal_evening"),
+    ("orchestral",   "cocktail_evening"),
+    ("pop",          "casual_to_performance"),
+    ("rock",         "rocker_evening"),
+    ("punk",         "rocker_edgy"),
+    ("indie",        "vintage_journey"),
+]
+
+_DEFAULT_WARDROBE_ARC = "daywear_to_evening"
+
+
+def _expand_wardrobe_plan(arc_key: str, n_segments: int) -> List[str]:
+    """Expand a wardrobe arc template to exactly n_segments slot keys.
+
+    Single-slot arcs return [slot] * n. Multi-slot templates are resampled
+    by mapping each segment index to its proportional position in the
+    template (rounded), so longer songs stretch the progression smoothly
+    and the final segment always lands on the template's closing slot.
+    Falls back to the default arc if arc_key is unknown.
+    """
+    if n_segments <= 0:
+        return []
+    template = WARDROBE_ARCS.get(arc_key) or WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
+    if len(template) == 1:
+        return [template[0]] * n_segments
+    out: List[str] = []
+    m = len(template)
+    for i in range(n_segments):
+        if n_segments == 1:
+            idx = m - 1
+        else:
+            idx = min(m - 1, int(round(i * (m - 1) / (n_segments - 1))))
+        out.append(template[idx])
+    return out
+
+
+def _genre_default_wardrobe_arc(genre: str) -> str:
+    g = (genre or "").lower()
+    for substr, arc in _GENRE_WARDROBE_DEFAULT:
+        if substr in g:
+            return arc
+    return _DEFAULT_WARDROBE_ARC
+
+
+def _wardrobe_tag_suffix(slot_key: str) -> str:
+    """Return the ', wearing ...' suffix appended to every prompt as a guard."""
+    text = WARDROBE_STATES.get(slot_key) or ""
+    if not text:
+        return ""
+    return f", wearing {text}"
+
+
+def _append_wardrobe_tag(prompt: str, slot_key: str) -> str:
+    """Append the wardrobe slot suffix idempotently to a prompt string.
+
+    If the prompt already contains the suffix's outfit description, the
+    prompt is returned unchanged so repeated calls or partial overlaps
+    do not pile up duplicate clothing descriptions.
+    """
+    suffix = _wardrobe_tag_suffix(slot_key)
+    if not suffix:
+        return prompt
+    base = (prompt or "").rstrip()
+    if not base:
+        return suffix.lstrip(", ").capitalize()
+    if suffix.strip(", ") in base:
+        return base
+    return base.rstrip(".") + suffix
+
+
 _SEG_DIRECTOR_RULES = (
     "You are a creative music video director. The video features ONE recurring "
-    "singer/performer; vary location, outfit detail, pose and background per "
-    "section but keep the SAME singer recognizable.\n\n"
+    "singer/performer; vary location, pose and background per section but "
+    "keep the SAME singer recognizable. OUTFIT is governed by the fixed "
+    "wardrobe plan (Fix 30) — do NOT change the outfit between segments "
+    "unless the wardrobe plan changes the slot. Re-using the same outfit "
+    "across multiple segments is REQUIRED for identity continuity.\n\n"
     "CRITICAL for lip-sync: a VOCAL section's still/clip MUST keep the singer's "
     "MOUTH clearly visible and readable — the model can only lip-sync a visible "
     "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
@@ -1601,6 +1778,64 @@ class MusicVideoPrompter:
         print(f"[Fix 29] LLM returned unknown arc '{token!r}'; using genre default '{fallback}'.")
         return fallback
 
+    async def _pick_wardrobe_arc(
+        self,
+        theme: str,
+        genre: str,
+        lyrics_text: str,
+        total_duration: float,
+    ) -> str:
+        """Fix 30 — LLM-pick a coherent wardrobe arc for the whole song.
+
+        Returns an arc-key from WARDROBE_ARCS. Falls back to the genre
+        default (then global default) when the LLM call fails or returns
+        something unrecognized.
+        """
+        arc_keys = list(WARDROBE_ARCS.keys())
+        fallback = _genre_default_wardrobe_arc(genre)
+        lyrics_sample = (lyrics_text or "").strip()
+        if len(lyrics_sample) > 1200:
+            lyrics_sample = lyrics_sample[:1200] + " […]"
+        system = (
+            "You are a music-video costume designer. Choose ONE wardrobe arc "
+            "that best fits the song's theme, genre, and lyrical mood. The "
+            "arc defines what the recurring performer wears across the whole "
+            "video — outfit only changes at slot boundaries, never per shot. "
+            "Single-slot arcs lock the singer to one outfit; multi-slot arcs "
+            "allow 2–3 outfit changes during the song. Pick the single arc "
+            "key that fits best. Return ONLY the key, no quotes, no extra "
+            "text. Allowed keys:\n  - "
+            + "\n  - ".join(arc_keys)
+        )
+        user = (
+            f"Theme/style: {theme or 'unspecified'}\n"
+            f"Genre: {genre or 'unspecified'}\n"
+            f"Song length: {int(total_duration)} seconds\n"
+            f"Lyrics (with [section] tags):\n{lyrics_sample or '(instrumental — no lyrics)'}\n\n"
+            "Return only the arc key."
+        )
+        try:
+            resp = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=40,
+            )
+        except Exception as e:
+            print(f"[Fix 30] wardrobe arc pick failed ({e!r}); using genre default '{fallback}'.")
+            return fallback
+        token = (resp or "").strip().splitlines()[0:1]
+        token = (token[0] if token else "").strip().strip("'\"`").lower()
+        for prefix in ("arc:", "key:", "answer:", "wardrobe:", "outfit:"):
+            if token.startswith(prefix):
+                token = token[len(prefix):].strip()
+        if token in WARDROBE_ARCS:
+            print(f"[Fix 30] wardrobe arc: '{token}' (LLM-picked).")
+            return token
+        print(f"[Fix 30] LLM returned unknown wardrobe arc '{token!r}'; using genre default '{fallback}'.")
+        return fallback
+
     async def plan_segments(
         self,
         lyrics_text: str,
@@ -1611,6 +1846,7 @@ class MusicVideoPrompter:
         max_seg: float = 30.0,
         aligned_sections: Optional[List[Dict[str, Any]]] = None,
         time_of_day_arc: Optional[str] = None,
+        wardrobe_arc: Optional[str] = None,
     ) -> List[Segment]:
         """Plan creative, variably-sized segments from lyrics + theme.
 
@@ -1644,19 +1880,42 @@ class MusicVideoPrompter:
         arc_template_states = TIME_OF_DAY_ARCS.get(arc_key) or TIME_OF_DAY_ARCS[_DEFAULT_TIME_OF_DAY_ARC]
         arc_human = " → ".join(arc_template_states)
 
+        # ---- Fix 30: resolve the song-wide wardrobe arc once. ------------
+        # User override > LLM mini-call > genre default. The arc is later
+        # expanded to a per-segment outfit plan injected into the LLM
+        # prompt AND appended to each final prompt as a clothing tag.
+        if wardrobe_arc and wardrobe_arc in WARDROBE_ARCS:
+            wardrobe_arc_key = wardrobe_arc
+            print(f"[Fix 30] wardrobe arc: '{wardrobe_arc_key}' (caller override).")
+        else:
+            if wardrobe_arc:
+                print(f"[Fix 30] caller passed unknown wardrobe arc '{wardrobe_arc}'; "
+                      f"falling back to LLM pick.")
+            wardrobe_arc_key = await self._pick_wardrobe_arc(
+                theme=theme, genre=genre,
+                lyrics_text=lyrics_text, total_duration=total_duration,
+            )
+        wardrobe_template = WARDROBE_ARCS.get(wardrobe_arc_key) or WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
+        wardrobe_human = " → ".join(wardrobe_template)
+
         # ---- RC8 aligned mode: fixed real-timestamp rows ------------------
         if aligned_sections:
             rows = build_aligned_timeline(aligned_sections, min_seg, cap, total_duration)
             if rows:
                 tod_plan = _expand_tod_plan(arc_key, len(rows))
+                wardrobe_plan = _expand_wardrobe_plan(wardrobe_arc_key, len(rows))
                 tod_listing = "\n".join(
                     f"  {i}. {state} — {TIME_OF_DAY_STATES.get(state, '')}"
                     for i, state in enumerate(tod_plan)
                 )
+                wardrobe_listing = "\n".join(
+                    f"  {i}. {slot} — {WARDROBE_STATES.get(slot, '')}"
+                    for i, slot in enumerate(wardrobe_plan)
+                )
                 listing = "\n".join(
                     f'{i}. [{ "VOCAL" if r["is_vocal"] else "STORY" }] '
                     f'{r["label"]} ({round(r["end_time"]-r["start_time"],1)}s) '
-                    f'[lighting: {tod_plan[i]}]'
+                    f'[lighting: {tod_plan[i]}] [outfit: {wardrobe_plan[i]}]'
                     + (f' lyrics: "{r["lyrics"][:160]}"' if r["is_vocal"] and r["lyrics"] else "")
                     for i, r in enumerate(rows)
                 )
@@ -1671,20 +1930,32 @@ class MusicVideoPrompter:
                     "'blue_hour' segment, no 'sunset' in a 'midday' segment). "
                     "Lighting only moves forward in the day — never jump "
                     "backward in time across segments.\n\n"
+                    "WARDROBE COHERENCE (Fix 30 — graded): this video has a "
+                    "FIXED wardrobe plan, one outfit slot per segment. You "
+                    "MUST describe the singer wearing the assigned outfit in "
+                    "BOTH video_prompt and frame_variant_prompt. Multiple "
+                    "consecutive segments sharing the same outfit slot MUST "
+                    "use IDENTICAL clothing — same colour, same cut, same "
+                    "accessories — to preserve identity continuity. Only "
+                    "vary pose, location, and background within a slot. "
+                    "Outfit changes ONLY at slot boundaries shown in the "
+                    "wardrobe plan below.\n\n"
                     "You are given a FIXED ordered list of sections with their "
-                    "kind (VOCAL/STORY), lyrics, and lighting state. Return a "
-                    "JSON array with EXACTLY one object per listed section, in "
-                    "the SAME order — do NOT add, remove, reorder, merge or "
-                    "change durations. For each: video_prompt + "
-                    "frame_variant_prompt per the VOCAL/STORY rules above "
-                    "(VOCAL must quote its exact lyrics; STORY is cinematic "
-                    "narrative, no singer/lyrics). "
+                    "kind (VOCAL/STORY), lyrics, lighting state, and outfit "
+                    "slot. Return a JSON array with EXACTLY one object per "
+                    "listed section, in the SAME order — do NOT add, remove, "
+                    "reorder, merge or change durations. For each: "
+                    "video_prompt + frame_variant_prompt per the VOCAL/STORY "
+                    "rules above (VOCAL must quote its exact lyrics; STORY is "
+                    "cinematic narrative, no singer/lyrics). "
                     "Return ONLY the JSON array, no other text."
                 )
                 aligned_user = (
                     f"Visual theme/style: {theme}\nGenre: {genre or 'unspecified'}\n\n"
                     f"Time-of-day arc: {arc_key} ({arc_human})\n"
                     f"Per-segment lighting plan:\n{tod_listing}\n\n"
+                    f"Wardrobe arc: {wardrobe_arc_key} ({wardrobe_human})\n"
+                    f"Per-segment wardrobe plan:\n{wardrobe_listing}\n\n"
                     f"Sections (return exactly {len(rows)} objects, same order):\n"
                     f"{listing}\n\nReturn the JSON array now."
                 )
@@ -1714,6 +1985,11 @@ class MusicVideoPrompter:
                         state = tod_plan[i]
                         vp = _append_light_tag(vp, state)
                         fvp = _append_light_tag(fvp, state)
+                        # Fix 30 post-injection: append the wardrobe slot
+                        # description as a deterministic identity anchor.
+                        slot = wardrobe_plan[i]
+                        vp = _append_wardrobe_tag(vp, slot)
+                        fvp = _append_wardrobe_tag(fvp, slot)
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -1723,10 +1999,13 @@ class MusicVideoPrompter:
                             prompt=vp,
                             frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
                             reuse_of=r.get("reuse_of"),
+                            wardrobe_slot=slot,
                         ))
                     if segments:
                         print(f"[Fix 29] aligned lighting plan applied: "
                               f"{[tod_plan[i] for i in range(len(segments))]}")
+                        print(f"[Fix 30] aligned wardrobe plan applied: "
+                              f"{[wardrobe_plan[i] for i in range(len(segments))]}")
                         return segments
                 print(f"Warning: aligned segment plan unusable "
                       f"({len(specs)}/{len(rows)} specs) after retry → falling back to "
@@ -1793,9 +2072,11 @@ class MusicVideoPrompter:
             "STORY → a cinematic narrative scene advancing the theme (NO singer needed, "
             "NO lyrics quoted). Always compose the clip END for a clean hard cut (no fade).\n"
             "- frame_variant_prompt: opening still for this segment. VOCAL → the SAME "
-            "recognizable singer (same face/hair/build), new pose/outfit/location, "
-            "medium/close, face clearly visible and forward (never a different person, "
-            "never faceless). STORY → a cinematic scene still matching the narrative "
+            "recognizable singer (same face/hair/build), new pose and location but "
+            "wearing the outfit assigned by the wardrobe plan (Fix 30 — do NOT "
+            "change clothing unless the slot changes), medium/close, face clearly "
+            "visible and forward (never a different person, never faceless). "
+            "STORY → a cinematic scene still matching the narrative "
             "beat (singer optional/absent). NEVER include song lyrics or any quoted "
             "text in this field — it is fed to a T2I image model which renders quoted "
             "strings literally as on-screen caption text.\n\n"
@@ -1826,19 +2107,30 @@ class MusicVideoPrompter:
             f"Time-of-day arc (Fix 29 — graded): {arc_key} ({arc_human}). "
             f"Lighting progresses through this arc across the video; every "
             f"segment must describe lighting consistent with its position in "
-            f"the arc. Never jump backward in time.\n\n"
+            f"the arc. Never jump backward in time.\n"
+            f"Wardrobe arc (Fix 30 — graded): {wardrobe_arc_key} ({wardrobe_human}). "
+            f"The performer wears each slot's outfit for one or more consecutive "
+            f"segments — keep the SAME outfit until the slot changes; do NOT "
+            f"invent a new outfit per segment.\n\n"
             f"Lyrics (with [section] tags):\n{lyrics_text or '(instrumental — no lyrics)'}\n\n"
             "Return the JSON array now."
         )
 
-        # Inject TIME-OF-DAY rule block into legacy-path system prompt too.
+        # Inject TIME-OF-DAY and WARDROBE rule blocks into legacy-path system prompt too.
         system_prompt = system_prompt + (
             "\nTIME-OF-DAY COHERENCE (Fix 29 — graded): the song is locked to "
             f"the '{arc_key}' arc ({arc_human}). Earlier segments use the "
             "earlier states of the arc; later segments use the later states. "
             "Lighting only moves FORWARD across segments — never jump "
             "backward in time. Mention the appropriate lighting in BOTH "
-            "video_prompt and frame_variant_prompt for each segment."
+            "video_prompt and frame_variant_prompt for each segment.\n"
+            "WARDROBE COHERENCE (Fix 30 — graded): the song is locked to the "
+            f"'{wardrobe_arc_key}' wardrobe arc ({wardrobe_human}). The "
+            "performer wears each outfit slot for one or more consecutive "
+            "segments; clothing only changes at slot boundaries. Within a "
+            "slot the outfit description must be IDENTICAL (same colour, cut, "
+            "accessories). Only pose, location and background vary inside a "
+            "slot. Do NOT invent a new outfit each segment."
         )
 
         response = await self._call_openrouter(
@@ -1854,16 +2146,22 @@ class MusicVideoPrompter:
         if not timeline:
             timeline = build_segment_timeline([], total_duration, min_seg, cap)
 
-        # Fix 29: per-segment lighting plan + post-injection guard.
+        # Fix 29 + Fix 30: per-segment lighting and wardrobe plans +
+        # deterministic post-injection guards.
         tod_plan = _expand_tod_plan(arc_key, len(timeline))
+        wardrobe_plan = _expand_wardrobe_plan(wardrobe_arc_key, len(timeline))
         segments: List[Segment] = []
         for i, row in enumerate(timeline):
             vp = row.get("video_prompt") or theme
             fvp = row.get("frame_variant_prompt") or vp
             state = tod_plan[i] if i < len(tod_plan) else (tod_plan[-1] if tod_plan else "")
+            slot = wardrobe_plan[i] if i < len(wardrobe_plan) else (wardrobe_plan[-1] if wardrobe_plan else "")
             if state:
                 vp = _append_light_tag(vp, state)
                 fvp = _append_light_tag(fvp, state)
+            if slot:
+                vp = _append_wardrobe_tag(vp, slot)
+                fvp = _append_wardrobe_tag(fvp, slot)
             segments.append(Segment(
                 index=i,
                 start_time=row["start_time"],
@@ -1872,9 +2170,12 @@ class MusicVideoPrompter:
                 lyrics=row.get("lyrics", ""),
                 prompt=vp,
                 frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
+                wardrobe_slot=slot,
             ))
         if tod_plan:
             print(f"[Fix 29] legacy lighting plan applied: {tod_plan}")
+        if wardrobe_plan:
+            print(f"[Fix 30] legacy wardrobe plan applied: {wardrobe_plan}")
         return segments
 
     async def analyze_frame(self, frame_path: str) -> str:
