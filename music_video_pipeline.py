@@ -66,15 +66,21 @@ def build_duet_portrait_prompt(theme: str, wardrobe_slot: str = "") -> str:
       eyebrow/nose/lip shape, jawline, body proportions and height.
     """
     theme_clause = f" Theme context: {theme}." if theme else ""
-    wardrobe_text = WARDROBE_STATES.get(wardrobe_slot or "", "")
-    wardrobe_clause = (
-        f" Both performers wear their established costumes from the reference "
-        f"images, matching the wardrobe slot ({wardrobe_text}); DO NOT change "
-        f"clothing colour, cut or style between the references and the duet."
-        if wardrobe_text else
-        " Both performers wear their established costumes from the reference "
-        "images; DO NOT change clothing colour, cut or style."
-    )
+    entry = WARDROBE_STATES.get(wardrobe_slot or "") if wardrobe_slot else None
+    if entry and (entry.get("female") or entry.get("male")):
+        f_outfit = entry.get("female", "")
+        m_outfit = entry.get("male", "")
+        wardrobe_clause = (
+            f" Both performers wear their established costumes from the "
+            f"reference images: the female performer wears {f_outfit}; the "
+            f"male performer wears {m_outfit}. DO NOT change clothing "
+            f"colour, cut or style between the references and the duet."
+        )
+    else:
+        wardrobe_clause = (
+            " Both performers wear their established costumes from the "
+            "reference images; DO NOT change clothing colour, cut or style."
+        )
     return (
         "Two performers standing side-by-side as a single front-facing "
         "couple portrait, shown from head to waist, both faces and mouths "
@@ -887,24 +893,83 @@ def _append_light_tag(prompt: str, state_key: str) -> str:
 # appended to the final video_prompt / frame_variant_prompt as a guarantee.
 # ---------------------------------------------------------------------------
 
-WARDROBE_STATES: Dict[str, str] = {
-    "casual_beachwear":        "flowing white cotton sundress with thin straps, knee-length, barefoot, simple gold necklace",
-    "bohemian_summer":         "tan crochet crop top and ivory wide-leg linen pants, layered beaded necklaces, leather sandals",
-    "casual_evening":          "fitted black silk camisole and dark high-waisted denim jeans, ankle boots, small gold hoop earrings",
-    "tropical_relaxed":        "loose pastel-yellow off-shoulder blouse and white cotton shorts, woven straw hat, leather sandals",
-    "streetwear_urban":        "oversized graphic tee and baggy black cargo pants, white chunky sneakers, silver chain necklace",
-    "streetwear_neon":         "neon-pink cropped hoodie and black biker shorts, white platform sneakers, tinted sunglasses",
-    "athletic_active":         "fitted black sports top and matching high-waisted leggings, white running shoes, slick high ponytail",
-    "performance_stage":       "black sequined halter bodysuit and matching shorts, black ankle boots, statement silver earrings",
-    "performance_glam":        "shimmering gold mini dress with thin straps, gold strappy heels, bold red lip",
-    "intimate_indoor":         "soft cream knit sweater and faded blue jeans, barefoot, hair down naturally",
-    "formal_evening":          "deep-burgundy long satin gown with thin straps, simple silver necklace, hair swept to one side",
-    "vintage_retro_70s":       "high-waisted flared jeans and a fitted floral-print blouse with bell sleeves, tan suede boots",
-    "denim_classic":           "fitted blue denim jacket, white tee underneath, dark wash skinny jeans, brown leather boots",
-    "rocker_edgy":             "black leather biker jacket, vintage band tee, ripped black skinny jeans, scuffed black boots",
-    "country_western":         "blue denim shirt knotted at the waist, white cutoff shorts, brown leather cowboy boots, leather belt",
-    "elegant_cocktail":        "fitted black sleeveless cocktail dress at the knee, simple pearl earrings, classic black pumps",
+WARDROBE_STATES: Dict[str, Dict[str, str]] = {
+    "casual_beachwear": {
+        "female": "flowing white cotton sundress with thin straps, knee-length, barefoot, simple gold necklace",
+        "male":   "loose white linen shirt unbuttoned at the collar, beige cotton shorts, barefoot, simple leather cord necklace",
+    },
+    "bohemian_summer": {
+        "female": "tan crochet crop top and ivory wide-leg linen pants, layered beaded necklaces, leather sandals",
+        "male":   "open beige linen shirt with rolled sleeves and ivory wide-leg linen pants, leather sandals, beaded wrist bracelets",
+    },
+    "casual_evening": {
+        "female": "fitted black silk camisole and dark high-waisted denim jeans, ankle boots, small gold hoop earrings",
+        "male":   "fitted black crew-neck tee and dark slim-fit denim jeans, brown leather Chelsea boots, slim silver watch",
+    },
+    "tropical_relaxed": {
+        "female": "loose pastel-yellow off-shoulder blouse and white cotton shorts, woven straw hat, leather sandals",
+        "male":   "pastel-yellow short-sleeve linen shirt and white cotton shorts, woven straw fedora, leather sandals",
+    },
+    "streetwear_urban": {
+        "female": "oversized graphic tee and baggy black cargo pants, white chunky sneakers, silver chain necklace",
+        "male":   "oversized graphic tee and baggy black cargo pants, white chunky sneakers, silver chain necklace, black snapback cap",
+    },
+    "streetwear_neon": {
+        "female": "neon-pink cropped hoodie and black biker shorts, white platform sneakers, tinted sunglasses",
+        "male":   "neon-pink oversized hoodie and black tech joggers, white chunky sneakers, tinted sunglasses, silver chain",
+    },
+    "athletic_active": {
+        "female": "fitted black sports top and matching high-waisted leggings, white running shoes, slick high ponytail",
+        "male":   "fitted black athletic tank top and matching black training shorts, white running shoes, fitness wristband",
+    },
+    "performance_stage": {
+        "female": "black sequined halter bodysuit and matching shorts, black ankle boots, statement silver earrings",
+        "male":   "fitted black silk button-down shirt half-open and tailored black trousers, polished black boots, silver chain necklace",
+    },
+    "performance_glam": {
+        "female": "shimmering gold mini dress with thin straps, gold strappy heels, bold red lip",
+        "male":   "shimmering gold metallic blazer over a black silk shirt and black trousers, black leather Chelsea boots",
+    },
+    "intimate_indoor": {
+        "female": "soft cream knit sweater and faded blue jeans, barefoot, hair down naturally",
+        "male":   "soft cream knit pullover and faded blue jeans, barefoot, hair tousled naturally",
+    },
+    "formal_evening": {
+        "female": "deep-burgundy long satin gown with thin straps, simple silver necklace, hair swept to one side",
+        "male":   "deep-burgundy velvet tuxedo jacket over a black silk shirt and black trousers, polished black dress shoes, slim silver tie clip",
+    },
+    "vintage_retro_70s": {
+        "female": "high-waisted flared jeans and a fitted floral-print blouse with bell sleeves, tan suede boots",
+        "male":   "high-waisted flared corduroy trousers and a fitted patterned shirt with wide collar, tan suede boots, leather belt with brass buckle",
+    },
+    "denim_classic": {
+        "female": "fitted blue denim jacket, white tee underneath, dark wash skinny jeans, brown leather boots",
+        "male":   "fitted blue denim jacket, white tee underneath, dark wash slim jeans, brown leather boots, leather belt",
+    },
+    "rocker_edgy": {
+        "female": "black leather biker jacket, vintage band tee, ripped black skinny jeans, scuffed black boots",
+        "male":   "black leather biker jacket, vintage band tee, ripped black slim jeans, scuffed black boots, leather wrist cuff",
+    },
+    "country_western": {
+        "female": "blue denim shirt knotted at the waist, white cutoff shorts, brown leather cowboy boots, leather belt",
+        "male":   "blue denim shirt with sleeves rolled up, dark wash jeans, brown leather cowboy boots, leather belt with engraved buckle, brown felt cowboy hat",
+    },
+    "elegant_cocktail": {
+        "female": "fitted black sleeveless cocktail dress at the knee, simple pearl earrings, classic black pumps",
+        "male":   "fitted charcoal-grey wool suit, white dress shirt with open collar, polished black Oxford shoes, simple silver watch",
+    },
 }
+
+
+def _get_wardrobe_outfit(slot_key: str, sex: str) -> str:
+    """Return the outfit description for a slot+sex pair.
+
+    sex must be 'female' or 'male'. Unknown slot or sex returns "".
+    """
+    entry = WARDROBE_STATES.get(slot_key or "")
+    if not entry:
+        return ""
+    return entry.get(sex, "") if sex in ("female", "male") else ""
 
 
 # Each arc is a template list of slot keys. _expand_wardrobe_plan() resamples
@@ -1003,28 +1068,63 @@ def _genre_default_wardrobe_arc(genre: str) -> str:
     return _DEFAULT_WARDROBE_ARC
 
 
-def _wardrobe_tag_suffix(slot_key: str) -> str:
-    """Return the ', wearing ...' suffix appended to every prompt as a guard."""
-    text = WARDROBE_STATES.get(slot_key) or ""
-    if not text:
+def _wardrobe_tag_suffix(slot_key: str, role: Optional[str] = None) -> str:
+    """Return the ', wearing ...' suffix appended to a prompt as a guard.
+
+    Fix 31 — role-aware suffix:
+      - role == 'female' → ", wearing <female-outfit>"
+      - role == 'male'   → ", wearing <male-outfit>"
+      - role == 'duet'   → ", with the female performer wearing <female>
+                            and the male performer wearing <male>"
+      - role in (None, 'story', '')  → ""  (STORY/scene segments have no
+        named recurring performer; let the LLM dress whoever appears)
+    """
+    if not slot_key or not role:
         return ""
-    return f", wearing {text}"
+    entry = WARDROBE_STATES.get(slot_key)
+    if not entry:
+        return ""
+    if role == "female":
+        f = entry.get("female", "")
+        return f", wearing {f}" if f else ""
+    if role == "male":
+        m = entry.get("male", "")
+        return f", wearing {m}" if m else ""
+    if role == "duet":
+        f = entry.get("female", "")
+        m = entry.get("male", "")
+        if f and m:
+            return (
+                f", with the female performer wearing {f} "
+                f"and the male performer wearing {m}"
+            )
+        if f:
+            return f", wearing {f}"
+        if m:
+            return f", wearing {m}"
+    return ""
 
 
-def _append_wardrobe_tag(prompt: str, slot_key: str) -> str:
+def _append_wardrobe_tag(prompt: str, slot_key: str, role: Optional[str] = None) -> str:
     """Append the wardrobe slot suffix idempotently to a prompt string.
 
-    If the prompt already contains the suffix's outfit description, the
-    prompt is returned unchanged so repeated calls or partial overlaps
-    do not pile up duplicate clothing descriptions.
+    Fix 31 — role-aware:
+      - For role in {'female', 'male', 'duet'} the matching outfit suffix is
+        appended (idempotent — duplicate appends are no-ops).
+      - For role in {None, 'story', ''} the prompt is returned UNCHANGED so
+        STORY-only segments do not impose the performer's outfit on
+        children, crowds, or named scene characters.
     """
-    suffix = _wardrobe_tag_suffix(slot_key)
+    suffix = _wardrobe_tag_suffix(slot_key, role)
     if not suffix:
         return prompt
     base = (prompt or "").rstrip()
     if not base:
         return suffix.lstrip(", ").capitalize()
-    if suffix.strip(", ") in base:
+    # Idempotency: do not re-append if the same wearing-clause is already in
+    # the prompt. Strip the leading ", " for the substring check.
+    needle = suffix.lstrip(", ")
+    if needle and needle in base:
         return base
     return base.rstrip(".") + suffix
 
@@ -1036,6 +1136,14 @@ _SEG_DIRECTOR_RULES = (
     "wardrobe plan (Fix 30) — do NOT change the outfit between segments "
     "unless the wardrobe plan changes the slot. Re-using the same outfit "
     "across multiple segments is REQUIRED for identity continuity.\n\n"
+    "ROLE-AWARE WARDROBE (Fix 31 — graded): the wardrobe lock applies ONLY "
+    "to the named recurring performer of the segment — the female lead in "
+    "FEMALE sections, the male lead in MALE sections, BOTH performers in "
+    "DUET sections. Other subjects appearing in a segment — children, "
+    "crowds, named story characters such as a DJ, dancer, fisherman, "
+    "surfer — wear contextually appropriate clothing for who THEY are and "
+    "what THEY are doing. NEVER put the recurring performer's outfit on a "
+    "different character.\n\n"
     "CRITICAL for lip-sync: a VOCAL section's still/clip MUST keep the singer's "
     "MOUTH clearly visible and readable — the model can only lip-sync a visible "
     "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
@@ -1940,6 +2048,18 @@ class MusicVideoPrompter:
                     "vary pose, location, and background within a slot. "
                     "Outfit changes ONLY at slot boundaries shown in the "
                     "wardrobe plan below.\n\n"
+                    "ROLE-AWARE WARDROBE (Fix 31 — graded): the wardrobe "
+                    "outfit applies ONLY to the named recurring performer of "
+                    "the segment (female lead in FEMALE sections, male lead "
+                    "in MALE sections, BOTH performers in DUET sections). "
+                    "STORY/instrumental sections WITHOUT a named recurring "
+                    "performer (intro/outro/instrumental/break with children, "
+                    "crowds, DJs, surfers, or other scene characters) MUST "
+                    "NOT impose the recurring performer's outfit on those "
+                    "characters — those subjects wear contextually "
+                    "appropriate clothing for their own role. NEVER dress a "
+                    "child, DJ, surfer, dancer, or background extra in the "
+                    "recurring performer's sundress/suit/etc.\n\n"
                     "You are given a FIXED ordered list of sections with their "
                     "kind (VOCAL/STORY), lyrics, lighting state, and outfit "
                     "slot. Return a JSON array with EXACTLY one object per "
@@ -1987,9 +2107,14 @@ class MusicVideoPrompter:
                         fvp = _append_light_tag(fvp, state)
                         # Fix 30 post-injection: append the wardrobe slot
                         # description as a deterministic identity anchor.
+                        # Fix 31: role-aware — STORY-only sections (no
+                        # named singer) get NO wardrobe tag, so children/
+                        # crowds in the frame don't inherit the performer's
+                        # outfit.
                         slot = wardrobe_plan[i]
-                        vp = _append_wardrobe_tag(vp, slot)
-                        fvp = _append_wardrobe_tag(fvp, slot)
+                        seg_role = extract_section_role(r["label"]) if r["is_vocal"] else None
+                        vp = _append_wardrobe_tag(vp, slot, seg_role)
+                        fvp = _append_wardrobe_tag(fvp, slot, seg_role)
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -2130,7 +2255,15 @@ class MusicVideoPrompter:
             "segments; clothing only changes at slot boundaries. Within a "
             "slot the outfit description must be IDENTICAL (same colour, cut, "
             "accessories). Only pose, location and background vary inside a "
-            "slot. Do NOT invent a new outfit each segment."
+            "slot. Do NOT invent a new outfit each segment.\n"
+            "ROLE-AWARE WARDROBE (Fix 31 — graded): the wardrobe outfit "
+            "applies ONLY to the named recurring performer of the segment "
+            "(female lead in FEMALE sections, male lead in MALE sections, "
+            "BOTH performers in DUET sections). STORY/instrumental sections "
+            "without a named recurring performer MUST NOT impose the "
+            "performer's outfit on other characters (children, crowds, DJs, "
+            "surfers, etc.) — those subjects wear contextually appropriate "
+            "clothing for their own role."
         )
 
         response = await self._call_openrouter(
@@ -2159,9 +2292,13 @@ class MusicVideoPrompter:
             if state:
                 vp = _append_light_tag(vp, state)
                 fvp = _append_light_tag(fvp, state)
-            if slot:
-                vp = _append_wardrobe_tag(vp, slot)
-                fvp = _append_wardrobe_tag(fvp, slot)
+            # Fix 31: role-aware wardrobe tag — legacy timeline rows have no
+            # is_vocal flag, so derive role from the label alone; sections
+            # without an explicit role tag are treated as STORY (no tag).
+            seg_role = extract_section_role(row.get("label", "")) if slot else None
+            if slot and seg_role:
+                vp = _append_wardrobe_tag(vp, slot, seg_role)
+                fvp = _append_wardrobe_tag(fvp, slot, seg_role)
             segments.append(Segment(
                 index=i,
                 start_time=row["start_time"],

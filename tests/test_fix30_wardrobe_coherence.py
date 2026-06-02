@@ -1,7 +1,7 @@
-"""Fix 30 — unit tests for wardrobe arc expansion, genre defaults,
-wardrobe-tag idempotent post-injection, duet-portrait prompt identity +
-outfit anchors, and presence of the Fix-30 WARDROBE COHERENCE rule in
-segment-director prompts.
+"""Fix 30 + Fix 31 — unit tests for wardrobe arc expansion, genre defaults,
+role-aware wardrobe-tag post-injection, duet-portrait prompt identity +
+outfit anchors, and presence of the wardrobe rule blocks in segment-director
+prompts.
 
 Pure / network-free.
 """
@@ -18,6 +18,7 @@ from music_video_pipeline import (  # noqa: E402
     _append_wardrobe_tag,
     _expand_wardrobe_plan,
     _genre_default_wardrobe_arc,
+    _get_wardrobe_outfit,
     _wardrobe_tag_suffix,
     _SEG_DIRECTOR_RULES,
     build_duet_portrait_prompt,
@@ -46,8 +47,6 @@ def test_expand_wardrobe_plan_single_slot_arc_is_constant():
 
 
 def test_expand_wardrobe_plan_multi_slot_is_monotonic_forward():
-    """As segment index grows, the template index never decreases —
-    the singer never goes BACKWARD in the wardrobe story."""
     for arc_key, template in WARDROBE_ARCS.items():
         if len(template) < 2:
             continue
@@ -82,7 +81,7 @@ def test_expand_wardrobe_plan_zero_or_negative_returns_empty():
 
 
 # ---------------------------------------------------------------------------
-# _genre_default_wardrobe_arc — soft-arc defaults, fallback to global default
+# _genre_default_wardrobe_arc
 # ---------------------------------------------------------------------------
 
 def test_genre_default_known_genres_resolve_to_valid_arcs():
@@ -97,8 +96,6 @@ def test_genre_default_unknown_genre_uses_global_default():
 
 
 def test_default_arc_is_soft_arc_not_single_slot():
-    """The default arc should be a 2- or 3-slot arc (soft-arc strategy),
-    NOT a single-outfit lockdown."""
     template = WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
     assert len(template) >= 2, (
         f"default arc '{_DEFAULT_WARDROBE_ARC}' should have ≥2 slots, "
@@ -107,79 +104,152 @@ def test_default_arc_is_soft_arc_not_single_slot():
 
 
 # ---------------------------------------------------------------------------
-# _append_wardrobe_tag — append, idempotent, handle empty input
+# Fix 31 — WARDROBE_STATES schema: each slot has female + male keys
 # ---------------------------------------------------------------------------
 
-def test_append_wardrobe_tag_adds_suffix():
-    out = _append_wardrobe_tag("Close-up of singer on beach", "casual_beachwear")
-    assert "wearing" in out
-    assert WARDROBE_STATES["casual_beachwear"] in out
+def test_every_wardrobe_state_has_female_and_male_outfits():
+    for slot, entry in WARDROBE_STATES.items():
+        assert isinstance(entry, dict), f"{slot}: not a dict, got {type(entry).__name__}"
+        assert "female" in entry, f"{slot}: missing 'female' key"
+        assert "male" in entry, f"{slot}: missing 'male' key"
+        assert entry["female"].strip(), f"{slot}: empty female outfit"
+        assert entry["male"].strip(), f"{slot}: empty male outfit"
 
 
-def test_append_wardrobe_tag_idempotent():
-    slot = "performance_stage"
-    once = _append_wardrobe_tag("Medium shot of singer on stage", slot)
-    twice = _append_wardrobe_tag(once, slot)
-    assert once == twice, "second append should be a no-op"
+def test_get_wardrobe_outfit_resolves_per_sex():
+    f = _get_wardrobe_outfit("casual_beachwear", "female")
+    m = _get_wardrobe_outfit("casual_beachwear", "male")
+    assert "sundress" in f.lower()
+    assert "linen shirt" in m.lower()
+    assert f != m
 
 
-def test_append_wardrobe_tag_empty_prompt_returns_suffix_text():
-    out = _append_wardrobe_tag("", "intimate_indoor")
-    assert out
-    assert "knit sweater" in out.lower() or "intimate" in out.lower() or "sweater" in out.lower()
+def test_get_wardrobe_outfit_unknown_slot_returns_empty():
+    assert _get_wardrobe_outfit("nope", "female") == ""
+    assert _get_wardrobe_outfit("nope", "male") == ""
+
+
+def test_get_wardrobe_outfit_unknown_sex_returns_empty():
+    assert _get_wardrobe_outfit("casual_beachwear", "duet") == ""
+    assert _get_wardrobe_outfit("casual_beachwear", "child") == ""
+    assert _get_wardrobe_outfit("casual_beachwear", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# Fix 31 — role-aware _wardrobe_tag_suffix
+# ---------------------------------------------------------------------------
+
+def test_wardrobe_tag_suffix_female_role_returns_female_outfit():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="female")
+    assert s.startswith(", wearing ")
+    assert "sundress" in s
+    assert "linen shirt" not in s
+
+
+def test_wardrobe_tag_suffix_male_role_returns_male_outfit():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="male")
+    assert s.startswith(", wearing ")
+    assert "linen shirt" in s
+    assert "sundress" not in s
+
+
+def test_wardrobe_tag_suffix_duet_role_contains_both_outfits():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="duet")
+    assert "female performer" in s.lower()
+    assert "male performer" in s.lower()
+    assert "sundress" in s
+    assert "linen shirt" in s
+
+
+def test_wardrobe_tag_suffix_none_role_returns_empty():
+    """STORY-style segments without a named recurring performer get NO tag."""
+    assert _wardrobe_tag_suffix("casual_beachwear", role=None) == ""
+    assert _wardrobe_tag_suffix("casual_beachwear", role="") == ""
+    assert _wardrobe_tag_suffix("casual_beachwear", role="story") == ""
+
+
+def test_wardrobe_tag_suffix_unknown_role_returns_empty():
+    assert _wardrobe_tag_suffix("casual_beachwear", role="child") == ""
+    assert _wardrobe_tag_suffix("casual_beachwear", role="dj") == ""
+
+
+def test_wardrobe_tag_suffix_unknown_slot_returns_empty():
+    assert _wardrobe_tag_suffix("nope", role="female") == ""
+
+
+# ---------------------------------------------------------------------------
+# Fix 31 — role-aware _append_wardrobe_tag
+# ---------------------------------------------------------------------------
+
+def test_append_wardrobe_tag_female_appends_female_outfit():
+    out = _append_wardrobe_tag("Close-up of singer on beach", "casual_beachwear", role="female")
+    assert "sundress" in out
+    assert "linen shirt" not in out
+
+
+def test_append_wardrobe_tag_male_appends_male_outfit():
+    out = _append_wardrobe_tag("Close-up of singer on beach", "casual_beachwear", role="male")
+    assert "linen shirt" in out
+    assert "sundress" not in out
+
+
+def test_append_wardrobe_tag_duet_appends_both_outfits():
+    out = _append_wardrobe_tag("Wide shot of duet", "casual_beachwear", role="duet")
+    assert "sundress" in out
+    assert "linen shirt" in out
+
+
+def test_append_wardrobe_tag_no_role_leaves_prompt_unchanged():
+    """The headline Fix 31 guarantee: no role = no outfit forced on the prompt."""
+    base = "Wide shot of a child building a sandcastle on the beach"
+    assert _append_wardrobe_tag(base, "casual_beachwear", role=None) == base
+    assert _append_wardrobe_tag(base, "casual_beachwear", role="") == base
+    assert _append_wardrobe_tag(base, "casual_beachwear", role="story") == base
+
+
+def test_append_wardrobe_tag_idempotent_per_role():
+    once = _append_wardrobe_tag("Medium shot of singer", "performance_stage", role="female")
+    twice = _append_wardrobe_tag(once, "performance_stage", role="female")
+    assert once == twice
 
 
 def test_append_wardrobe_tag_unknown_slot_returns_prompt_unchanged():
     base = "Singer on a rooftop"
-    assert _append_wardrobe_tag(base, "made_up_slot") == base
+    assert _append_wardrobe_tag(base, "made_up_slot", role="female") == base
 
 
 def test_append_wardrobe_tag_strips_trailing_period():
-    out = _append_wardrobe_tag("Close-up of singer.", "casual_beachwear")
+    out = _append_wardrobe_tag("Close-up of singer.", "casual_beachwear", role="female")
     assert ", wearing" in out
     assert ".," not in out
 
 
 # ---------------------------------------------------------------------------
-# _wardrobe_tag_suffix — returns formatted suffix for valid keys, "" for invalid
-# ---------------------------------------------------------------------------
-
-def test_wardrobe_tag_suffix_known_slot():
-    s = _wardrobe_tag_suffix("formal_evening")
-    assert s.startswith(", wearing ")
-    assert WARDROBE_STATES["formal_evening"] in s
-
-
-def test_wardrobe_tag_suffix_unknown_slot_empty():
-    assert _wardrobe_tag_suffix("not_a_slot") == ""
-
-
-# ---------------------------------------------------------------------------
-# _SEG_DIRECTOR_RULES — outfit-per-section clause softened
+# _SEG_DIRECTOR_RULES — outfit-per-section clause softened + role-aware
 # ---------------------------------------------------------------------------
 
 def test_seg_director_rules_no_longer_demands_outfit_variation_per_section():
-    """The original wording 'vary location, outfit detail, pose and background
-    per section' caused outfit-chaos. Fix 30 changes this — the literal phrase
-    must no longer appear verbatim."""
     assert "vary location, outfit detail, pose and background per section" \
         not in _SEG_DIRECTOR_RULES
 
 
-def test_seg_director_rules_references_wardrobe_plan():
-    """The new wording should reference the wardrobe plan / Fix 30 explicitly."""
+def test_seg_director_rules_references_wardrobe_plan_and_role_awareness():
     text = _SEG_DIRECTOR_RULES.lower()
     assert "wardrobe" in text
     assert "fix 30" in text
+    # Fix 31 role-aware addendum.
+    assert "fix 31" in text
+    assert "role-aware" in text or "applies only to the named" in text
 
 
-def test_seg_director_rules_requires_identity_continuity_via_outfit():
+def test_seg_director_rules_warns_against_dressing_other_characters():
     text = _SEG_DIRECTOR_RULES.lower()
-    assert "re-using the same outfit" in text or "identity continuity" in text
+    # The "do not dress other characters in the performer's outfit" rule.
+    assert "never put the recurring performer's outfit on a different character" in text
 
 
 # ---------------------------------------------------------------------------
-# build_duet_portrait_prompt — identity + outfit anchors
+# build_duet_portrait_prompt — identity + role-aware outfit anchors
 # ---------------------------------------------------------------------------
 
 def test_duet_prompt_contains_extended_identity_anchor():
@@ -193,17 +263,18 @@ def test_duet_prompt_contains_extended_identity_anchor():
     assert "same two people" in text or "same two performers" in text
 
 
-def test_duet_prompt_includes_wardrobe_slot_when_provided():
+def test_duet_prompt_includes_both_female_and_male_outfits_when_slot_provided():
     p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear")
-    assert WARDROBE_STATES["casual_beachwear"] in p
-    assert "wardrobe slot" in p.lower()
+    assert "sundress" in p
+    assert "linen shirt" in p
+    assert "female performer wears" in p
+    assert "male performer wears" in p
 
 
 def test_duet_prompt_unknown_slot_falls_back_to_generic_costume_clause():
     p = build_duet_portrait_prompt("any", wardrobe_slot="made_up_slot")
-    # No specific outfit description, but the generic "established costumes
-    # from the reference images" clause is still present.
     assert "established costumes from the reference images" in p
+    assert "sundress" not in p
 
 
 def test_duet_prompt_default_no_slot_keeps_generic_costume_clause():
@@ -212,8 +283,6 @@ def test_duet_prompt_default_no_slot_keeps_generic_costume_clause():
 
 
 def test_duet_prompt_preserves_legacy_identity_neutral_core():
-    """Fix 24A core must still be intact: no LLM-invented identity attributes;
-    explicit identity-lock clause."""
     p = build_duet_portrait_prompt("any")
     assert "Preserve each performer" in p
     assert "do not restyle or recolour them" in p
@@ -237,20 +306,16 @@ def test_every_wardrobe_arc_references_valid_slots():
             )
 
 
-def test_every_wardrobe_slot_has_nonempty_description():
-    for slot, text in WARDROBE_STATES.items():
-        assert text.strip(), f"{slot}: empty description"
-
-
-def test_wardrobe_states_contain_clothing_keywords():
-    """Sanity-check that descriptions actually describe clothing, not just labels."""
+def test_wardrobe_states_contain_clothing_keywords_in_both_sexes():
     clothing_keywords = (
         "dress", "shirt", "pants", "jeans", "shorts", "top", "skirt",
         "jacket", "blouse", "tee", "hoodie", "bodysuit", "leggings",
-        "sweater", "gown", "boots", "sandals", "sneakers", "heels",
+        "sweater", "pullover", "gown", "boots", "sandals", "sneakers",
+        "heels", "trousers", "suit", "tuxedo", "blazer",
     )
-    for slot, text in WARDROBE_STATES.items():
-        lower = text.lower()
-        assert any(k in lower for k in clothing_keywords), (
-            f"{slot}: description has no recognizable clothing word: {text!r}"
-        )
+    for slot, entry in WARDROBE_STATES.items():
+        for sex in ("female", "male"):
+            text = entry[sex].lower()
+            assert any(k in text for k in clothing_keywords), (
+                f"{slot}/{sex}: description has no recognizable clothing word: {entry[sex]!r}"
+            )
