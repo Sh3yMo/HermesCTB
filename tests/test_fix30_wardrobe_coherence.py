@@ -161,6 +161,52 @@ def test_wardrobe_tag_suffix_duet_role_contains_both_outfits():
     assert "linen shirt" in s
 
 
+# ---------------------------------------------------------------------------
+# Fix 32 — duet_kind awareness (ff / mm / mixed)
+# ---------------------------------------------------------------------------
+
+def test_wardrobe_tag_suffix_duet_ff_uses_only_female_outfit():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="duet", duet_kind="ff")
+    assert "both female performers" in s.lower()
+    assert "sundress" in s
+    assert "linen shirt" not in s
+    # The mixed-duet phrase "the male performer wearing" must not appear.
+    assert "male performer wearing" not in s.lower()
+
+
+def test_wardrobe_tag_suffix_duet_mm_uses_only_male_outfit():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="duet", duet_kind="mm")
+    assert "both male performers" in s.lower()
+    assert "linen shirt" in s
+    assert "sundress" not in s
+    assert "female performer wearing" not in s.lower()
+
+
+def test_wardrobe_tag_suffix_duet_mixed_keeps_both_outfits():
+    s = _wardrobe_tag_suffix("casual_beachwear", role="duet", duet_kind="mixed")
+    assert "female performer" in s.lower()
+    assert "male performer" in s.lower()
+    assert "sundress" in s
+    assert "linen shirt" in s
+
+
+def test_wardrobe_tag_suffix_solo_roles_ignore_duet_kind():
+    """Solo female/male should be unaffected by duet_kind."""
+    fem_mixed = _wardrobe_tag_suffix("casual_beachwear", role="female", duet_kind="mixed")
+    fem_ff = _wardrobe_tag_suffix("casual_beachwear", role="female", duet_kind="ff")
+    assert fem_mixed == fem_ff
+    male_mixed = _wardrobe_tag_suffix("casual_beachwear", role="male", duet_kind="mixed")
+    male_mm = _wardrobe_tag_suffix("casual_beachwear", role="male", duet_kind="mm")
+    assert male_mixed == male_mm
+
+
+def test_append_wardrobe_tag_duet_ff_idempotent():
+    once = _append_wardrobe_tag("Wide shot", "casual_beachwear", role="duet", duet_kind="ff")
+    twice = _append_wardrobe_tag(once, "casual_beachwear", role="duet", duet_kind="ff")
+    assert once == twice
+    assert "both female performers" in once.lower()
+
+
 def test_wardrobe_tag_suffix_none_role_returns_empty():
     """STORY-style segments without a named recurring performer get NO tag."""
     assert _wardrobe_tag_suffix("casual_beachwear", role=None) == ""
@@ -269,6 +315,31 @@ def test_duet_prompt_includes_both_female_and_male_outfits_when_slot_provided():
     assert "linen shirt" in p
     assert "female performer wears" in p
     assert "male performer wears" in p
+
+
+def test_duet_prompt_ff_uses_only_female_outfit_and_locks_gender():
+    p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear", duet_kind="ff")
+    assert "sundress" in p
+    assert "linen shirt" not in p
+    assert "Both performers are female" in p
+    assert "never depict a male performer" in p.lower()
+
+
+def test_duet_prompt_mm_uses_only_male_outfit_and_locks_gender():
+    p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear", duet_kind="mm")
+    assert "linen shirt" in p
+    assert "sundress" not in p
+    assert "Both performers are male" in p
+    assert "never depict a female performer" in p.lower()
+
+
+def test_duet_prompt_mixed_default_keeps_legacy_wording():
+    p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear", duet_kind="mixed")
+    assert "female performer wears" in p
+    assert "male performer wears" in p
+    # No gender-lock clause for mixed duets.
+    assert "Both performers are female" not in p
+    assert "Both performers are male" not in p
 
 
 def test_duet_prompt_unknown_slot_falls_back_to_generic_costume_clause():

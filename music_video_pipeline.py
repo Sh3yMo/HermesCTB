@@ -47,8 +47,12 @@ def strip_lyrics_from_image_prompt(prompt: str) -> str:
     return cleaned.strip(" ,.;:")
 
 
-def build_duet_portrait_prompt(theme: str, wardrobe_slot: str = "") -> str:
-    """Fix 24A + Fix 30: deterministic identity-neutral prompt for the duet portrait.
+def build_duet_portrait_prompt(
+    theme: str,
+    wardrobe_slot: str = "",
+    duet_kind: str = "mixed",
+) -> str:
+    """Fix 24A + Fix 30 + Fix 32: deterministic identity-neutral prompt for the duet portrait.
 
     The previous duet path called the SINGLE-portrait LLM prompt generator,
     whose system prompt told the model to "establish face/hair/skin tone" —
@@ -64,23 +68,55 @@ def build_duet_portrait_prompt(theme: str, wardrobe_slot: str = "") -> str:
       surrounding solo segments (clothing acts as a re-identification cue).
     - B3: stronger identity-preservation clause covering eye colour,
       eyebrow/nose/lip shape, jawline, body proportions and height.
+
+    Fix 32 — same-gender duet support:
+    - duet_kind == "ff": both performers female; clause uses only the slot's
+      female-outfit description, no male wording.
+    - duet_kind == "mm": both performers male; only male-outfit, no female.
+    - duet_kind == "mixed" (default): unchanged female X + male Y wording.
     """
     theme_clause = f" Theme context: {theme}." if theme else ""
     entry = WARDROBE_STATES.get(wardrobe_slot or "") if wardrobe_slot else None
     if entry and (entry.get("female") or entry.get("male")):
         f_outfit = entry.get("female", "")
         m_outfit = entry.get("male", "")
-        wardrobe_clause = (
-            f" Both performers wear their established costumes from the "
-            f"reference images: the female performer wears {f_outfit}; the "
-            f"male performer wears {m_outfit}. DO NOT change clothing "
-            f"colour, cut or style between the references and the duet."
-        )
+        if duet_kind == "ff" and f_outfit:
+            wardrobe_clause = (
+                f" Both performers are female; both wear their established "
+                f"costumes from the reference images: {f_outfit}. DO NOT "
+                f"change clothing colour, cut or style between the references "
+                f"and the duet."
+            )
+        elif duet_kind == "mm" and m_outfit:
+            wardrobe_clause = (
+                f" Both performers are male; both wear their established "
+                f"costumes from the reference images: {m_outfit}. DO NOT "
+                f"change clothing colour, cut or style between the references "
+                f"and the duet."
+            )
+        elif f_outfit and m_outfit:
+            wardrobe_clause = (
+                f" Both performers wear their established costumes from the "
+                f"reference images: the female performer wears {f_outfit}; the "
+                f"male performer wears {m_outfit}. DO NOT change clothing "
+                f"colour, cut or style between the references and the duet."
+            )
+        else:
+            wardrobe_clause = (
+                " Both performers wear their established costumes from the "
+                "reference images; DO NOT change clothing colour, cut or style."
+            )
     else:
         wardrobe_clause = (
             " Both performers wear their established costumes from the "
             "reference images; DO NOT change clothing colour, cut or style."
         )
+    if duet_kind == "ff":
+        gender_clause = " Both performers are female — never depict a male performer in the duet."
+    elif duet_kind == "mm":
+        gender_clause = " Both performers are male — never depict a female performer in the duet."
+    else:
+        gender_clause = ""
     return (
         "Two performers standing side-by-side as a single front-facing "
         "couple portrait, shown from head to waist, both faces and mouths "
@@ -93,6 +129,7 @@ def build_duet_portrait_prompt(theme: str, wardrobe_slot: str = "") -> str:
         "recolour them. The result must be recognizable as the SAME two "
         "people as in the reference images, NOT new performers in a "
         "similar style."
+        f"{gender_clause}"
         f"{wardrobe_clause}"
         f"{theme_clause}"
     )
@@ -1068,7 +1105,11 @@ def _genre_default_wardrobe_arc(genre: str) -> str:
     return _DEFAULT_WARDROBE_ARC
 
 
-def _wardrobe_tag_suffix(slot_key: str, role: Optional[str] = None) -> str:
+def _wardrobe_tag_suffix(
+    slot_key: str,
+    role: Optional[str] = None,
+    duet_kind: str = "mixed",
+) -> str:
     """Return the ', wearing ...' suffix appended to a prompt as a guard.
 
     Fix 31 — role-aware suffix:
@@ -1078,6 +1119,16 @@ def _wardrobe_tag_suffix(slot_key: str, role: Optional[str] = None) -> str:
                             and the male performer wearing <male>"
       - role in (None, 'story', '')  → ""  (STORY/scene segments have no
         named recurring performer; let the LLM dress whoever appears)
+
+    Fix 32 — duet subtype awareness:
+      - duet_kind == 'ff' and role == 'duet' →
+            ", with both female performers wearing <female-outfit>"
+      - duet_kind == 'mm' and role == 'duet' →
+            ", with both male performers wearing <male-outfit>"
+      - duet_kind == 'mixed' (default) keeps the original female X / male Y
+        formulation.
+      - For solo roles (female/male) duet_kind is ignored — they always get
+        their own per-sex outfit.
     """
     if not slot_key or not role:
         return ""
@@ -1091,6 +1142,13 @@ def _wardrobe_tag_suffix(slot_key: str, role: Optional[str] = None) -> str:
         m = entry.get("male", "")
         return f", wearing {m}" if m else ""
     if role == "duet":
+        if duet_kind == "ff":
+            f = entry.get("female", "")
+            return f", with both female performers wearing {f}" if f else ""
+        if duet_kind == "mm":
+            m = entry.get("male", "")
+            return f", with both male performers wearing {m}" if m else ""
+        # mixed (default)
         f = entry.get("female", "")
         m = entry.get("male", "")
         if f and m:
@@ -1105,24 +1163,30 @@ def _wardrobe_tag_suffix(slot_key: str, role: Optional[str] = None) -> str:
     return ""
 
 
-def _append_wardrobe_tag(prompt: str, slot_key: str, role: Optional[str] = None) -> str:
+def _append_wardrobe_tag(
+    prompt: str,
+    slot_key: str,
+    role: Optional[str] = None,
+    duet_kind: str = "mixed",
+) -> str:
     """Append the wardrobe slot suffix idempotently to a prompt string.
 
-    Fix 31 — role-aware:
+    Fix 31 — role-aware. Fix 32 — duet subtype aware:
       - For role in {'female', 'male', 'duet'} the matching outfit suffix is
         appended (idempotent — duplicate appends are no-ops).
       - For role in {None, 'story', ''} the prompt is returned UNCHANGED so
         STORY-only segments do not impose the performer's outfit on
         children, crowds, or named scene characters.
+      - For role == 'duet' the suffix depends on duet_kind: 'ff' / 'mm' use
+        the same-sex variant from Fix 32; 'mixed' (default) uses the
+        original female-X / male-Y phrasing.
     """
-    suffix = _wardrobe_tag_suffix(slot_key, role)
+    suffix = _wardrobe_tag_suffix(slot_key, role, duet_kind=duet_kind)
     if not suffix:
         return prompt
     base = (prompt or "").rstrip()
     if not base:
         return suffix.lstrip(", ").capitalize()
-    # Idempotency: do not re-append if the same wearing-clause is already in
-    # the prompt. Strip the leading ", " for the substring check.
     needle = suffix.lstrip(", ")
     if needle and needle in base:
         return base
@@ -1144,6 +1208,12 @@ _SEG_DIRECTOR_RULES = (
     "surfer — wear contextually appropriate clothing for who THEY are and "
     "what THEY are doing. NEVER put the recurring performer's outfit on a "
     "different character.\n\n"
+    "SAME-GENDER DUET (Fix 32 — graded): if this song is a same-gender "
+    "duet, DUET sections show BOTH performers of the SAME gender. For an "
+    "ff-duet (two female performers) both wear the slot's female outfit; "
+    "for an mm-duet (two male performers) both wear the slot's male "
+    "outfit. NEVER invent a performer of the opposite gender in a "
+    "same-gender duet, regardless of how cinematic the framing might be.\n\n"
     "CRITICAL for lip-sync: a VOCAL section's still/clip MUST keep the singer's "
     "MOUTH clearly visible and readable — the model can only lip-sync a visible "
     "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
@@ -1955,6 +2025,7 @@ class MusicVideoPrompter:
         aligned_sections: Optional[List[Dict[str, Any]]] = None,
         time_of_day_arc: Optional[str] = None,
         wardrobe_arc: Optional[str] = None,
+        duet_kind: str = "mixed",
     ) -> List[Segment]:
         """Plan creative, variably-sized segments from lyrics + theme.
 
@@ -2060,6 +2131,19 @@ class MusicVideoPrompter:
                     "appropriate clothing for their own role. NEVER dress a "
                     "child, DJ, surfer, dancer, or background extra in the "
                     "recurring performer's sundress/suit/etc.\n\n"
+                    + (
+                        "SAME-GENDER DUET (Fix 32 — graded): this song is a "
+                        + ("FEMALE-FEMALE" if duet_kind == "ff" else "MALE-MALE")
+                        + " duet. DUET sections show BOTH performers of the "
+                        + ("female" if duet_kind == "ff" else "male")
+                        + " gender, BOTH wearing the slot's "
+                        + ("female" if duet_kind == "ff" else "male")
+                        + " outfit. NEVER depict a performer of the opposite "
+                        + "gender — no man in an ff-duet, no woman in an "
+                        + "mm-duet. The duet portrait reference image shows "
+                        + "the correct two performers.\n\n"
+                        if duet_kind in ("ff", "mm") else ""
+                    ) +
                     "You are given a FIXED ordered list of sections with their "
                     "kind (VOCAL/STORY), lyrics, lighting state, and outfit "
                     "slot. Return a JSON array with EXACTLY one object per "
@@ -2113,8 +2197,8 @@ class MusicVideoPrompter:
                         # outfit.
                         slot = wardrobe_plan[i]
                         seg_role = extract_section_role(r["label"]) if r["is_vocal"] else None
-                        vp = _append_wardrobe_tag(vp, slot, seg_role)
-                        fvp = _append_wardrobe_tag(fvp, slot, seg_role)
+                        vp = _append_wardrobe_tag(vp, slot, seg_role, duet_kind=duet_kind)
+                        fvp = _append_wardrobe_tag(fvp, slot, seg_role, duet_kind=duet_kind)
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -2264,6 +2348,16 @@ class MusicVideoPrompter:
             "performer's outfit on other characters (children, crowds, DJs, "
             "surfers, etc.) — those subjects wear contextually appropriate "
             "clothing for their own role."
+            + (
+                f"\nSAME-GENDER DUET (Fix 32 — graded): this song is a "
+                f"{'female-female' if duet_kind == 'ff' else 'male-male'} duet. "
+                f"DUET sections depict BOTH performers of the "
+                f"{'female' if duet_kind == 'ff' else 'male'} gender, both "
+                f"wearing the slot's {'female' if duet_kind == 'ff' else 'male'} "
+                f"outfit. NEVER invent a performer of the opposite gender — no "
+                f"man in an ff-duet, no woman in an mm-duet."
+                if duet_kind in ("ff", "mm") else ""
+            )
         )
 
         response = await self._call_openrouter(
@@ -2297,8 +2391,8 @@ class MusicVideoPrompter:
             # without an explicit role tag are treated as STORY (no tag).
             seg_role = extract_section_role(row.get("label", "")) if slot else None
             if slot and seg_role:
-                vp = _append_wardrobe_tag(vp, slot, seg_role)
-                fvp = _append_wardrobe_tag(fvp, slot, seg_role)
+                vp = _append_wardrobe_tag(vp, slot, seg_role, duet_kind=duet_kind)
+                fvp = _append_wardrobe_tag(fvp, slot, seg_role, duet_kind=duet_kind)
             segments.append(Segment(
                 index=i,
                 start_time=row["start_time"],

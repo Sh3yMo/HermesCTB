@@ -679,6 +679,7 @@ async def _resolve_duet_portrait(
     theme: str,
     genre: str,
     wardrobe_slot: str = "",
+    duet_kind: str = "mixed",
 ) -> Optional[str]:
     """Generate a duet portrait depicting both performers together using the
     Flux2 Klein M-I Edit workflow. Takes any two already-rendered single-singer
@@ -710,7 +711,11 @@ async def _resolve_duet_portrait(
         # Fix 30 (B1): pass the active wardrobe slot through so the duet
         # portrait anchors clothing to the same outfit as surrounding solo
         # segments. Empty string keeps the legacy generic-costume prompt.
-        prompt = build_duet_portrait_prompt(theme, wardrobe_slot=wardrobe_slot)
+        # Fix 32: duet_kind ('ff'/'mm'/'mixed') drives same-gender wording
+        # so the T2I model does not invent an opposite-sex performer.
+        prompt = build_duet_portrait_prompt(
+            theme, wardrobe_slot=wardrobe_slot, duet_kind=duet_kind,
+        )
 
         a_bytes = open(portrait_a, "rb").read()
         b_bytes = open(portrait_b, "rb").read()
@@ -1013,11 +1018,14 @@ async def _run_create_music_video(
         # Fix 29 + Fix 30: pass user-supplied time-of-day and wardrobe arc
         # overrides through. Empty string → plan_segments runs the LLM
         # mini-call (or genre default) for each.
+        # Fix 32: pass duet_kind through ('ff'/'mm'/'mixed') so wardrobe
+        # tags + system prompts use same-gender wording for ff/mm duets.
         segments = await MV_PROMPTER.plan_segments(
             lyrics_text, theme_eff, total_duration, genre=brief,
             aligned_sections=aligned,
             time_of_day_arc=(time_of_day_arc or None),
             wardrobe_arc=(wardrobe_arc or None),
+            duet_kind=(duet if duet in ("ff", "mm") else "mixed"),
         )
 
         seg_dir = os.path.join(tmp_dir, "segments")
@@ -1035,13 +1043,25 @@ async def _run_create_music_video(
         # combine the male+female portraits via the Flux2 M-I Edit workflow.
         role_groups = partition_anchors_by_role(segments)
         roles_present = {r for r in role_groups.keys() if r is not None}
+        # Fix 32: also collect roles across ALL segments (including reuse_of
+        # rows). partition_anchors_by_role only considers anchors, so when
+        # the FIRST duet section happens to be a reuse of an earlier chorus
+        # the "duet" role is dropped — and the ff/mm portrait path never
+        # triggers. all_roles_present is used downstream for the
+        # plan_same_gender_portraits decision; role_groups stays anchor-only
+        # for per-anchor portrait routing.
+        all_roles_present = {extract_section_role(s.label) for s in segments}
+        all_roles_present.discard(None)
 
         # Fix 27: an explicit same-gender duet (ff/mm) takes a dedicated path —
         # ONE consistent lead portrait for all solo sections + a distinct
         # partner portrait that feeds ONLY the shared-duet frame. Section labels
         # stay "female"/"duet", so the per-segment routing below is unchanged.
+        # Fix 32: feed all_roles_present (Anchors + reuse-rows) into the
+        # ff/mm decision so a duet-section that first appears as a reuse
+        # row still triggers the partner+duet portrait render.
         sg_plan = plan_same_gender_portraits(
-            duet, roles_present, consistent_character, source_mode,
+            duet, all_roles_present, consistent_character, source_mode,
         )
 
         portraits: Dict[str, Optional[str]] = {}
@@ -1076,6 +1096,7 @@ async def _run_create_music_video(
                     portraits["duet"] = await _resolve_duet_portrait(
                         portraits[base], portraits[partner], theme_eff, brief,
                         wardrobe_slot=duet_slot,
+                        duet_kind=duet,
                     )
                     await free_comfy()
             source: Optional[str] = (
@@ -1083,9 +1104,12 @@ async def _run_create_music_video(
                 or next((v for v in portraits.values() if v), None)
             )
         else:
+            # Fix 32: roles count must consider ALL segments (incl. reuse
+            # rows) so a duet-section first-seen as reuse still flips the
+            # multi-role branch and triggers the duet portrait render.
             is_multi_role = (
                 consistent_character
-                and len(roles_present) >= 2
+                and len(all_roles_present) >= 2
                 and source_mode in ("auto", "describe")
             )
             if is_multi_role:
@@ -1095,7 +1119,8 @@ async def _run_create_music_video(
                             role, theme_eff, lyrics_text, brief, aspect_ratio,
                         )
                         await free_comfy()
-                if "duet" in roles_present:
+                # Fix 32: see all_roles_present rationale above.
+                if "duet" in all_roles_present:
                     male_p = portraits.get("male")
                     female_p = portraits.get("female")
                     if male_p and female_p:
@@ -1109,6 +1134,7 @@ async def _run_create_music_video(
                         portraits["duet"] = await _resolve_duet_portrait(
                             male_p, female_p, theme_eff, brief,
                             wardrobe_slot=duet_slot,
+                            duet_kind="mixed",
                         )
                         await free_comfy()
                 source = (
