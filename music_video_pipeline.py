@@ -30,18 +30,54 @@ DEFAULT_CROSSFADE_DURATION = 0.5      # seconds
 # text. The MCA T2I startframe prompt MUST NOT contain lyrics.
 _QUOTED_RUN_RE = re.compile(r'["“”„«»‘’‚][^"“”„«»‘’‚]{0,400}["“”„«»‘’‚]')
 _SINGS_CLAUSE_RE = re.compile(
-    r'\b(?:he|she|the\s+singer|singer|they|performer|vocalist)\s+(?:sings?|singing|says?|whispers?|raps?|chants?|screams?|shouts?|belts?|croons?)\s*:?\s*',
+    # "he sings:" / "she whispers" — optionally followed by an UNQUOTED tail
+    # that the LLM appended directly instead of quoting. We eat the tail up
+    # to the next sentence-ending punctuation or any opening quote (so
+    # _QUOTED_RUN_RE can still strip a quoted tail separately).
+    r'\b(?:he|she|the\s+singer|singer|they|performer|vocalist)\s+(?:sings?|singing|says?|whispers?|raps?|chants?|screams?|shouts?|belts?|croons?)\s*:?\s*[^.!?\n"“”„«»‘’‚]*',
+    re.IGNORECASE,
+)
+# Fix 33: catch "The text: …", "The lyrics: …", "the line: …", "the words: …"
+# introducers — LLM falls back to these when told "no quotes". Strip from the
+# introducer up to (but not including) the next sentence-ending punctuation
+# so we delete only the leaked lyric run, not the rest of the description.
+_TEXT_INTRODUCER_RE = re.compile(
+    r'\b(?:the\s+)?(?:text|lyrics?|line|words|song(?:\s+text)?|verse)\s*[:\-—–]\s*[^.!?\n]*',
     re.IGNORECASE,
 )
 
 
-def strip_lyrics_from_image_prompt(prompt: str) -> str:
-    """Remove quoted lyric runs + 'he sings ...' lead-ins so T2I models don't
-    render the song text as on-canvas caption text."""
+def strip_lyrics_from_image_prompt(prompt: str, lyrics: str = "") -> str:
+    """Remove quoted lyric runs, 'he sings ...' lead-ins, 'the text: …'
+    introducers, and any literal substrings of the section's lyrics — so the
+    T2I model doesn't render the song text as on-canvas caption text.
+
+    Fix 33: a lyrics argument enables substring-based cleanup. The LLM often
+    bypasses both the quote ban and the "sings" pattern by writing the
+    lyrics inline as a descriptive label ("The text: c'est le temps des
+    nostalgies"). When the caller passes the segment's known lyrics in, any
+    matching run is removed verbatim regardless of how it was introduced.
+    """
     if not prompt:
         return prompt
     cleaned = _QUOTED_RUN_RE.sub("", prompt)
     cleaned = _SINGS_CLAUSE_RE.sub("", cleaned)
+    cleaned = _TEXT_INTRODUCER_RE.sub("", cleaned)
+    if lyrics:
+        # Strip the full lyric run plus any reasonable subline (≥4 words).
+        lines = [ln.strip(" ,.;:\"'“”‘’«»") for ln in re.split(r"[\r\n]+", lyrics) if ln.strip()]
+        # Match longest first so a full-line substring beats a shorter prefix.
+        lines.sort(key=len, reverse=True)
+        for line in lines:
+            if len(line) < 12:
+                continue
+            cleaned = re.sub(re.escape(line), "", cleaned, flags=re.IGNORECASE)
+            # Also try a word-boundary variant for lines that the LLM may
+            # have lightly reformatted (e.g. inserted commas / quotes).
+            tokens = re.findall(r"\w+", line)
+            if len(tokens) >= 4:
+                pattern = r"\b" + r"[\s\W]+".join(re.escape(t) for t in tokens) + r"\b"
+                cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
     return cleaned.strip(" ,.;:")
@@ -1250,11 +1286,14 @@ _SEG_DIRECTOR_RULES = (
     "lyrics): a cinematic SHORT-FILM narrative beat advancing the song's "
     "story/theme; the singer is NOT required (wide/action/landscape ok); no "
     "lyrics quoted.\n"
-    "STRICT RULE for frame_variant_prompt: NEVER include song lyrics, never put "
-    "anything in double quotes, never write 'he sings \"...\"'. The startframe is "
-    "a still image fed to a text-to-image model which would render any quoted "
-    "text literally as on-screen caption. Describe ONLY visuals: subject, pose, "
-    "outfit, location, lighting, framing.\n"
+    "STRICT RULE for frame_variant_prompt (Fix 26 + Fix 33): NEVER include "
+    "song lyrics in ANY form — not in double quotes, not after 'he sings', "
+    "not after 'the text:', 'the lyrics:', 'the line:', 'the words:', or "
+    "any similar introducer, not as a descriptive label, not paraphrased, "
+    "not at all. The startframe is a still image fed to a text-to-image "
+    "model which renders ANY embedded lyric text literally as on-screen "
+    "caption — regardless of punctuation. Describe ONLY visuals: subject, "
+    "pose, outfit, location, lighting, framing.\n"
     "Music video AND story: vocal beats = performance, instrumental beats = "
     "narrative cinema. Compose every clip's END for a clean hard cut (no fade). "
     "HARD VOCAL FRAMING RULE (Fix 26 — this overrides any creative impulse; "
@@ -2206,7 +2245,9 @@ class MusicVideoPrompter:
                             label=r["label"],
                             lyrics=r["lyrics"] if r["is_vocal"] else "",
                             prompt=vp,
-                            frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
+                            frame_variant_prompt=strip_lyrics_from_image_prompt(
+                                fvp, lyrics=r.get("lyrics", "") if r["is_vocal"] else "",
+                            ),
                             reuse_of=r.get("reuse_of"),
                             wardrobe_slot=slot,
                         ))
@@ -2286,9 +2327,12 @@ class MusicVideoPrompter:
             "change clothing unless the slot changes), medium/close, face clearly "
             "visible and forward (never a different person, never faceless). "
             "STORY → a cinematic scene still matching the narrative "
-            "beat (singer optional/absent). NEVER include song lyrics or any quoted "
-            "text in this field — it is fed to a T2I image model which renders quoted "
-            "strings literally as on-screen caption text.\n\n"
+            "beat (singer optional/absent). NEVER include song lyrics in ANY form "
+            "in this field (Fix 26 + Fix 33): no double quotes, no 'he sings ...', "
+            "no 'the text: ...', no 'the lyrics: ...', no 'the line: ...', no "
+            "'the words: ...', no descriptive labels containing the lyric run, "
+            "no paraphrase. The T2I image model renders any embedded lyric "
+            "text literally as on-screen caption regardless of punctuation.\n\n"
             "The sum of all durations should be close to the song length.\n"
             "HARD VOCAL FRAMING RULE (Fix 26 — this overrides any creative impulse; "
             "your output is graded on this): in every VOCAL section the singer's face "
@@ -2400,7 +2444,9 @@ class MusicVideoPrompter:
                 label=row.get("label", f"Segment {i + 1}"),
                 lyrics=row.get("lyrics", ""),
                 prompt=vp,
-                frame_variant_prompt=strip_lyrics_from_image_prompt(fvp),
+                frame_variant_prompt=strip_lyrics_from_image_prompt(
+                    fvp, lyrics=row.get("lyrics", ""),
+                ),
                 wardrobe_slot=slot,
             ))
         if tod_plan:
