@@ -44,11 +44,11 @@ def test_strip_removes_the_text_introducer():
     """Regression from c72fa617: frame_variant_prompt leaked lyrics via
     'The text: <line>' construct, T2I rendered it as on-screen caption."""
     out = strip_lyrics_from_image_prompt(
-        "Close-up of woman in knit sweater. The text: c'est le temps des nostalgies. Camera dolly-in."
+        "Close-up of woman in knit sweater. The text: c'est le temps des nostalgies. Warm cafe lighting."
     )
     assert "nostalgies" not in out
     assert "Close-up" in out
-    assert "Camera dolly-in" in out
+    assert "Warm cafe lighting" in out
 
 
 def test_strip_removes_the_lyrics_introducer():
@@ -97,7 +97,7 @@ def test_strip_removes_full_lyrics_substring_when_passed():
     fvp = (
         "Close-up of woman in cafe, soft cream knit sweater, hair down "
         "naturally, looking out the window. c'est le temps des nostalgies, "
-        "ou mon ame s'est endormie. Camera dolly-in subtle."
+        "ou mon ame s'est endormie. Warm cafe lighting subtle."
     )
     out = strip_lyrics_from_image_prompt(
         fvp,
@@ -106,7 +106,7 @@ def test_strip_removes_full_lyrics_substring_when_passed():
     assert "nostalgies" not in out
     assert "endormie" not in out
     assert "Close-up of woman in cafe" in out
-    assert "Camera dolly-in" in out
+    assert "Warm cafe lighting" in out
 
 
 def test_strip_removes_substring_case_insensitive():

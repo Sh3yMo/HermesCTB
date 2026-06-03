@@ -1182,13 +1182,30 @@ async def _run_create_music_video(
                     continue
                 portrait = portraits.get(role) if role else None
                 portrait = portrait or source
-                prompts = [
-                    enforce_performer_role(
-                        strip_lyrics_from_image_prompt(
-                            segments[i].frame_variant_prompt or segments[i].prompt
-                        ),
-                        role,
+                # Fix 34: explicit fallback with sanitizer + log when fvp is
+                # empty. The silent `fvp or prompt` chain used to feed the
+                # full video_prompt (lyrics + camera moves + scene ends +
+                # LIPSYNC_BOOSTER) to the T2I startframe model — which
+                # rendered the lyrics literally as on-screen caption text.
+                from music_video_pipeline import (
+                    derive_still_prompt_from_video_prompt as _derive_still,
+                )
+
+                def _resolve_fvp_for_mca(seg_idx: int) -> str:
+                    seg = segments[seg_idx]
+                    if seg.frame_variant_prompt:
+                        return strip_lyrics_from_image_prompt(
+                            seg.frame_variant_prompt, lyrics=seg.lyrics,
+                        )
+                    print(
+                        f"[Fix 34] frame_variant_prompt empty at MCA "
+                        f"dispatch for segment {seg_idx} ({seg.label!r}); "
+                        f"deriving sanitized fvp from video_prompt."
                     )
+                    return _derive_still(seg.prompt, lyrics=seg.lyrics)
+
+                prompts = [
+                    enforce_performer_role(_resolve_fvp_for_mca(i), role)
                     for i in idxs
                 ]
                 if is_multi_role:

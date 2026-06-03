@@ -46,6 +46,50 @@ _TEXT_INTRODUCER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Fix 34: catch VIDEO-only language that leaks into a frame_variant_prompt
+# when the LLM either polluted fvp with motion notes or fvp fell back to the
+# video_prompt entirely. Still images don't have camera moves, scene ends,
+# or lipsync — these sentences are removed before the prompt hits the T2I.
+# The Fix 26 framing phrases ("Close-up of ", "Medium shot of ", "3/4 angle
+# of ", "Low-angle shot of ", "High-angle shot of ", "Medium close-up of ")
+# are deliberately NOT matched here so they stay intact in the still prompt.
+_VIDEO_DIRECTIVES_RE = re.compile(
+    r'(?:'
+    # "The camera|shot|scene|clip <verb> ..."  up to sentence end
+    r'\bthe\s+(?:camera|shot|scene|clip|sequence)\s+(?:performs?|holds?|ends?|begins?|starts?|cuts?|fades?|tilts?|pans?|tracks?|zooms?|moves?|rotates?|orbits?|dollies?|trucks?|drifts?|sweeps?|cranes?|pulls?|pushes?|whips?)\b[^.!?\n]*'
+    r'|'
+    # Camera-move phrases with optional speed adjective, up to sentence end
+    r'\b(?:subtle\s+|slow\s+|fast\s+|gentle\s+|smooth\s+|gradual\s+)?(?:dolly[-\s]?in|dolly[-\s]?out|pull[-\s]?back|push[-\s]?in|crane(?:\s+(?:up|down))?|zoom[-\s]?in|zoom[-\s]?out|whip[-\s]?pan|tilt[-\s]?up|tilt[-\s]?down|track[-\s]?(?:left|right)|orbit(?:\s+around)?|handheld\s+drift|push\s+forward|sweep)\b[^.!?\n]*'
+    r'|'
+    # Cut / transition phrases
+    r'\b(?:clean\s+)?(?:hard\s+cut|cut\s+to|fade\s+to|crossfade|transition|wipe\s+to|jump\s+cut|match\s+cut)\b[^.!?\n]*'
+    r'|'
+    # LIPSYNC_BOOSTER fragments (also other lipsync language)
+    r'\b(?:the\s+)?lips?\s+(?:are\s+)?sync(?:ing|ed)?(?:\s+(?:naturally|to|with))?[^.!?\n]*'
+    r'|'
+    r'\bevery\s+word\s+is\s+pronounced[^.!?\n]*'
+    r'|'
+    r'\bdiction\s+and\s+lip[-\s]?sync\s+(?:are\s+)?perfect[^.!?\n]*'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def derive_still_prompt_from_video_prompt(vp: str, lyrics: str = "") -> str:
+    """Fix 34: derive a clean still-image prompt from a video_prompt.
+
+    Used when the LLM left frame_variant_prompt empty (the silent
+    `fvp = ... or vp` fallback used to feed video_prompt straight to the
+    T2I startframe generator — including lyrics, camera moves, scene-end
+    notes and the LIPSYNC_BOOSTER appended in api.py).
+
+    Strips: lyric runs (Fix 33 patterns + substring), video-direction
+    phrases (camera moves, cuts, lipsync language), Fix-29/30 trailing
+    suffixes are left untouched (they describe lighting and clothing,
+    valid for still images).
+    """
+    return strip_lyrics_from_image_prompt(vp, lyrics=lyrics)
+
 
 def strip_lyrics_from_image_prompt(prompt: str, lyrics: str = "") -> str:
     """Remove quoted lyric runs, 'he sings ...' lead-ins, 'the text: …'
@@ -63,6 +107,10 @@ def strip_lyrics_from_image_prompt(prompt: str, lyrics: str = "") -> str:
     cleaned = _QUOTED_RUN_RE.sub("", prompt)
     cleaned = _SINGS_CLAUSE_RE.sub("", cleaned)
     cleaned = _TEXT_INTRODUCER_RE.sub("", cleaned)
+    # Fix 34: also remove video-direction language (camera moves, scene
+    # ends, hard cuts, lipsync booster fragments) so that a fvp that fell
+    # back to video_prompt doesn't carry those over to the T2I.
+    cleaned = _VIDEO_DIRECTIVES_RE.sub("", cleaned)
     if lyrics:
         # Strip the full lyric run plus any reasonable subline (≥4 words).
         lines = [ln.strip(" ,.;:\"'“”‘’«»") for ln in re.split(r"[\r\n]+", lyrics) if ln.strip()]
@@ -796,8 +844,25 @@ def build_segment_timeline(
             "start_time": round(t, 3),
             "end_time": round(end, 3),
             "video_prompt": (spec or {}).get("video_prompt", ""),
-            "frame_variant_prompt": (spec or {}).get("frame_variant_prompt", "")
-            or (spec or {}).get("video_prompt", ""),
+            "frame_variant_prompt": (
+                # Fix 34: explicit fallback with sanitizer + log when fvp is
+                # empty so we never silently feed video_prompt to the T2I.
+                (lambda _fvp, _vp, _idx: (
+                    _fvp if _fvp else (
+                        print(
+                            f"[Fix 34] frame_variant_prompt empty for "
+                            f"segment {_idx}; deriving sanitized fvp "
+                            f"from video_prompt."
+                        ) or derive_still_prompt_from_video_prompt(
+                            _vp, lyrics=(spec or {}).get("lyrics", ""),
+                        )
+                    )
+                ))(
+                    str((spec or {}).get("frame_variant_prompt", "")).strip(),
+                    str((spec or {}).get("video_prompt", "")),
+                    i,
+                )
+            ),
             "label": (spec or {}).get("label", "") or f"Segment {i + 1}",
             "lyrics": (spec or {}).get("lyrics", ""),
         })
@@ -1286,14 +1351,20 @@ _SEG_DIRECTOR_RULES = (
     "lyrics): a cinematic SHORT-FILM narrative beat advancing the song's "
     "story/theme; the singer is NOT required (wide/action/landscape ok); no "
     "lyrics quoted.\n"
-    "STRICT RULE for frame_variant_prompt (Fix 26 + Fix 33): NEVER include "
-    "song lyrics in ANY form — not in double quotes, not after 'he sings', "
-    "not after 'the text:', 'the lyrics:', 'the line:', 'the words:', or "
-    "any similar introducer, not as a descriptive label, not paraphrased, "
-    "not at all. The startframe is a still image fed to a text-to-image "
-    "model which renders ANY embedded lyric text literally as on-screen "
-    "caption — regardless of punctuation. Describe ONLY visuals: subject, "
-    "pose, outfit, location, lighting, framing.\n"
+    "STRICT RULE for frame_variant_prompt (Fix 26 + Fix 33 + Fix 34): "
+    "this field is MANDATORY — NEVER leave it empty. The startframe is a "
+    "still image fed to a text-to-image model. NEVER include song lyrics "
+    "in ANY form — not in double quotes, not after 'he sings', not after "
+    "'the text:', 'the lyrics:', 'the line:', 'the words:', or any "
+    "similar introducer, not as a descriptive label, not paraphrased, "
+    "not at all. NEVER include video-direction language — no 'the camera "
+    "performs ...', no 'subtle dolly-in', no 'scene ends with a hard cut', "
+    "no 'crossfade', no lipsync booster phrases like 'the lips are syncing "
+    "naturally' or 'every word is pronounced'. Still images have no "
+    "camera moves and no scene ends. Describe ONLY visuals: subject, "
+    "pose, outfit, location, lighting, framing. If you leave fvp empty "
+    "the pipeline will derive a sanitized still prompt from video_prompt "
+    "and log a warning — produce a full visual description instead.\n"
     "Music video AND story: vocal beats = performance, instrumental beats = "
     "narrative cinema. Compose every clip's END for a clean hard cut (no fade). "
     "HARD VOCAL FRAMING RULE (Fix 26 — this overrides any creative impulse; "
@@ -2221,7 +2292,25 @@ class MusicVideoPrompter:
                     for i, r in enumerate(rows):
                         spec = specs[i]
                         vp = _segment_video_prompt(spec, theme)
-                        fvp = str(spec.get("frame_variant_prompt", "")).strip() or vp
+                        # Fix 34: explicit fallback with sanitizer + log.
+                        # The silent `or vp` chain used to send video_prompt
+                        # (with lyrics, camera moves, scene-end notes,
+                        # LIPSYNC_BOOSTER) straight to the T2I startframe
+                        # generator. Now we derive a sanitized still prompt
+                        # and log so empty-fvp cases are visible.
+                        _raw_fvp = str(spec.get("frame_variant_prompt", "")).strip()
+                        if _raw_fvp:
+                            fvp = _raw_fvp
+                        else:
+                            print(
+                                f"[Fix 34] frame_variant_prompt empty for "
+                                f"aligned segment {i} ({r.get('label', '')}); "
+                                f"deriving sanitized fvp from video_prompt."
+                            )
+                            fvp = derive_still_prompt_from_video_prompt(
+                                vp,
+                                lyrics=r.get("lyrics", "") if r.get("is_vocal") else "",
+                            )
                         # Fix 29 post-injection: append the light-state suffix
                         # to both prompts so the T2V/T2I model receives the
                         # locked lighting even if the LLM ignored the rule.
@@ -2327,12 +2416,17 @@ class MusicVideoPrompter:
             "change clothing unless the slot changes), medium/close, face clearly "
             "visible and forward (never a different person, never faceless). "
             "STORY → a cinematic scene still matching the narrative "
-            "beat (singer optional/absent). NEVER include song lyrics in ANY form "
-            "in this field (Fix 26 + Fix 33): no double quotes, no 'he sings ...', "
-            "no 'the text: ...', no 'the lyrics: ...', no 'the line: ...', no "
-            "'the words: ...', no descriptive labels containing the lyric run, "
-            "no paraphrase. The T2I image model renders any embedded lyric "
-            "text literally as on-screen caption regardless of punctuation.\n\n"
+            "beat (singer optional/absent). frame_variant_prompt is MANDATORY "
+            "(Fix 34) — NEVER leave it empty; if empty the pipeline derives a "
+            "sanitized fallback from video_prompt and logs a warning. NEVER "
+            "include song lyrics in ANY form in this field (Fix 26 + Fix 33): "
+            "no double quotes, no 'he sings ...', no 'the text: ...', no 'the "
+            "lyrics: ...', no 'the line: ...', no 'the words: ...', no "
+            "descriptive labels containing the lyric run, no paraphrase. NEVER "
+            "include video-direction language (Fix 34): no 'the camera "
+            "performs', no 'subtle dolly-in', no 'scene ends with hard cut', "
+            "no 'crossfade', no lipsync-booster fragments. Still images have "
+            "no camera moves and no scene transitions.\n\n"
             "The sum of all durations should be close to the song length.\n"
             "HARD VOCAL FRAMING RULE (Fix 26 — this overrides any creative impulse; "
             "your output is graded on this): in every VOCAL section the singer's face "
@@ -2424,7 +2518,22 @@ class MusicVideoPrompter:
         segments: List[Segment] = []
         for i, row in enumerate(timeline):
             vp = row.get("video_prompt") or theme
-            fvp = row.get("frame_variant_prompt") or vp
+            # Fix 34: explicit fallback with sanitizer + log. build_segment_timeline
+            # already sanitizes via derive_still_prompt_from_video_prompt when the
+            # LLM spec was empty, so row['frame_variant_prompt'] should be non-empty
+            # here. The defensive branch catches the rare missing-key case.
+            _raw_fvp_row = row.get("frame_variant_prompt", "")
+            if _raw_fvp_row:
+                fvp = _raw_fvp_row
+            else:
+                print(
+                    f"[Fix 34] frame_variant_prompt missing for legacy "
+                    f"segment {i} ({row.get('label', '')}); deriving "
+                    f"sanitized fvp from video_prompt."
+                )
+                fvp = derive_still_prompt_from_video_prompt(
+                    vp, lyrics=row.get("lyrics", ""),
+                )
             state = tod_plan[i] if i < len(tod_plan) else (tod_plan[-1] if tod_plan else "")
             slot = wardrobe_plan[i] if i < len(wardrobe_plan) else (wardrobe_plan[-1] if wardrobe_plan else "")
             if state:
