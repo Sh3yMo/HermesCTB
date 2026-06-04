@@ -157,7 +157,18 @@ def build_duet_portrait_prompt(
     - duet_kind == "ff": both performers female; clause uses only the slot's
       female-outfit description, no male wording.
     - duet_kind == "mm": both performers male; only male-outfit, no female.
-    - duet_kind == "mixed" (default): unchanged female X + male Y wording.
+    - duet_kind == "mixed" (default): male outfit named first (matches
+      portrait_a reference order in the workflow), then female outfit.
+
+    Fix 35 — duet portrait hardening:
+    - A: per-performer garment-lock with explicit cross-swap negation
+      (gender-agnostic, slot-agnostic — no "dress vs shorts" assumption).
+    - B: anatomy-lock — explicit limb counts, no merged/shared body parts.
+    - C: composition-hint — visible gap between performers, distinct
+      silhouettes, no torso-overlap or body-merge.
+    - D: reference-order consistency — in mixed duets the male outfit is
+      named FIRST because portrait_a (the lead, duplicated for weight
+      bias in the Flux2-M-I-Edit workflow) is the male performer.
     """
     theme_clause = f" Theme context: {theme}." if theme else ""
     entry = WARDROBE_STATES.get(wardrobe_slot or "") if wardrobe_slot else None
@@ -167,23 +178,37 @@ def build_duet_portrait_prompt(
         if duet_kind == "ff" and f_outfit:
             wardrobe_clause = (
                 f" Both performers are female; both wear their established "
-                f"costumes from the reference images: {f_outfit}. DO NOT "
-                f"change clothing colour, cut or style between the references "
-                f"and the duet."
+                f"costumes from the reference images: {f_outfit}. Each "
+                f"garment is fully on each individual performer — no "
+                f"half-and-half outfits, no shared pieces, no garments "
+                f"split between bodies. DO NOT change clothing colour, "
+                f"cut or style between the references and the duet."
             )
         elif duet_kind == "mm" and m_outfit:
             wardrobe_clause = (
                 f" Both performers are male; both wear their established "
-                f"costumes from the reference images: {m_outfit}. DO NOT "
-                f"change clothing colour, cut or style between the references "
-                f"and the duet."
+                f"costumes from the reference images: {m_outfit}. Each "
+                f"garment is fully on each individual performer — no "
+                f"half-and-half outfits, no shared pieces, no garments "
+                f"split between bodies. DO NOT change clothing colour, "
+                f"cut or style between the references and the duet."
             )
         elif f_outfit and m_outfit:
+            # Fix 35 D: name the male outfit FIRST because portrait_a (lead,
+            # duplicated weight) is the male performer in mixed duets.
+            # Fix 35 A: explicit garment-lock per performer + cross-swap
+            # negation, gender-agnostic and slot-agnostic.
             wardrobe_clause = (
                 f" Both performers wear their established costumes from the "
-                f"reference images: the female performer wears {f_outfit}; the "
-                f"male performer wears {m_outfit}. DO NOT change clothing "
-                f"colour, cut or style between the references and the duet."
+                f"reference images. The man wears: {m_outfit}. The woman "
+                f"wears: {f_outfit}. Each garment is locked to its assigned "
+                f"performer — NEVER swap or share clothing between the two. "
+                f"The man's listed garments go ONLY on the man; the woman's "
+                f"listed garments go ONLY on the woman. No cross-dressing, "
+                f"no mixed garments, no shared pieces, no half-and-half "
+                f"outfits, no garment split between bodies. DO NOT change "
+                f"clothing colour, cut or style between the references and "
+                f"the duet."
             )
         else:
             wardrobe_clause = (
@@ -201,6 +226,20 @@ def build_duet_portrait_prompt(
         gender_clause = " Both performers are male — never depict a female performer in the duet."
     else:
         gender_clause = ""
+    # Fix 35 B + C: anatomy-lock and composition-hint apply to ALL duet
+    # kinds — body-merge and limb hallucinations are orthogonal to gender.
+    anatomy_clause = (
+        " Two clearly separate full-body figures with distinct anatomy: "
+        "exactly two arms and two legs per person, exactly one head per "
+        "person, no merged limbs, no shared body parts, no extra arms or "
+        "legs, no third hand on shared objects, anatomically correct."
+    )
+    composition_clause = (
+        " Both performers stand side-by-side as separate individuals with "
+        "a small visible gap between their bodies, full silhouettes "
+        "clearly distinct against the background, never overlapping at "
+        "the torso, never merged or fused into a single body."
+    )
     return (
         "Two performers standing side-by-side as a single front-facing "
         "couple portrait, shown from head to waist, both faces and mouths "
@@ -214,6 +253,8 @@ def build_duet_portrait_prompt(
         "people as in the reference images, NOT new performers in a "
         "similar style."
         f"{gender_clause}"
+        f"{anatomy_clause}"
+        f"{composition_clause}"
         f"{wardrobe_clause}"
         f"{theme_clause}"
     )

@@ -313,8 +313,10 @@ def test_duet_prompt_includes_both_female_and_male_outfits_when_slot_provided():
     p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear")
     assert "sundress" in p
     assert "linen shirt" in p
-    assert "female performer wears" in p
-    assert "male performer wears" in p
+    # Fix 35 D: male outfit is named FIRST to match portrait_a reference order.
+    assert "The man wears:" in p
+    assert "The woman wears:" in p
+    assert p.index("The man wears:") < p.index("The woman wears:")
 
 
 def test_duet_prompt_ff_uses_only_female_outfit_and_locks_gender():
@@ -333,10 +335,12 @@ def test_duet_prompt_mm_uses_only_male_outfit_and_locks_gender():
     assert "never depict a female performer" in p.lower()
 
 
-def test_duet_prompt_mixed_default_keeps_legacy_wording():
+def test_duet_prompt_mixed_default_uses_fix35_wording():
     p = build_duet_portrait_prompt("any", wardrobe_slot="casual_beachwear", duet_kind="mixed")
-    assert "female performer wears" in p
-    assert "male performer wears" in p
+    # Fix 35 D: male outfit FIRST, female SECOND.
+    assert "The man wears:" in p
+    assert "The woman wears:" in p
+    assert p.index("The man wears:") < p.index("The woman wears:")
     # No gender-lock clause for mixed duets.
     assert "Both performers are female" not in p
     assert "Both performers are male" not in p
