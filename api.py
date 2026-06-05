@@ -974,13 +974,15 @@ async def _run_create_music_video(
                             # fall back to mixed routing (run the normal
                             # override). Otherwise keep the LLM labels verbatim
                             # so the "duet" choruses survive.
+                            # Fix 36: detected is now Dict[label, (gender, confidence)].
                             same_gender = duet in ("ff", "mm")
                             if same_gender:
                                 _vsecs = []
                                 for _sec in aligned:
-                                    _g2 = detected.get(_sec.get("label", ""))
-                                    if not _g2:
+                                    _result = detected.get(_sec.get("label", ""))
+                                    if not _result:
                                         continue
+                                    _g2, _conf2 = _result
                                     _s2 = float(_sec.get("start", _sec.get("start_time", 0.0)))
                                     _e2 = float(_sec.get("end", _sec.get("end_time", 0.0)))
                                     _vsecs.append((_g2, max(0.0, _e2 - _s2)))
@@ -994,18 +996,52 @@ async def _run_create_music_video(
                                           f"→ keeping LLM labels (no gender override)")
                             corrections = 0
                             if not same_gender:
+                                # Fix 36: asymmetric trust + confidence gate.
+                                # LLM labels with an explicit "- male|female|
+                                # duet" suffix carry lyric-aware semantic
+                                # authority — they need a strong audio signal
+                                # to be overridden. Generic LLM labels (no
+                                # gender suffix) get the lower gate.
+                                _HIGH_CONF = 0.85
+                                _LOW_CONF = 0.70
                                 for _sec in aligned:
-                                    _g = detected.get(_sec.get("label", ""))
-                                    if not _g or _g == "unknown":
-                                        continue
                                     _label = _sec.get("label", "")
+                                    _result = detected.get(_label)
+                                    if not _result:
+                                        continue
+                                    _g, _conf = _result
+                                    if _g == "unknown":
+                                        continue
+                                    _has_explicit = bool(_re.search(
+                                        r' - (male|female|duet)\b', _label
+                                    ))
+                                    _required = _HIGH_CONF if _has_explicit else _LOW_CONF
+                                    if _conf < _required:
+                                        print(
+                                            f"[Fix 36] keeping LLM label "
+                                            f"{_label!r} — audio says {_g!r} "
+                                            f"with conf={_conf:.2f} < required "
+                                            f"{_required:.2f}."
+                                        )
+                                        continue
                                     _new_label = _re.sub(
-                                        r' - (male|female|duet)\b', f' - {_g}', _label, count=1
+                                        r' - (male|female|duet)\b',
+                                        f' - {_g}', _label, count=1,
                                     )
                                     if _new_label != _label:
                                         _sec["label"] = _new_label
                                         corrections += 1
-                            print(f"[create-mv] gender detection: {detected}; "
+                                        print(
+                                            f"[Fix 36] overriding {_label!r} "
+                                            f"→ {_new_label!r} "
+                                            f"(audio conf={_conf:.2f})."
+                                        )
+                            # Fix 36: log detected as (gender, conf) tuples so
+                            # the per-section confidence is visible.
+                            _detected_compact = {
+                                k: (v[0], round(v[1], 2)) for k, v in detected.items()
+                            }
+                            print(f"[create-mv] gender detection: {_detected_compact}; "
                                   f"gender corrections: {corrections}; "
                                   f"mid-section splits: {mid_splits}; "
                                   f"boundary refinements applied (voice_end tail +0.5s)")

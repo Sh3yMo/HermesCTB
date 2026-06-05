@@ -43,10 +43,20 @@ def _classify_section(
     segments: List[Tuple[str, float, float]],
     dominant_threshold: float = 0.7,
     duet_threshold: float = 0.2,
-) -> str:
+) -> Tuple[str, float]:
     """Determine the dominant gender for a single section based on overlapping segments.
 
-    Returns 'male' | 'female' | 'duet' | 'unknown'.
+    Fix 36: returns (label, confidence). Confidence semantics:
+      - dominant solo (male/female above dominant_threshold): confidence
+        equals the winning ratio (≥0.70 by default).
+      - duet: confidence = 2 * min(male_ratio, female_ratio); 50/50 → 1.0,
+        20/80 → 0.4.
+      - majority-vote fallback (mixed but not duet-balanced): confidence
+        equals the winning ratio (< 0.70, signals uncertainty so the caller
+        can withhold the override).
+      - no speech / unknown: confidence = 0.0.
+
+    Returns ('male' | 'female' | 'duet' | 'unknown', confidence_in_[0,1]).
     """
     male_s = 0.0
     female_s = 0.0
@@ -64,27 +74,31 @@ def _classify_section(
 
     speech_total = male_s + female_s
     if speech_total <= 0:
-        return "unknown"
+        return ("unknown", 0.0)
 
     male_ratio = male_s / speech_total
     female_ratio = female_s / speech_total
 
     # Both significantly present → duet
     if male_ratio >= duet_threshold and female_ratio >= duet_threshold:
-        return "duet"
-    # Dominant gender
+        balance = 2.0 * min(male_ratio, female_ratio)
+        return ("duet", balance)
+    # Dominant gender (high confidence)
     if male_ratio >= dominant_threshold:
-        return "male"
+        return ("male", male_ratio)
     if female_ratio >= dominant_threshold:
-        return "female"
-    # Mixed but not duet-balanced → pick winner
-    return "male" if male_s > female_s else "female"
+        return ("female", female_ratio)
+    # Mixed but not duet-balanced → pick winner with the actual winning
+    # ratio as confidence (caller can use this to withhold weak overrides).
+    if male_s > female_s:
+        return ("male", male_ratio)
+    return ("female", female_ratio)
 
 
 def detect_section_genders(
     vocals_path: str,
     sections: List[Dict],
-) -> Dict[str, str]:
+) -> Dict[str, Tuple[str, float]]:
     """Detect gender per section by overlap with inaSpeechSegmenter segments.
 
     Args:
@@ -93,12 +107,13 @@ def detect_section_genders(
                   'end' (or 'end_time'). Time values in seconds.
 
     Returns:
-        Mapping section_label → detected gender ('male'|'female'|'duet'|'unknown').
+        Mapping section_label → (detected gender, confidence). Gender is one
+        of 'male'|'female'|'duet'|'unknown'; confidence is in [0, 1].
     """
     if not sections:
         return {}
     segments = _segment_audio(vocals_path)
-    result: Dict[str, str] = {}
+    result: Dict[str, Tuple[str, float]] = {}
     for sec in sections:
         label = sec.get("label") or sec.get("name") or ""
         start = sec.get("start", sec.get("start_time", 0.0))
@@ -312,13 +327,13 @@ def split_sections_at_mid_swaps(
 
 
 def compare_with_lyrics_tags(
-    detected: Dict[str, str],
+    detected: Dict[str, Tuple[str, float]],
     lyrics_role_extractor,
 ) -> List[Tuple[str, Optional[str], str]]:
     """Compare detected genders against role extracted from lyrics labels.
 
     Args:
-        detected: output of detect_section_genders().
+        detected: output of detect_section_genders() — Dict[label, (gender, confidence)].
         lyrics_role_extractor: callable label -> Optional[str]. Pass
             music_video_pipeline.extract_section_role here.
 
@@ -328,6 +343,12 @@ def compare_with_lyrics_tags(
     """
     rows: List[Tuple[str, Optional[str], str]] = []
     for label, det in detected.items():
+        # Fix 36: detected entries are (gender, confidence) tuples; back-compat
+        # accept legacy plain strings too.
+        if isinstance(det, tuple):
+            det_gender = det[0]
+        else:
+            det_gender = det
         expected = lyrics_role_extractor(label)
-        rows.append((label, expected, det))
+        rows.append((label, expected, det_gender))
     return rows

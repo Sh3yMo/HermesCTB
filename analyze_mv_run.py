@@ -225,7 +225,9 @@ def analyze_mv_run(mp4_path: str) -> Tuple[List[AnalysisRow], Dict[str, Optional
 
     rows: List[AnalysisRow] = []
     for ps in segments_plan:
-        detected = _classify_section(ps.start, ps.end, ina_segments)
+        # Fix 36: _classify_section returns (gender, confidence) — analyze_mv_run
+        # only needs the gender label here.
+        detected, _conf = _classify_section(ps.start, ps.end, ina_segments)
         lyrics_role = _portrait_role_from_label(ps.section_label)
         status = _classify_status(ps.portrait_role, detected, lyrics_role)
         rows.append(AnalysisRow(

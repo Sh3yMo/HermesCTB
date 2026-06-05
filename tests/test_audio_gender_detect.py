@@ -22,45 +22,84 @@ from audio_gender_detect import (  # noqa: E402
 
 def test_classify_male_dominant():
     segs = [("male", 0.0, 10.0), ("noEnergy", 10.0, 12.0)]
-    assert _classify_section(0.0, 12.0, segs) == "male"
+    gender, conf = _classify_section(0.0, 12.0, segs)
+    assert gender == "male"
+    assert conf >= 0.99  # 100% male
 
 
 def test_classify_female_dominant():
     segs = [("female", 0.0, 10.0)]
-    assert _classify_section(0.0, 10.0, segs) == "female"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "female"
+    assert conf >= 0.99
 
 
 def test_classify_duet_balanced():
     segs = [("male", 0.0, 5.0), ("female", 5.0, 10.0)]
-    assert _classify_section(0.0, 10.0, segs) == "duet"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "duet"
+    # 50/50 → balance = 2 * 0.5 = 1.0
+    assert abs(conf - 1.0) < 0.01
 
 
 def test_classify_unknown_silent():
     segs = [("noEnergy", 0.0, 10.0), ("music", 0.0, 10.0)]
-    assert _classify_section(0.0, 10.0, segs) == "unknown"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "unknown"
+    assert conf == 0.0
 
 
 def test_classify_partial_overlap_weighting():
     # Section 0-10, male only overlaps 5s, female only 1s → male wins
     segs = [("male", 0.0, 5.0), ("female", 5.0, 6.0)]
-    assert _classify_section(0.0, 10.0, segs) == "male"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "male"
+    # male_ratio = 5/6 ≈ 0.83 → dominant, conf = 0.83
+    assert conf > 0.7
 
 
 def test_classify_outside_section_ignored():
     segs = [("male", 100.0, 110.0)]  # well outside section 0-10
-    assert _classify_section(0.0, 10.0, segs) == "unknown"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "unknown"
+    assert conf == 0.0
 
 
 def test_classify_mixed_not_duet():
     # Section 0-10, male 9s, female 1s → not balanced for duet → male
     segs = [("male", 0.0, 9.0), ("female", 9.0, 10.0)]
-    assert _classify_section(0.0, 10.0, segs) == "male"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "male"
+    assert conf > 0.7  # 90% male
 
 
 def test_classify_duet_threshold_edge():
     # 80/20 split → exactly at duet threshold
     segs = [("male", 0.0, 8.0), ("female", 8.0, 10.0)]
-    assert _classify_section(0.0, 10.0, segs) == "duet"
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "duet"
+    # balance = 2 * 0.2 = 0.4
+    assert abs(conf - 0.4) < 0.01
+
+
+def test_classify_dominant_with_silence_padding():
+    """Silence/noEnergy doesn't count toward speech_total — only male/female
+    overlap matters for the ratio."""
+    segs = [("male", 0.0, 6.0), ("female", 6.0, 7.0), ("noEnergy", 7.0, 10.0)]
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    # speech_total = 7s; male_ratio = 6/7 ≈ 0.857 → dominant male.
+    assert gender == "male"
+    assert conf > 0.8
+
+
+def test_classify_duet_unbalanced_returns_balance_confidence():
+    """Duet but one side dominates — confidence is the balance score."""
+    # 75/25 split: male 75% female 25% → both > 0.2 → duet branch
+    segs = [("male", 0.0, 7.5), ("female", 7.5, 10.0)]
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "duet"
+    # balance = 2 * 0.25 = 0.5
+    assert abs(conf - 0.5) < 0.01
 
 
 # ─── detect_section_genders (with mocked segmenter) ──────────────────────────
@@ -73,10 +112,11 @@ def test_detect_section_genders_full_pipeline():
     ]
     with patch("audio_gender_detect._segment_audio", return_value=segs):
         result = detect_section_genders("/fake/vocals.wav", sections)
-    assert result == {
-        "Verse 1 - male": "male",
-        "Chorus - female": "female",
-    }
+    # Fix 36: dict values are (gender, confidence) tuples.
+    assert result["Verse 1 - male"][0] == "male"
+    assert result["Verse 1 - male"][1] >= 0.99
+    assert result["Chorus - female"][0] == "female"
+    assert result["Chorus - female"][1] >= 0.99
 
 
 def test_detect_section_genders_mismatch_detected():
@@ -85,7 +125,9 @@ def test_detect_section_genders_mismatch_detected():
     sections = [{"label": "Verse 1 - male", "start": 0.0, "end": 12.0}]
     with patch("audio_gender_detect._segment_audio", return_value=segs):
         result = detect_section_genders("/fake/vocals.wav", sections)
-    assert result["Verse 1 - male"] == "female"
+    gender, conf = result["Verse 1 - male"]
+    assert gender == "female"
+    assert conf >= 0.99
 
 
 def test_detect_section_genders_empty_sections():
@@ -98,7 +140,7 @@ def test_detect_section_genders_alt_keys():
     sections = [{"label": "Verse", "start_time": 0.0, "end_time": 5.0}]
     with patch("audio_gender_detect._segment_audio", return_value=segs):
         result = detect_section_genders("/fake/vocals.wav", sections)
-    assert result == {"Verse": "male"}
+    assert result["Verse"][0] == "male"
 
 
 def test_detect_section_genders_skips_invalid():
@@ -110,7 +152,8 @@ def test_detect_section_genders_skips_invalid():
     ]
     with patch("audio_gender_detect._segment_audio", return_value=segs):
         result = detect_section_genders("/fake/vocals.wav", sections)
-    assert result == {"Y": "male"}
+    assert list(result.keys()) == ["Y"]
+    assert result["Y"][0] == "male"
 
 
 # ─── refine_section_boundaries (Fix 15c) ─────────────────────────────────────
@@ -303,7 +346,11 @@ def test_split_section_below_min_double_not_processed():
 # ─── compare_with_lyrics_tags ────────────────────────────────────────────────
 
 def test_compare_returns_all_sections_with_expected_and_detected():
-    detected = {"Verse 1 - male": "female", "Chorus - female": "female"}
+    # Fix 36: detected is now Dict[label, (gender, confidence)].
+    detected = {
+        "Verse 1 - male": ("female", 0.92),
+        "Chorus - female": ("female", 0.88),
+    }
 
     def extractor(label):
         if "female" in label.lower():
@@ -317,3 +364,19 @@ def test_compare_returns_all_sections_with_expected_and_detected():
     by_label = {r[0]: r for r in rows}
     assert by_label["Verse 1 - male"] == ("Verse 1 - male", "male", "female")  # MISMATCH
     assert by_label["Chorus - female"] == ("Chorus - female", "female", "female")  # match
+
+
+def test_compare_back_compat_accepts_plain_string_values():
+    """compare_with_lyrics_tags accepts legacy plain strings too."""
+    detected_legacy = {"Verse 1 - male": "female", "Chorus - female": "female"}
+
+    def extractor(label):
+        if "female" in label.lower():
+            return "female"
+        if "male" in label.lower():
+            return "male"
+        return None
+
+    rows = compare_with_lyrics_tags(detected_legacy, extractor)
+    by_label = {r[0]: r for r in rows}
+    assert by_label["Verse 1 - male"] == ("Verse 1 - male", "male", "female")
