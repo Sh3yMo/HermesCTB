@@ -309,6 +309,22 @@ async def upload_file_to_comfy(file_bytes: bytes, filename: str, file_type: str 
         return data.get("name", filename)
 
 
+async def probe_comfyui_alive(timeout: float = 3.0) -> bool:
+    """Cheap pre-submit health probe — True when ComfyUI answers /queue.
+
+    Used by the FastAPI submit endpoints to fail fast (HTTP 412) instead
+    of letting a long-running job land in the queue, fire the Tier-2
+    recovery path, hit the supervisor, and bubble up `ConnectError` 30
+    minutes into the render.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(f"{COMFYUI_URL}/queue")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
 async def queue_prompt_async(workflow: dict) -> str:
     workflow = preprocess_workflow(workflow)
     workflow = randomize_seeds(workflow)

@@ -17,10 +17,40 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psutil
 
-COMFY_EXE_PATH = os.environ.get(
-    "COMFY_EXE_PATH",
-    r"C:\Users\SheyMo\AppData\Local\Programs\ComfyUI\ComfyUI.exe",
+# ComfyUI Desktop reshuffled its install path in the 0.24.x line — the
+# Electron build now lives under @comfyorgcomfyui-electron, while older
+# installs sat directly under \Programs\ComfyUI\. Probe known locations
+# instead of hardcoding a single one so a future installer reshuffle
+# does not silently break Tier-2 recovery.
+_LOCALAPPDATA = os.environ.get(
+    "LOCALAPPDATA",
+    os.path.expanduser(r"~\AppData\Local"),
 )
+_COMFY_EXE_CANDIDATES = [
+    os.path.join(_LOCALAPPDATA, r"Programs\@comfyorgcomfyui-electron\ComfyUI.exe"),
+    os.path.join(_LOCALAPPDATA, r"Programs\ComfyUI\ComfyUI.exe"),
+    os.path.join(_LOCALAPPDATA, r"Programs\comfyui-electron\ComfyUI.exe"),
+]
+
+
+def _resolve_comfy_exe() -> str:
+    """Return the first existing ComfyUI.exe path.
+
+    Precedence: explicit COMFY_EXE_PATH env-var > known install-path
+    candidates > first candidate as last-resort default (lets the
+    /restart endpoint return a useful exe_not_found message instead of
+    crashing the supervisor at import time).
+    """
+    explicit = os.environ.get("COMFY_EXE_PATH", "").strip()
+    if explicit:
+        return explicit
+    for candidate in _COMFY_EXE_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return _COMFY_EXE_CANDIDATES[0]
+
+
+COMFY_EXE_PATH = _resolve_comfy_exe()
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188")
 SUPERVISOR_HOST = os.environ.get("SUPERVISOR_HOST", "0.0.0.0")
 SUPERVISOR_PORT = int(os.environ.get("SUPERVISOR_PORT", "8787"))

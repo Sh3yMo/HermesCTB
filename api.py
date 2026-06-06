@@ -29,6 +29,7 @@ from comfyui import (
     inject_segment_duration,
     init_config,
     make_comfy_caller,
+    probe_comfyui_alive,
     queue_prompt_async,
     queue_and_wait_with_recovery,
     free_comfy,
@@ -37,6 +38,25 @@ from comfyui import (
     load_workflow,
     COMFYUI_URL,
 )
+
+
+async def _ensure_comfy_up_or_412() -> None:
+    """Stage 8 pre-flight: fail fast when ComfyUI is unreachable.
+
+    Long-running submit endpoints (/generate/video, /generate/music-video,
+    /create/music-video) call this BEFORE accepting the job, so a down
+    ComfyUI surfaces as an immediate 412 instead of a queued job that
+    crashes at the first render step (and then triggers the Tier-2
+    recovery cascade against a possibly-broken supervisor path).
+    """
+    if not await probe_comfyui_alive():
+        raise HTTPException(
+            status_code=412,
+            detail=(
+                f"ComfyUI not reachable at {COMFYUI_URL}. Start ComfyUI "
+                "Desktop or check the host_supervisor before resubmitting."
+            ),
+        )
 from music_video_pipeline import (
     MVSession,
     MusicVideoPrompter,
@@ -325,6 +345,7 @@ async def generate_image(
     input_image: Optional[UploadFile] = File(None),
     aspect_ratio: Optional[str] = Form(None),
 ):
+    await _ensure_comfy_up_or_412()
     img_bytes = await input_image.read() if input_image else None
     return await _run_direct_workflow(
         workflow_id, prompt,
@@ -348,6 +369,7 @@ async def generate_video(
     aspect_ratio: Optional[str] = Form(None),
     duration: Optional[float] = Form(None),
 ):
+    await _ensure_comfy_up_or_412()
     img_bytes = await input_image.read() if input_image else None
     vid_bytes = await input_video.read() if input_video else None
     aud_bytes = await input_audio.read() if input_audio else None
@@ -492,6 +514,7 @@ async def generate_music_video(
     theme: str = Form(...),
     crossfade_duration: float = Form(0.0),
 ):
+    await _ensure_comfy_up_or_412()
     tmp_dir = tempfile.mkdtemp(prefix="ctb_mv_")
     audio_path = os.path.join(tmp_dir, audio.filename or "audio.wav")
     with open(audio_path, "wb") as f:
@@ -1431,6 +1454,7 @@ async def create_music_video(
     portrait is generated so the shared-duet frame depicts both people. Empty
     string keeps the standard male/female routing.
     """
+    await _ensure_comfy_up_or_412()
     duet = duet if duet in ("ff", "mm") else ""
     # Fix 29 + Fix 30: validate arc form params against known arcs. Pass empty
     # string when caller's value is not recognized (pipeline will LLM-pick).
