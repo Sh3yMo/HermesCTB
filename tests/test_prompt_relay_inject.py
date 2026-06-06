@@ -1,6 +1,6 @@
 """Tests for PromptRelay smart-node prompt injection in comfyui.inject_prompt."""
 
-from comfyui import build_smart_prompt, inject_prompt
+from comfyui import build_smart_prompt, has_relay_smart_node, inject_prompt
 
 
 def test_build_smart_prompt_empty_list():
@@ -82,6 +82,44 @@ def test_inject_prompt_clip_text_encode_backward_compat():
     }
     inject_prompt(wf, "hello")
     assert wf["1"]["inputs"]["text"] == "hello"
+
+
+def test_has_relay_smart_node_detects_smart_encoder():
+    wf = {
+        "608": {
+            "class_type": "PromptRelaySmartEncode",
+            "inputs": {"smart_prompt": ""},
+            "_meta": {"title": "positive"},
+        }
+    }
+    assert has_relay_smart_node(wf) is True
+
+
+def test_has_relay_smart_node_false_on_legacy_workflow():
+    wf = {
+        "1": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "", "clip": ["x", 0]},
+            "_meta": {"title": "positive"},
+        },
+        "2": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["x", 0], "vae": ["y", 0]},
+            "_meta": {"title": "decode"},
+        },
+    }
+    assert has_relay_smart_node(wf) is False
+
+
+def test_has_relay_smart_node_ignores_non_dict_entries():
+    wf = {
+        "ignored_meta": "not a node dict",
+        "608": {
+            "class_type": "PromptRelaySmartEncode",
+            "inputs": {"smart_prompt": ""},
+        },
+    }
+    assert has_relay_smart_node(wf) is True
 
 
 def test_inject_prompt_mixed_workflow_prefers_positives_of_each_kind():

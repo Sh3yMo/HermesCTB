@@ -157,6 +157,19 @@ def build_smart_prompt(beats: list[str]) -> str:
     return "\n".join(out_lines)
 
 
+def has_relay_smart_node(workflow: dict) -> bool:
+    """True when the workflow contains a PromptRelaySmartEncode node.
+
+    Used by the music-video render loop to decide between the relay
+    multi-beat path and the legacy single-prompt path. Cheap class-type
+    scan, no edge inspection.
+    """
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "PromptRelaySmartEncode":
+            return True
+    return False
+
+
 def inject_input_image(workflow: dict, image_filename: str) -> dict:
     nodes = []
     for node_id, node in workflow.items():

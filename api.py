@@ -18,8 +18,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from audio_enhancer import AudioEnhancer, AudioSettings
 from config_loader import load_config
 from comfyui import (
+    build_smart_prompt,
     download_output_to_local,
     get_file_bytes,
+    has_relay_smart_node,
     inject_input_audio,
     inject_input_image,
     inject_prompt,
@@ -1286,7 +1288,26 @@ async def _run_create_music_video(
             seg_prompt = seg.prompt
             if (seg.lyrics or "").strip():
                 seg_prompt = f"{seg.prompt} {LIPSYNC_BOOSTER}"
-            wf = inject_prompt(wf, seg_prompt)
+            # Stage 5: PromptRelay branch — used when the workflow contains a
+            # PromptRelaySmartEncode node AND the LLM emitted a per-segment
+            # multi-beat block. Falls back to the legacy single-prompt path
+            # otherwise, so swapping the workflow file is the only switch
+            # required to enable relay rendering per request.
+            relay = seg.video_prompt_relay
+            if relay and has_relay_smart_node(wf):
+                beats = list(relay["beats"])
+                if (seg.lyrics or "").strip() and beats:
+                    # Append lipsync-booster to the LAST beat so it lands in
+                    # the same latent region as the dialog beat per the
+                    # recency rule encoded in the LLM system-prompt.
+                    beats[-1] = f"{beats[-1]} {LIPSYNC_BOOSTER}"
+                wf = inject_prompt(
+                    wf,
+                    build_smart_prompt(beats),
+                    global_prompt=relay["global"],
+                )
+            else:
+                wf = inject_prompt(wf, seg_prompt)
             frame = frame_by_seg.get(i, source or "")
             if frame and os.path.exists(frame):
                 with open(frame, "rb") as fr:
