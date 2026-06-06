@@ -17,19 +17,6 @@
       "title": "RandomNoise (Seed)"
     }
   },
-  "121": {
-    "inputs": {
-      "text": "The old, battle-weary warrior, with his long beard and battered helmet and bloodstained armour, stands before the viewer and speaks in a broken, pensive voice: \"Well, we have won the battle --- but at what cost\"",
-      "clip": [
-        "146",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Prompt) positive"
-    }
-  },
   "146": {
     "inputs": {
       "clip_name1": "gemma_3_12B_it_fp4_mixed.safetensors",
@@ -205,7 +192,7 @@
       "chunks": 4,
       "dim_threshold": 4096,
       "model": [
-        "211",
+        "1700",
         0
       ]
     },
@@ -275,6 +262,30 @@
     "class_type": "Anything Everywhere",
     "_meta": {
       "title": "Anything Everywhere"
+    }
+  },
+  "1700": {
+    "inputs": {
+      "global_prompt": "",
+      "smart_prompt": "",
+      "normalize_by_tokens": false,
+      "epsilon": 0.001,
+      "model": [
+        "211",
+        0
+      ],
+      "clip": [
+        "146",
+        0
+      ],
+      "latent": [
+        "759:1060",
+        0
+      ]
+    },
+    "class_type": "PromptRelaySmartEncode",
+    "_meta": {
+      "title": "Prompt Relay Encode (Smart) positive"
     }
   },
   "759:1063": {
@@ -817,8 +828,8 @@
   "759:1542": {
     "inputs": {
       "any": [
-        "121",
-        0
+        "1700",
+        1
       ]
     },
     "class_type": "LayerUtility: AnyRerouter",

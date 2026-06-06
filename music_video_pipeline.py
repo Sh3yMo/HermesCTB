@@ -278,6 +278,10 @@ class Segment:
     status: str = "pending"  # "pending", "generating", "completed"
     reuse_of: Optional[int] = None  # RC8: reuse this earlier segment's MCA frame (repeated chorus)
     wardrobe_slot: str = ""  # Fix 30: wardrobe slot key for this segment (identity anchor)
+    # PromptRelay (Smart-Node): per-segment multi-beat block. None = legacy single-prompt path.
+    # `global` = camera+lighting+grading anchor (NO identity — image carries identity).
+    # `beats` = 1-4 entries; beat 1 strictly static + generic subject for IA2V.
+    video_prompt_relay: Optional[Dict[str, Any]] = None
 
     @property
     def duration(self) -> float:
@@ -300,6 +304,8 @@ class Segment:
             "transition": self.transition,
             "status": self.status,
             "reuse_of": self.reuse_of,
+            "wardrobe_slot": self.wardrobe_slot,
+            "video_prompt_relay": self.video_prompt_relay,
         }
 
     @classmethod
@@ -805,6 +811,45 @@ def _segment_video_prompt(spec: Dict[str, Any], theme: str) -> str:
     separate LIPSYNC handling, never as the visual prompt.
     """
     return (str(spec.get("video_prompt", "")).strip()) or theme
+
+
+# PromptRelay validated constraints (2026-06-05, distilled-LoRA path):
+# - Beat-Mindest-Länge: 5s. Under that, distilled model can't articulate the beat.
+# - Max beats per clip: 4. More = recency-bias loses early beats.
+# - Below 5s clip duration: relay degenerates to single-prompt → fall back to legacy.
+RELAY_MIN_BEAT_SECONDS = 5.0
+RELAY_MAX_BEATS = 4
+
+
+def pick_relay_beat_count(duration: float) -> int:
+    """Adaptive beat count for distilled LTX-IA2V given clip duration.
+
+    Returns 0 when duration is too short for relay to add value (caller should
+    fall back to single-prompt). Otherwise returns 1..4 beats, gleichgewichtet.
+    """
+    if duration < RELAY_MIN_BEAT_SECONDS:
+        return 0
+    n = int(duration // RELAY_MIN_BEAT_SECONDS)
+    return max(1, min(RELAY_MAX_BEATS, n))
+
+
+def extract_relay_spec(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the LLM's video_prompt_relay block from a spec dict, if shaped right.
+
+    Returns None when the LLM omitted the relay field or returned a malformed
+    block. Strict: requires `global` string and `beats` list of non-empty strings.
+    """
+    raw = spec.get("video_prompt_relay")
+    if not isinstance(raw, dict):
+        return None
+    g = raw.get("global", "")
+    beats = raw.get("beats", [])
+    if not isinstance(g, str) or not isinstance(beats, list):
+        return None
+    cleaned = [str(b).strip() for b in beats if isinstance(b, (str, bytes)) and str(b).strip()]
+    if not cleaned:
+        return None
+    return {"global": g.strip(), "beats": cleaned[:RELAY_MAX_BEATS]}
 
 
 def build_segment_timeline(

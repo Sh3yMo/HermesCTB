@@ -770,3 +770,4 @@ def test_duet_prompt_embeds_theme_when_given_and_omits_when_empty():
     assert "Theme context: rainy neon street." in with_theme
     no_theme = mvp.build_duet_portrait_prompt("")
     assert "Theme context:" not in no_theme
+

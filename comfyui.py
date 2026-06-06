@@ -98,7 +98,7 @@ def load_workflow(name: str) -> dict:
 # Inject helpers (ported from CTB/ctb.py)
 # ---------------------------------------------------------------------------
 
-def inject_prompt(workflow: dict, prompt_text: str) -> dict:
+def inject_prompt(workflow: dict, prompt_text: str, global_prompt: str | None = None) -> dict:
     text_encode_nodes = []
     for node_id, node in workflow.items():
         class_type = node.get("class_type", "")
@@ -109,6 +109,7 @@ def inject_prompt(workflow: dict, prompt_text: str) -> dict:
                     "title": node.get("_meta", {}).get("title", ""),
                     "node": node,
                     "input_field": "text",
+                    "kind": "clip",
                 })
         elif "TextEncodeQwen" in class_type:
             if "inputs" in node and "prompt" in node["inputs"]:
@@ -117,13 +118,43 @@ def inject_prompt(workflow: dict, prompt_text: str) -> dict:
                     "title": node.get("_meta", {}).get("title", ""),
                     "node": node,
                     "input_field": "prompt",
+                    "kind": "qwen",
+                })
+        elif class_type == "PromptRelaySmartEncode":
+            if "inputs" in node and "smart_prompt" in node["inputs"]:
+                text_encode_nodes.append({
+                    "id": node_id,
+                    "title": node.get("_meta", {}).get("title", ""),
+                    "node": node,
+                    "input_field": "smart_prompt",
+                    "kind": "relay",
                 })
     if not text_encode_nodes:
         return workflow
     positive_nodes = [n for n in text_encode_nodes if "negative" not in n["title"].lower()] or [text_encode_nodes[0]]
     for n in positive_nodes:
         n["node"]["inputs"][n["input_field"]] = prompt_text
+        if n["kind"] == "relay" and global_prompt is not None and "global_prompt" in n["node"]["inputs"]:
+            n["node"]["inputs"]["global_prompt"] = global_prompt
     return workflow
+
+
+def build_smart_prompt(beats: list[str]) -> str:
+    """Build PromptRelay block-syntax string from list of beat strings.
+
+    Each beat becomes `Scene N:` header on its own line followed by beat text.
+    Empty / whitespace-only beats skipped. Returns empty string for empty input.
+    """
+    cleaned = [b.strip() for b in beats if b and b.strip()]
+    if not cleaned:
+        return ""
+    out_lines: list[str] = []
+    for i, beat in enumerate(cleaned, start=1):
+        out_lines.append(f"Scene {i}:")
+        out_lines.append(beat)
+        if i < len(cleaned):
+            out_lines.append("")
+    return "\n".join(out_lines)
 
 
 def inject_input_image(workflow: dict, image_filename: str) -> dict:
