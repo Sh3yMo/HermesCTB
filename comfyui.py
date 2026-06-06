@@ -692,7 +692,18 @@ async def queue_and_wait_with_recovery(
                 await asyncio.sleep(5)
             else:
                 print(f"[recovery] Tier-2 (attempt {attempt}/{max_restarts}): full restart — reason: {e!r}")
-                await _restart_comfy_process_and_wait()
+                try:
+                    await _restart_comfy_process_and_wait()
+                except Exception as restart_err:
+                    # Supervisor/restart unreachable — orphan render keeps GPU. Send
+                    # /interrupt so ComfyUI at least stops the hanging prompt.
+                    try:
+                        async with httpx.AsyncClient(timeout=5) as c:
+                            await c.post(f"{COMFYUI_URL}/interrupt")
+                        print("[recovery] sent /interrupt to ComfyUI after restart failure")
+                    except Exception as int_err:
+                        print(f"[recovery] /interrupt also failed: {int_err!r}")
+                    raise restart_err
         finally:
             if monitor is not None:
                 monitor.stop()

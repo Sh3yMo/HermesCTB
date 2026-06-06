@@ -127,6 +127,23 @@ async def lifespan(app: FastAPI):
     MV_PROMPTER = MusicVideoPrompter(CONFIG["prompt_enhancer"])
     REGISTRY = load_registry()
     os.makedirs("outputs", exist_ok=True)
+    # Probe host_supervisor — if down, Tier-2 auto-recovery (full ComfyUI
+    # restart) will silently fail on slowdown. Warn loud at startup so the
+    # issue is caught before a 40-min render hangs.
+    _sup_url = (
+        CONFIG.get("comfy_recovery", {}).get("restart_service_url", "")
+        .replace("/restart", "/health")
+    )
+    if _sup_url:
+        try:
+            async with httpx.AsyncClient(timeout=3) as _c:
+                _r = await _c.get(_sup_url)
+            if _r.status_code != 200:
+                print(f"WARNING: host_supervisor health probe HTTP {_r.status_code} at {_sup_url}")
+            else:
+                print(f"host_supervisor OK at {_sup_url}")
+        except Exception as _e:
+            print(f"WARNING: host_supervisor unreachable at {_sup_url}: {_e!r} — Tier-2 restart will fail")
     print("HermesCTB API ready")
     yield
 

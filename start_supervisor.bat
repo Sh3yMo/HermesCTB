@@ -1,3 +1,4 @@
 ﻿@echo off
 cd /d I:\HermesCTB
-py comfy_supervisor.py
+py -m pip install --quiet psutil >> supervisor.log 2>&1
+py comfy_supervisor.py >> supervisor.log 2>&1
