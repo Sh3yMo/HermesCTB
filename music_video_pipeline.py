@@ -2347,7 +2347,33 @@ class MusicVideoPrompter:
                     "reorder, merge or change durations. For each: "
                     "video_prompt + frame_variant_prompt per the VOCAL/STORY "
                     "rules above (VOCAL must quote its exact lyrics; STORY is "
-                    "cinematic narrative, no singer/lyrics). "
+                    "cinematic narrative, no singer/lyrics).\n\n"
+                    "OPTIONAL FIELD video_prompt_relay (PromptRelay multi-beat — "
+                    "improves motion adherence on segments ≥5s). When you "
+                    "include it, structure must be: "
+                    "{\"global\": <string>, \"beats\": [<string>, ...]}. "
+                    "Rules (empirically validated on LTX-2.3-distilled):\n"
+                    "  • Emit AT MOST 4 beats. Aim for one beat per ~5s of "
+                    "duration (5s→1, 10s→2, 15s→3, 20s+→4). Omit the field "
+                    "entirely for segments <5s.\n"
+                    "  • Beat 1 = strict static establishing description ONLY: "
+                    "no action verbs other than is/sits/stands/holds/wears/"
+                    "leans/lies/rests. NEVER include identity descriptors "
+                    "(elderly man, young woman, asian woman, etc.) — the "
+                    "input image carries identity. Use generic subject "
+                    "(\"A figure\", \"A person\", \"The performer\").\n"
+                    "  • Beats 2..N = one subject, one action each. Single "
+                    "subject may chain sequential verbs ('grabs and runs'); "
+                    "cross-subject parallel ('panda runs while figure waves') "
+                    "is OK; cross-subject parallel with three+ subjects is "
+                    "NOT.\n"
+                    "  • Recency: put the most critical action OR the only "
+                    "dialog in the LAST beat (late beats dominate).\n"
+                    "  • Dialog quotes appear in EXACTLY one beat (the one "
+                    "matching the vocal hit) and NEVER in beat 1.\n"
+                    "  • global = camera + lighting + grading only (no "
+                    "wardrobe, no identity — those come from the image and "
+                    "the per-beat text).\n"
                     "Return ONLY the JSON array, no other text."
                 )
                 aligned_user = (
@@ -2413,6 +2439,22 @@ class MusicVideoPrompter:
                         seg_role = extract_section_role(r["label"]) if r["is_vocal"] else None
                         vp = _append_wardrobe_tag(vp, slot, seg_role, duet_kind=duet_kind)
                         fvp = _append_wardrobe_tag(fvp, slot, seg_role, duet_kind=duet_kind)
+                        # Stage 4: extract optional PromptRelay multi-beat
+                        # block. None when LLM omitted it or shape invalid →
+                        # render-loop falls back to legacy single-prompt.
+                        relay = extract_relay_spec(spec)
+                        if relay is not None:
+                            # Apply Fix 33 sanitizer per beat so vocal-section
+                            # lyrics don't leak into non-vocal beats. global
+                            # never contains lyrics by design (camera-only).
+                            seg_lyrics = r.get("lyrics", "") if r["is_vocal"] else ""
+                            relay = {
+                                "global": relay["global"],
+                                "beats": [
+                                    strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics)
+                                    for b in relay["beats"]
+                                ],
+                            }
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -2425,6 +2467,7 @@ class MusicVideoPrompter:
                             ),
                             reuse_of=r.get("reuse_of"),
                             wardrobe_slot=slot,
+                            video_prompt_relay=relay,
                         ))
                     if segments:
                         print(f"[Fix 29] aligned lighting plan applied: "

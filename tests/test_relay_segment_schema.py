@@ -13,6 +13,7 @@ from music_video_pipeline import (
     Segment,
     extract_relay_spec,
     pick_relay_beat_count,
+    strip_lyrics_from_image_prompt,
 )
 
 
@@ -99,6 +100,36 @@ def test_segment_to_dict_includes_relay_field():
     d = s.to_dict()
     assert d["video_prompt_relay"] == {"global": "g", "beats": ["b1", "b2"]}
     assert d["wardrobe_slot"] == ""
+
+
+def test_relay_per_beat_lyric_sanitizer_pattern():
+    """build_segment_timeline applies strip_lyrics_from_image_prompt per beat.
+
+    This simulates that pipeline step: LLM may leak the section's lyrics
+    into a non-vocal beat. Per-beat sanitizer must remove the quoted lyric
+    while leaving action text intact.
+    """
+    spec = {
+        "video_prompt_relay": {
+            "global": "golden hour, cinematic medium shot",
+            "beats": [
+                "A figure sits on a wooden bench",
+                'the figure waves and sings "we have won the battle"',
+                "the panda climbs onto the bench",
+            ],
+        }
+    }
+    relay = extract_relay_spec(spec)
+    assert relay is not None
+    seg_lyrics = "we have won the battle"
+    cleaned = [strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics) for b in relay["beats"]]
+    # Beat 1 unchanged (no lyric)
+    assert cleaned[0] == "A figure sits on a wooden bench"
+    # Beat 2 must have the quoted lyric removed
+    assert '"we have won the battle"' not in cleaned[1]
+    assert "we have won the battle" not in cleaned[1]
+    # Beat 3 unchanged
+    assert "the panda climbs onto the bench" in cleaned[2]
 
 
 def test_segment_from_dict_roundtrip_relay():
