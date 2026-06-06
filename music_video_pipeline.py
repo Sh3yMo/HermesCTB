@@ -852,6 +852,133 @@ def extract_relay_spec(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"global": g.strip(), "beats": cleaned[:RELAY_MAX_BEATS]}
 
 
+def _build_merged_segment(group: List["Segment"]) -> "Segment":
+    """Combine a group of adjacent Segments into one merged clip.
+
+    Carries the first segment's start, the last segment's end, concatenated
+    lyrics, and a relay block whose beats are the concatenation of all
+    member beats (capped at RELAY_MAX_BEATS). Single-prompt members
+    contribute their video_prompt as one beat.
+    """
+    first = group[0]
+    last = group[-1]
+    global_text = ""
+    all_beats: List[str] = []
+    for s in group:
+        relay = s.video_prompt_relay
+        if isinstance(relay, dict):
+            if not global_text:
+                global_text = str(relay.get("global", "")).strip()
+            for b in relay.get("beats", []) or []:
+                if isinstance(b, str) and b.strip():
+                    all_beats.append(b.strip())
+        else:
+            p = (s.prompt or "").strip()
+            if p:
+                all_beats.append(p)
+    capped = all_beats[:RELAY_MAX_BEATS]
+    merged_relay: Optional[Dict[str, Any]] = (
+        {"global": global_text, "beats": capped} if capped else None
+    )
+    labels = [s.label for s in group if s.label]
+    lyrics = "\n".join(s.lyrics for s in group if (s.lyrics or "").strip())
+    return Segment(
+        index=first.index,
+        start_time=first.start_time,
+        end_time=last.end_time,
+        label=" + ".join(labels) if labels else "",
+        lyrics=lyrics,
+        prompt=first.prompt,
+        frame_variant_prompt=first.frame_variant_prompt,
+        transition=first.transition,
+        status=first.status,
+        reuse_of=None,
+        wardrobe_slot=first.wardrobe_slot,
+        video_prompt_relay=merged_relay,
+    )
+
+
+def merge_continuous_segments(
+    segments: List["Segment"],
+    tod_plan: List[str],
+    max_clip_duration: float = 30.0,
+) -> List["Segment"]:
+    """Stage 7 / Option A: collapse adjacent same-context VOCAL segments.
+
+    Two adjacent segments merge ONLY when ALL of:
+      - both have non-empty lyrics (VOCAL),
+      - same wardrobe_slot,
+      - same tod_plan entry,
+      - neither has reuse_of set (MCA-reused frame chains stay intact),
+      - combined (group start → candidate end) duration ≤ max_clip_duration,
+      - combined relay beat count ≤ RELAY_MAX_BEATS.
+
+    The merged Segment carries one PromptRelay block whose beats are the
+    union of member beats, so the LTX Smart-Node distributes them across
+    the joined clip. Eliminates the hard cut between consecutive same-
+    singer/same-location sections that the user observed on 2026-06-06.
+    """
+    if not segments:
+        return segments
+
+    def _beat_count(seg: "Segment") -> int:
+        r = seg.video_prompt_relay
+        if isinstance(r, dict):
+            return max(1, len(r.get("beats", []) or []))
+        return 1
+
+    merged: List["Segment"] = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        group = [segments[i]]
+        group_idx = [i]
+        beat_total = _beat_count(segments[i])
+        j = i + 1
+        while j < n:
+            current_first = group[0]
+            cand = segments[j]
+            if not (current_first.lyrics or "").strip():
+                break
+            if not (cand.lyrics or "").strip():
+                break
+            if current_first.wardrobe_slot != cand.wardrobe_slot:
+                break
+            # tod_plan is indexed by ORIGINAL segment.index — never by
+            # the loop variable, so a prior merge cannot mis-align it.
+            if (
+                group_idx[0] >= len(tod_plan)
+                or j >= len(tod_plan)
+                or tod_plan[group_idx[0]] != tod_plan[j]
+            ):
+                break
+            if current_first.reuse_of is not None or cand.reuse_of is not None:
+                break
+            if cand.end_time - current_first.start_time > max_clip_duration:
+                break
+            cand_beats = _beat_count(cand)
+            if beat_total + cand_beats > RELAY_MAX_BEATS:
+                break
+            group.append(cand)
+            group_idx.append(j)
+            beat_total += cand_beats
+            j += 1
+        if len(group) == 1:
+            merged.append(group[0])
+        else:
+            print(
+                f"[Stage 7] merging {len(group)} adjacent VOCAL segments "
+                f"(idx {group_idx[0]}..{group_idx[-1]}, "
+                f"{group[0].start_time:.1f}s→{group[-1].end_time:.1f}s, "
+                f"slot={group[0].wardrobe_slot!r}, "
+                f"tod={tod_plan[group_idx[0]] if group_idx[0] < len(tod_plan) else '?'!r}) "
+                f"into one Smart-Node clip with {beat_total} beats."
+            )
+            merged.append(_build_merged_segment(group))
+        i = j if j > i else i + 1
+    return merged
+
+
 def build_segment_timeline(
     specs: List[Dict[str, Any]],
     total_duration: float,
@@ -2474,6 +2601,23 @@ class MusicVideoPrompter:
                               f"{[tod_plan[i] for i in range(len(segments))]}")
                         print(f"[Fix 30] aligned wardrobe plan applied: "
                               f"{[wardrobe_plan[i] for i in range(len(segments))]}")
+                        # Stage 7 (Option A): collapse adjacent same-context
+                        # VOCAL segments into one Smart-Node multi-beat clip
+                        # so consecutive sections sharing wardrobe + lighting
+                        # render as a continuous take instead of two cut
+                        # clips. Must run AFTER the Fix 29/30 logs above
+                        # (those index by original segment order) and BEFORE
+                        # we hand segments off to the IA2V loop.
+                        pre_merge_count = len(segments)
+                        segments = merge_continuous_segments(
+                            segments, tod_plan, max_clip_duration=cap,
+                        )
+                        if len(segments) < pre_merge_count:
+                            print(
+                                f"[Stage 7] segment count "
+                                f"{pre_merge_count} → {len(segments)} "
+                                f"after same-context merge."
+                            )
                         return segments
                 print(f"Warning: aligned segment plan unusable "
                       f"({len(specs)}/{len(rows)} specs) after retry → falling back to "
