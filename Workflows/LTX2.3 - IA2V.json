@@ -135,7 +135,7 @@
         "strength": 0.6
       },
       "lora_2": {
-        "on": true,
+        "on": false,
         "lora": "90 video\\ltx-2-19b-ic-lora-detailer.safetensors",
         "strength": 0.5
       },
