@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -98,6 +99,23 @@ def _outputs_dir() -> str:
     d = os.path.join("outputs", today)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _safe_filename(*parts: str, max_len: int = 80) -> str:
+    """Build a filesystem-safe basename from one or more text parts.
+
+    Joins non-empty parts with ' - ', strips characters that break Windows /
+    POSIX paths, collapses whitespace, caps length. Returns '' when input
+    yields no usable characters — callers must supply a fallback name.
+    """
+    import re as _re
+    pieces = [p.strip() for p in parts if p and p.strip()]
+    if not pieces:
+        return ""
+    joined = " - ".join(pieces)
+    cleaned = _re.sub(r"[^\w\s\-'.]", "", joined, flags=_re.UNICODE)
+    cleaned = _re.sub(r"\s+", " ", cleaned).strip(" .-")
+    return cleaned[:max_len] if cleaned else ""
 
 
 def _new_job(job_id: str | None = None) -> str:
@@ -390,11 +408,19 @@ async def generate_video(
 # generate/music  (ACEStep)
 # ---------------------------------------------------------------------------
 
-async def _generate_song(settings_dict: dict, idea: str) -> tuple[str, str | None]:
-    """Generate a song via ACE-Step. Returns (audio_path, lyrics_path|None).
+async def _generate_song(
+    settings_dict: dict, idea: str,
+) -> tuple[str, str | None, str, str]:
+    """Generate a song via ACE-Step.
 
-    Reusable by /generate/music and the music-video orchestration so lyrics are
-    always pipeline-authored (never improvised by the caller).
+    Returns (audio_path, lyrics_path|None, artist, title). When the LLM emits
+    an `artist`/`title` pair (and the resulting basename is filesystem-safe),
+    the downloaded audio is renamed to `<artist> - <title>.mp3` so library /
+    mixing workflows downstream get a meaningful filename instead of the
+    generic ComfyUI output stem. The lyrics sidecar is renamed in lockstep.
+
+    Reusable by /generate/music and the music-video orchestration so lyrics
+    are always pipeline-authored (never improvised by the caller).
     """
     settings = AudioSettings.from_dict(settings_dict)
     enriched = await AUDIO_ENHANCER.generate_song(settings, idea)
@@ -407,13 +433,38 @@ async def _generate_song(settings_dict: dict, idea: str) -> tuple[str, str | Non
     prompt_id, output_info = await queue_and_wait_with_recovery(workflow)
     out_path = await download_output_to_local(output_info, _outputs_dir())
     lyrics_path = enriched.export_lyrics(out_path)
-    return out_path, lyrics_path
+
+    artist = (enriched.artist or "").strip()
+    title = (enriched.title or "").strip()
+    basename = _safe_filename(artist, title)
+    if basename:
+        out_dir = os.path.dirname(out_path)
+        ext = os.path.splitext(out_path)[1] or ".mp3"
+        new_audio = os.path.join(out_dir, f"{basename}{ext}")
+        if new_audio != out_path and not os.path.exists(new_audio):
+            try:
+                os.rename(out_path, new_audio)
+                out_path = new_audio
+                if lyrics_path and os.path.exists(lyrics_path):
+                    new_lyrics = os.path.join(out_dir, f"{basename}_lyrics.txt")
+                    if not os.path.exists(new_lyrics):
+                        os.rename(lyrics_path, new_lyrics)
+                        lyrics_path = new_lyrics
+            except OSError as e:
+                print(
+                    f"[generate-song] rename to artist-title basename failed "
+                    f"({e!r}); keeping ComfyUI default name {out_path}"
+                )
+
+    return out_path, lyrics_path, artist, title
 
 
 async def _run_music_generation(jid: str, settings_dict: dict, idea: str) -> None:
     _job_running(jid)
     try:
-        out_path, lyrics_path = await _generate_song(settings_dict, idea)
+        out_path, lyrics_path, _artist, _title = await _generate_song(
+            settings_dict, idea,
+        )
         _job_done(jid, out_path, lyrics_path)
     except Exception as e:
         _job_failed(jid, str(e))
@@ -903,8 +954,13 @@ async def _run_create_music_video(
     duet: str = "",
     time_of_day_arc: str = "",
     wardrobe_arc: str = "",
+    artist: str = "",
 ) -> None:
     _job_running(jid)
+    # Threaded through the whole pipeline so the final output can be named
+    # "<artist> - <title>.mp4" / ".mp3" instead of the generic job-id form.
+    settings_artist = ""
+    settings_title = ""
     try:
         # 1. Song (pipeline-authored lyrics) unless caller supplied one.
         if song_path:
@@ -925,6 +981,8 @@ async def _run_create_music_video(
             }
             if lang:
                 settings_dict["language"] = lang
+            if artist and artist.strip():
+                settings_dict["artist"] = artist.strip()
             # Fix 27: steer the lyric author toward solo+duet structure for an
             # explicit same-gender request. Goes into the lyric-author `idea`
             # (NOT the ACE caption, which must not name voice gender).
@@ -937,7 +995,9 @@ async def _run_create_music_video(
                     f"section labelled [Verse - {g}] (one consistent lead voice), "
                     f"shared choruses labelled [Chorus - duet]; no {opp} voice."
                 )
-            audio_path, lyrics_path = await _generate_song(settings_dict, song_idea)
+            audio_path, lyrics_path, settings_artist, settings_title = (
+                await _generate_song(settings_dict, song_idea)
+            )
 
         total_duration = get_audio_duration(audio_path)
         theme_eff = theme or brief
@@ -1240,8 +1300,54 @@ async def _run_create_music_video(
             }
             if is_multi_role and None in effective_role_groups:
                 none_idxs = effective_role_groups.pop(None)
+                # Stage C3 (2026-06-07): explicit-performer scan for story
+                # segments. Before falling back to nearest-annotated-role
+                # (which gave the Guitar Solo segment the Duet frame on
+                # f3a5adf6, producing a 3-legged gold-blazer guitarist),
+                # look at the segment's own prompt for an explicit
+                # performer reference. A prompt that literally says
+                # "male guitarist" must anchor to the male portrait, not
+                # the neighbour's portrait.
+                _male_re = re.compile(
+                    r"\bmale (?:singer|guitarist|dancer|performer|vocalist|rapper)\b"
+                    r"|\bhe wears\b|\bhis (?:guitar|microphone)\b",
+                    re.IGNORECASE,
+                )
+                _female_re = re.compile(
+                    r"\bfemale (?:singer|guitarist|dancer|performer|vocalist|rapper)\b"
+                    r"|\bshe wears\b|\bher (?:guitar|microphone)\b",
+                    re.IGNORECASE,
+                )
+                _duet_re = re.compile(
+                    r"\b(?:male and female|female and male|duet|both sing(?:ers|ing)?)\b",
+                    re.IGNORECASE,
+                )
+
+                def _prompt_performer_role(seg) -> Optional[str]:
+                    text = " ".join(filter(None, (
+                        seg.prompt or "",
+                        seg.frame_variant_prompt or "",
+                    )))
+                    if not text.strip():
+                        return None
+                    # Order matters: duet keywords win over solo to avoid
+                    # mis-classifying "male and female" as just "male".
+                    if _duet_re.search(text):
+                        return "duet"
+                    has_m = bool(_male_re.search(text))
+                    has_f = bool(_female_re.search(text))
+                    if has_m and not has_f:
+                        return "male"
+                    if has_f and not has_m:
+                        return "female"
+                    if has_m and has_f:
+                        return "duet"
+                    return None
+
                 for i in none_idxs:
-                    target = _nearest_annotated_role(segments, i)
+                    target = _prompt_performer_role(segments[i])
+                    if target is None or target not in effective_role_groups:
+                        target = _nearest_annotated_role(segments, i)
                     if target is None or target not in effective_role_groups:
                         # No annotated neighbour at all (degenerate). Fall back
                         # to whichever portrait exists; insert into first bucket.
@@ -1378,8 +1484,12 @@ async def _run_create_music_video(
             start_image_path=source or "",
             segments=segments,
             crossfade_duration=crossfade_duration,
+            artist=settings_artist,
+            title=settings_title,
         )
-        final_path = os.path.join(out_dir, f"music_video_{jid[:8]}.mp4")
+        mv_basename = _safe_filename(settings_artist, settings_title) \
+            or f"music_video_{jid[:8]}"
+        final_path = os.path.join(out_dir, f"{mv_basename}.mp4")
         assemble_video(session, final_path)
 
         # Fix 18 Component A: persist per-segment plan as JSON sidecar for
@@ -1437,6 +1547,7 @@ async def create_music_video(
     duet: str = Form(""),
     time_of_day_arc: str = Form(""),
     wardrobe_arc: str = Form(""),
+    artist: str = Form(""),
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -1482,7 +1593,7 @@ async def create_music_video(
         jid, brief, song_path, theme, source_mode, src_bytes, src_name,
         source_description, duration, video_workflow_id, crossfade_duration,
         aspect_ratio, language, consistent_character, tmp_dir, duet, tod_arc,
-        wardrobe_arc_eff,
+        wardrobe_arc_eff, artist,
     ))
     return {"job_id": jid}
 

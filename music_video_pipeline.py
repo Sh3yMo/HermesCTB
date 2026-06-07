@@ -332,6 +332,8 @@ class MVSession:
     fallback_segment_length: float = DEFAULT_FALLBACK_SEGMENT_LENGTH
     output_path: str = ""
     current_segment_index: int = 0
+    artist: str = ""
+    title: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -352,6 +354,8 @@ class MVSession:
             "fallback_segment_length": self.fallback_segment_length,
             "output_path": self.output_path,
             "current_segment_index": self.current_segment_index,
+            "artist": self.artist,
+            "title": self.title,
         }
 
     @classmethod
@@ -882,11 +886,31 @@ def _build_merged_segment(group: List["Segment"]) -> "Segment":
     )
     labels = [s.label for s in group if s.label]
     lyrics = "\n".join(s.lyrics for s in group if (s.lyrics or "").strip())
+    # Stage C2 safety-belt (2026-06-07): rebuild merged label with a single
+    # consensus role suffix so downstream extract_section_role() returns the
+    # right role even if a future code path bypasses Stage C1's hard gate.
+    # Pattern: "Verse 1 + Pre-Chorus - male" (one trailing suffix), not
+    # "Verse 1 - male + Pre-Chorus - male" (per-section). When roles differ
+    # (shouldn't happen post-C1 but defended anyway), normalise to "duet".
+    merged_label = " + ".join(labels) if labels else ""
+    if labels:
+        roles_in_group = {extract_section_role(lbl) for lbl in labels}
+        roles_in_group.discard(None)
+        if len(roles_in_group) == 1:
+            (consensus_role,) = roles_in_group
+            # Strip per-section role suffix from each name before joining.
+            stripped = [
+                _ROLE_RE.sub("", lbl).rstrip(" -") for lbl in labels
+            ]
+            merged_label = f"{' + '.join(stripped)} - {consensus_role}"
+        elif len(roles_in_group) > 1:
+            stripped = [_ROLE_RE.sub("", lbl).rstrip(" -") for lbl in labels]
+            merged_label = f"{' + '.join(stripped)} - duet"
     return Segment(
         index=first.index,
         start_time=first.start_time,
         end_time=last.end_time,
-        label=" + ".join(labels) if labels else "",
+        label=merged_label,
         lyrics=lyrics,
         prompt=first.prompt,
         frame_variant_prompt=first.frame_variant_prompt,
@@ -943,6 +967,27 @@ def merge_continuous_segments(
             if not (cand.lyrics or "").strip():
                 break
             if current_first.wardrobe_slot != cand.wardrobe_slot:
+                break
+            # Stage C1 (2026-06-07): role-blind merging was the root cause of
+            # the f3a5adf6 quality regression — Stage 7 would merge adjacent
+            # `Verse - male` + `Pre-Chorus - female` into one clip with a
+            # single anchor frame and a concatenated prompt, then either:
+            #   - keep the male frame  → second beat tries to render a female
+            #     singer from a male portrait → singer-morphs-mid-shot drift
+            #   - keep the female frame → first beat's male-only prompt makes
+            #     model render two women, the right one morphs male toward
+            #     the end (the screenshot the user posted).
+            # Block cross-role merges. Same-role-same-wardrobe-same-TOD
+            # merges (the continuity case Stage 7 was actually written for)
+            # still go through.
+            _first_role = extract_section_role(current_first.label)
+            _cand_role = extract_section_role(cand.label)
+            if _first_role != _cand_role:
+                print(
+                    f"[Stage 7] role-gate blocked merge: "
+                    f"first={current_first.label!r} ({_first_role}) vs "
+                    f"cand={cand.label!r} ({_cand_role})"
+                )
                 break
             # tod_plan is indexed by ORIGINAL segment.index — never by
             # the loop variable, so a prior merge cannot mis-align it.
@@ -2454,6 +2499,23 @@ class MusicVideoPrompter:
                     "appropriate clothing for their own role. NEVER dress a "
                     "child, DJ, surfer, dancer, or background extra in the "
                     "recurring performer's sundress/suit/etc.\n\n"
+                    "GENDER-EXPLICIT SINGER NAMING (Stage D1, 2026-06-07 — "
+                    "graded): every VOCAL segment's video_prompt and "
+                    "frame_variant_prompt MUST refer to the singer(s) using "
+                    "explicit gendered terms. Use 'male singer' for MALE "
+                    "sections, 'female singer' for FEMALE sections, and "
+                    "'male and female singer performing a duet' for mixed "
+                    "DUET sections (or 'two female singers' / 'two male "
+                    "singers' for same-gender duets). NEVER use generic "
+                    "'singer', 'two singers', '2 singers', 'the singer', or "
+                    "'the artist' without a gender qualifier. This is "
+                    "required because the LTX-2.3 reasoning LoRA renders "
+                    "explicit performer descriptions far more reliably "
+                    "than generic ones; ungendered text produces "
+                    "androgynous or mismatched-gender renders. Instrumental "
+                    "performers (guitarist, drummer, DJ) inside STORY "
+                    "segments are gendered the same way: 'male guitarist', "
+                    "'female DJ', not 'a guitarist'.\n\n"
                     + (
                         "SAME-GENDER DUET (Fix 32 — graded): this song is a "
                         + ("FEMALE-FEMALE" if duet_kind == "ff" else "MALE-MALE")

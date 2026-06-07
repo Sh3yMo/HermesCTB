@@ -151,3 +151,73 @@ def test_build_merged_segment_no_beats_returns_none_relay():
     s2 = _mk(1, 8.0, 16.0, prompt="", relay=None)
     out = _build_merged_segment([s1, s2])
     assert out.video_prompt_relay is None
+
+
+# ---------------------------------------------------------------------------
+# Stage C1 (2026-06-07): role-gate for cross-gender merges.
+# Stage C2 (2026-06-07): consensus-role label rebuild safety belt.
+# ---------------------------------------------------------------------------
+
+
+def _mkl(idx, start, end, label, lyrics="la la", slot="slot_a"):
+    s = _mk(idx, start, end, lyrics=lyrics, slot=slot)
+    s.label = label
+    return s
+
+
+def test_stage_c1_blocks_male_female_cross_role_merge():
+    """Adjacent male + female VOCAL segments with identical wardrobe_slot
+    and tod_state must NOT merge — that was the f3a5adf6 root cause where
+    'Verse 1 - male' + 'Pre-Chorus - female' collapsed into one clip with
+    a single anchor frame and produced singer-morph-mid-shot drift."""
+    s1 = _mkl(0, 0.0, 10.0, "Verse 1 - male")
+    s2 = _mkl(1, 10.0, 18.0, "Pre-Chorus - female")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 2, "cross-role merge slipped through Stage C1 gate"
+
+
+def test_stage_c1_blocks_solo_duet_cross_role_merge():
+    s1 = _mkl(0, 0.0, 10.0, "Chorus - duet")
+    s2 = _mkl(1, 10.0, 18.0, "Verse 2 - male")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 2
+
+
+def test_stage_c1_allows_same_role_male_male_merge():
+    """Same-role same-wardrobe same-TOD merge is the actual Stage 7 goal
+    (continuity between adjacent male sections). Must still merge."""
+    s1 = _mkl(0, 0.0, 10.0, "Verse 1 - male")
+    s2 = _mkl(1, 10.0, 18.0, "Verse 2 - male")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 1
+    # Stage C2 consensus rebuild: single role suffix at the end.
+    assert out[0].label == "Verse 1 + Verse 2 - male"
+
+
+def test_stage_c1_allows_same_role_female_female_merge():
+    s1 = _mkl(0, 0.0, 10.0, "Verse 1 - female")
+    s2 = _mkl(1, 10.0, 18.0, "Verse 2 - female")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 1
+    assert out[0].label == "Verse 1 + Verse 2 - female"
+
+
+def test_stage_c2_label_has_consensus_role_suffix():
+    """When merged, the resulting label exposes a SINGLE role suffix so
+    downstream extract_section_role() returns the correct role rather than
+    just the first segment's role tag."""
+    s1 = _mkl(0, 0.0, 10.0, "Verse 1 - duet")
+    s2 = _mkl(1, 10.0, 18.0, "Bridge - duet")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 1
+    assert out[0].label == "Verse 1 + Bridge - duet"
+
+
+def test_stage_c2_unannotated_labels_unchanged():
+    """Labels without any role tag must keep their plain ' + ' join — the
+    safety belt only kicks in when at least one role tag is present."""
+    s1 = _mkl(0, 0.0, 10.0, "Verse 1")
+    s2 = _mkl(1, 10.0, 18.0, "Chorus")
+    out = merge_continuous_segments([s1, s2], ["dawn", "dawn"])
+    assert len(out) == 1
+    assert out[0].label == "Verse 1 + Chorus"
