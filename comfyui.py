@@ -631,12 +631,18 @@ class SlowdownMonitor:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # Stage B3 (2026-06-07): wall-clock fallback. If no progress event has
-        # arrived after this many seconds since start(), assume ComfyUI is
-        # frozen mid-step (WS open, sampling thread stuck — the f3a5adf6
-        # 20-min hang scenario). Default 300s; configurable via
-        # COMFY_SLOWDOWN_NO_EVENTS_TIMEOUT_SEC.
+        # Stage B3 (2026-06-07, revised 2026-06-07 evening): wall-clock
+        # silence fallback. Original B3 measured time since monitor.start();
+        # that produced false positives during legitimately event-sparse
+        # ComfyUI phases (model load, ACE-Step text encoding, T2I setup —
+        # several minutes of no `progress` events is normal there). Revised
+        # design tracks the timestamp of the LAST WS message of ANY type
+        # (progress, executing, executed, status, etc). The watchdog only
+        # arms once at least one WS event has arrived, and fires when the
+        # WS has been completely silent for `cap` seconds afterwards.
+        # That distinguishes "ComfyUI alive but slow" from "WS wedged".
         self._monitor_started_ts: float | None = None
+        self._last_any_event_ts: float | None = None
 
     @property
     def slowdown_detected(self) -> bool:
@@ -652,21 +658,26 @@ class SlowdownMonitor:
 
     @property
     def no_events_timeout_expired(self) -> bool:
-        """Stage B3: True when WS got zero progress events after N seconds.
+        """Stage B3 (revised 2026-06-07 evening): WS-silence watchdog.
 
-        Catches frozen-sampling scenarios where the relative/absolute step
-        detectors never fire because they need at least one step duration
-        sample to compare against. Cap is the absolute step threshold * 2
-        with a 300s floor, so a workflow with 80s/step LTXV cap triggers
-        no-events fallback at 300s wall-clock without a single event."""
+        Fires only when:
+        1. At least one WS event of ANY type has arrived (monitor armed), AND
+        2. The WS has been silent for `cap` seconds since the last event.
+
+        That keeps the f3a5adf6 frozen-sampling defence (WS goes dead during
+        a real ComfyUI hang) without producing false positives during
+        legitimately event-sparse setup phases (model load, ACE-Step text
+        encoding, VAE warmup) — those phases still emit periodic `executing`
+        events even when no `progress` event has fired yet.
+
+        Cap = max(300s, 2 * absolute_step_cap) — generous enough to tolerate
+        a single slow sampling step without aborting."""
         with self._lock:
-            if self._monitor_started_ts is None:
-                return False
-            if self._last_step_ts is not None:
-                return False  # events did arrive; relative/absolute paths own this
+            if self._last_any_event_ts is None:
+                return False  # not yet armed: zero events received at all
             abs_cap = float(getattr(sys.modules[__name__], "COMFY_SLOWDOWN_ABSOLUTE_SEC", 0.0) or 0.0)
             cap = max(300.0, abs_cap * 2.0)
-            return (time.time() - self._monitor_started_ts) >= cap
+            return (time.time() - self._last_any_event_ts) >= cap
 
     def start(self) -> None:
         if not COMFY_SLOWDOWN_ENABLED:
@@ -707,6 +718,14 @@ class SlowdownMonitor:
                     continue
                 except Exception:
                     break
+                # Stage B3 revision: any successful sock.recv() that returns a
+                # message means the WS pipe is alive. Arm/reset the silence
+                # watchdog on EVERY frame (incl. binary preview frames and
+                # non-progress event types) so we only fire when the pipe
+                # actually goes dead — not when we happen to be in a phase
+                # that emits only `executing`/`status` events.
+                with self._lock:
+                    self._last_any_event_ts = time.time()
                 if isinstance(raw, bytes):
                     continue
                 try:

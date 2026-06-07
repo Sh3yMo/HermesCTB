@@ -315,15 +315,28 @@ async def test_supervisor_down_does_not_send_interrupt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_slowdown_no_events_timeout_property():
-    """Stage B3 (2026-06-07): SlowdownMonitor.no_events_timeout_expired
-    fires when start() ran > cap seconds ago and zero events arrived."""
+    """Stage B3 (revised 2026-06-07 evening): WS-silence watchdog.
+
+    Fires ONLY when at least one WS event has been seen AND the WS has
+    been silent for `cap` seconds afterwards. The original wall-clock-
+    from-monitor-start variant produced false positives during legitimately
+    event-sparse setup phases (ACE-Step text encoding, T2I, model load)
+    and aborted job 97ab5cce-... three times in a row."""
     import time as _time
     comfyui.COMFY_SLOWDOWN_ABSOLUTE_SEC = 10.0  # cap = max(300, 20) = 300
     m = comfyui.SlowdownMonitor("test-pid")
-    # Simulate start without launching a real thread/WS connection.
-    m._monitor_started_ts = _time.time() - 301.0
-    m._last_step_ts = None  # no events received
-    assert m.no_events_timeout_expired is True
-    # If even one event arrived, fallback must not trigger.
-    m._last_step_ts = _time.time()
+
+    # Not armed yet — zero events received → must NOT fire even if the
+    # monitor has been running for a long time (this is the ACE-Step /
+    # cold-load case the revised B3 must tolerate).
+    m._monitor_started_ts = _time.time() - 600.0
+    m._last_any_event_ts = None
     assert m.no_events_timeout_expired is False
+
+    # Armed by one WS event, but the silence since then is still under cap.
+    m._last_any_event_ts = _time.time() - 100.0
+    assert m.no_events_timeout_expired is False
+
+    # Armed and now silent past the cap → real WS-wedge, must fire.
+    m._last_any_event_ts = _time.time() - 301.0
+    assert m.no_events_timeout_expired is True
