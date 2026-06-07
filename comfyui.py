@@ -171,6 +171,19 @@ def has_relay_smart_node(workflow: dict) -> bool:
 
 
 def inject_input_image(workflow: dict, image_filename: str) -> dict:
+    """Patch the workflow's source LoadImage node with the given filename.
+
+    Stage C4 note (2026-06-07): The MCA workflow (F2K9B MCA.json) used by the
+    multi-frame variant batcher has exactly ONE LoadImage node feeding the
+    SimplePromptBatcher. All batched prompt variants share that source frame.
+    The "Guitar Solo got Duet frame" symptom on f3a5adf6 was therefore NOT
+    a missed-second-LoadImage bug — it was upstream role routing (api.py
+    `effective_role_groups`): story segments fell back to the nearest
+    annotated neighbour's portrait. Stage C3 fixes that by scanning the
+    segment prompt for explicit performer keywords (male/female/duet) and
+    routing the segment to that role's portrait before MCA dispatch.
+    No node-targeting change is needed here for current topology; we keep
+    the single-target behaviour and document the contract."""
     nodes = []
     for node_id, node in workflow.items():
         if node.get("class_type") == "LoadImage" and "inputs" in node and "image" in node["inputs"]:
@@ -465,6 +478,31 @@ def _supervisor_url(endpoint: str) -> str:
     return f"{base.rstrip('/')}{endpoint}"
 
 
+class SupervisorDownError(RuntimeError):
+    """Raised when host_supervisor /health probe fails before Tier-2 restart.
+
+    Stage B2 (2026-06-07): differentiates "supervisor process gone" from
+    "supervisor up but restart attempt failed". Callers can pattern-match
+    this to fail-fast a job rather than retrying for 40 min on a dead
+    supervisor (the f3a5adf6 hang scenario)."""
+    pass
+
+
+async def _probe_supervisor_health(timeout_seconds: float = 2.0) -> bool:
+    """Quick health probe to confirm supervisor is alive before Tier-2 POST.
+
+    Returns True iff supervisor responds 200 to GET /health within timeout.
+    Used by _restart_via_host_supervisor to fail-fast when CMD window of
+    start_supervisor.bat has crashed (no auto-restart pre-B1)."""
+    base_url = _supervisor_url("/health")
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            r = await client.get(base_url)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 async def _restart_via_host_supervisor() -> None:
     """Container path: POST to the Windows-host comfy_supervisor service.
 
@@ -474,8 +512,20 @@ async def _restart_via_host_supervisor() -> None:
     supervisor does not waste a kill cycle hunting a process that never
     existed.
 
+    Stage B2 (2026-06-07): before the main POST, probe /health for 2s.
+    If the supervisor itself is down (CMD window crashed without auto-restart
+    pre-B1), raise SupervisorDownError immediately so the wrapper can
+    fail-fast the job instead of hanging 40 min on the main POST timeout.
+
     The supervisor handles the actual spawn on the host and only returns
     once ComfyUI is responding to /system_stats (or its own deadline hits)."""
+    if not await _probe_supervisor_health(timeout_seconds=2.0):
+        raise SupervisorDownError(
+            f"host_supervisor /health probe failed at "
+            f"{_supervisor_url('/health')} — supervisor process not running. "
+            f"Start it via I:\\HermesCTB\\start_supervisor.bat (Stage B1 "
+            f"watchdog will auto-restart future crashes)."
+        )
     # 2s probe is enough — a hung-but-listening ComfyUI still returns the
     # TCP RST/200 within that window; a stopped one will not.
     endpoint = "/restart" if await _is_comfy_online(timeout_seconds=2.0) else "/start"
@@ -581,6 +631,12 @@ class SlowdownMonitor:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Stage B3 (2026-06-07): wall-clock fallback. If no progress event has
+        # arrived after this many seconds since start(), assume ComfyUI is
+        # frozen mid-step (WS open, sampling thread stuck — the f3a5adf6
+        # 20-min hang scenario). Default 300s; configurable via
+        # COMFY_SLOWDOWN_NO_EVENTS_TIMEOUT_SEC.
+        self._monitor_started_ts: float | None = None
 
     @property
     def slowdown_detected(self) -> bool:
@@ -594,10 +650,30 @@ class SlowdownMonitor:
                 return False
             return (time.time() - self._slowdown_ts) >= COMFY_SLOWDOWN_GRACE_SECONDS
 
+    @property
+    def no_events_timeout_expired(self) -> bool:
+        """Stage B3: True when WS got zero progress events after N seconds.
+
+        Catches frozen-sampling scenarios where the relative/absolute step
+        detectors never fire because they need at least one step duration
+        sample to compare against. Cap is the absolute step threshold * 2
+        with a 300s floor, so a workflow with 80s/step LTXV cap triggers
+        no-events fallback at 300s wall-clock without a single event."""
+        with self._lock:
+            if self._monitor_started_ts is None:
+                return False
+            if self._last_step_ts is not None:
+                return False  # events did arrive; relative/absolute paths own this
+            abs_cap = float(getattr(sys.modules[__name__], "COMFY_SLOWDOWN_ABSOLUTE_SEC", 0.0) or 0.0)
+            cap = max(300.0, abs_cap * 2.0)
+            return (time.time() - self._monitor_started_ts) >= cap
+
     def start(self) -> None:
         if not COMFY_SLOWDOWN_ENABLED:
             return
         self._stop.clear()
+        with self._lock:
+            self._monitor_started_ts = time.time()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -718,6 +794,21 @@ async def queue_and_wait_with_recovery(
                     raise SlowdownAbortError(
                         f"Slowdown grace expired for job {prompt_id}"
                     )
+                # Stage B3 (2026-06-07): no-events wall-clock fallback.
+                # Frozen sampling thread never emits progress → relative
+                # and absolute step-time checks both stay dormant. Fire
+                # SlowdownAbortError when monitor has been alive past the
+                # no-events cap with zero events received.
+                if monitor is not None and monitor.no_events_timeout_expired:
+                    wait_task.cancel()
+                    try:
+                        await wait_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise SlowdownAbortError(
+                        f"No progress events received for job {prompt_id} "
+                        f"after no-events cap — sampling thread likely frozen"
+                    )
                 await asyncio.sleep(2)
             info = await wait_task
             return prompt_id, info
@@ -743,6 +834,15 @@ async def queue_and_wait_with_recovery(
                 print(f"[recovery] Tier-2 (attempt {attempt}/{max_restarts}): full restart — reason: {e!r}")
                 try:
                     await _restart_comfy_process_and_wait()
+                except SupervisorDownError as sup_err:
+                    # Stage B2 (2026-06-07): supervisor process crashed before B1
+                    # watchdog could restart it (or B1 not yet active). No point
+                    # sending /interrupt to ComfyUI — it is almost certainly
+                    # offline too if supervisor was the spawner. Fail-fast so
+                    # the job surfaces this as "supervisor_down" instead of
+                    # hanging up to 40 min on the next attempt's slowdown grace.
+                    print(f"[recovery] fail-fast: {sup_err}")
+                    raise
                 except Exception as restart_err:
                     # Supervisor/restart unreachable — orphan render keeps GPU. Send
                     # /interrupt so ComfyUI at least stops the hanging prompt.

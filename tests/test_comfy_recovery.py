@@ -205,10 +205,13 @@ async def test_restart_routes_to_subprocess_when_url_empty():
 @pytest.mark.asyncio
 async def test_supervisor_unreachable_raises_runtime_error():
     """Container-side: if the supervisor can't be reached, _restart_via_host_supervisor
-    must raise — that bubbles up into the wrapper's last-attempt failure path."""
+    must raise — that bubbles up into the wrapper's last-attempt failure path.
+
+    Stage B2: health probe is now first; mock it to return True so we still
+    exercise the POST path (the case where /health is reachable but /restart
+    times out at the supervisor)."""
     comfyui.COMFY_RESTART_SERVICE_URL = "http://host.docker.internal:8787/restart"
     try:
-        # AsyncClient.post raises → we expect RuntimeError out of supervisor path
         async def _raise(*a, **kw):
             raise httpx.ConnectError("supervisor offline")
 
@@ -218,7 +221,8 @@ async def test_supervisor_unreachable_raises_runtime_error():
             async def __aexit__(self, *a): return False
             async def post(self, *a, **kw): await _raise()
 
-        with patch("comfyui.httpx.AsyncClient", new=_FakeClient):
+        with patch("comfyui._probe_supervisor_health", new=AsyncMock(return_value=True)), \
+             patch("comfyui.httpx.AsyncClient", new=_FakeClient):
             with pytest.raises(RuntimeError, match="host_supervisor unreachable"):
                 await comfyui._restart_via_host_supervisor()
     finally:
@@ -241,8 +245,85 @@ async def test_supervisor_reports_failure_raises():
             async def __aexit__(self, *a): return False
             async def post(self, *a, **kw): return _Resp()
 
-        with patch("comfyui.httpx.AsyncClient", new=_FakeClient):
-            with pytest.raises(RuntimeError, match="host_supervisor restart failed"):
+        with patch("comfyui._probe_supervisor_health", new=AsyncMock(return_value=True)), \
+             patch("comfyui.httpx.AsyncClient", new=_FakeClient):
+            with pytest.raises(RuntimeError, match="host_supervisor.*failed"):
                 await comfyui._restart_via_host_supervisor()
     finally:
         comfyui.COMFY_RESTART_SERVICE_URL = ""
+
+
+@pytest.mark.asyncio
+async def test_supervisor_down_fail_fast(monkeypatch):
+    """Stage B2 (2026-06-07): when /health probe fails, raise
+    SupervisorDownError immediately — no 150s POST timeout."""
+    comfyui.COMFY_RESTART_SERVICE_URL = "http://host.docker.internal:8787/restart"
+    try:
+        with patch("comfyui._probe_supervisor_health", new=AsyncMock(return_value=False)):
+            with pytest.raises(comfyui.SupervisorDownError, match="health probe failed"):
+                await comfyui._restart_via_host_supervisor()
+    finally:
+        comfyui.COMFY_RESTART_SERVICE_URL = ""
+
+
+@pytest.mark.asyncio
+async def test_supervisor_down_does_not_send_interrupt(monkeypatch):
+    """Stage B2 fail-fast path must NOT bother with /interrupt — ComfyUI is
+    almost certainly offline too if the supervisor crashed. Verify the
+    SupervisorDownError propagates straight up out of the recovery wrapper."""
+    comfyui.COMFY_RESTART_SERVICE_URL = "http://host.docker.internal:8787/restart"
+    comfyui.COMFY_AUTO_RECOVER_ENABLED = True
+    comfyui.COMFY_RESTART_MAX_PER_JOB = 2
+    try:
+        sup_down = comfyui.SupervisorDownError("crashed")
+        interrupt_calls = []
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def post(self, url, *a, **kw):
+                interrupt_calls.append(url)
+                class R: status_code = 200
+                return R()
+
+        # Fail twice so we reach Tier-2 then SupervisorDownError raised.
+        call_count = {"n": 0}
+        async def fake_queue(_wf):
+            call_count["n"] += 1
+            raise ComfyUnavailableError("simulated")
+
+        async def fake_wait(_pid, _to):
+            return {}
+
+        with patch("comfyui.queue_prompt_async", new=fake_queue), \
+             patch("comfyui.wait_for_completion_async", new=fake_wait), \
+             patch("comfyui._restart_comfy_process_and_wait", side_effect=sup_down), \
+             patch("comfyui.asyncio.sleep", new=_yield_sleep), \
+             patch("comfyui.httpx.AsyncClient", new=_FakeClient):
+            with pytest.raises(comfyui.SupervisorDownError):
+                await queue_and_wait_with_recovery({"node": {"class_type": "X"}})
+        # /free is fine (Tier-1 path runs before Tier-2). /interrupt is the
+        # one we must skip when SupervisorDownError fires.
+        interrupt_only = [u for u in interrupt_calls if u.endswith("/interrupt")]
+        assert interrupt_only == [], (
+            f"/interrupt must NOT be called on supervisor_down, got: {interrupt_only}"
+        )
+    finally:
+        comfyui.COMFY_RESTART_SERVICE_URL = ""
+
+
+@pytest.mark.asyncio
+async def test_slowdown_no_events_timeout_property():
+    """Stage B3 (2026-06-07): SlowdownMonitor.no_events_timeout_expired
+    fires when start() ran > cap seconds ago and zero events arrived."""
+    import time as _time
+    comfyui.COMFY_SLOWDOWN_ABSOLUTE_SEC = 10.0  # cap = max(300, 20) = 300
+    m = comfyui.SlowdownMonitor("test-pid")
+    # Simulate start without launching a real thread/WS connection.
+    m._monitor_started_ts = _time.time() - 301.0
+    m._last_step_ts = None  # no events received
+    assert m.no_events_timeout_expired is True
+    # If even one event arrived, fallback must not trigger.
+    m._last_step_ts = _time.time()
+    assert m.no_events_timeout_expired is False
