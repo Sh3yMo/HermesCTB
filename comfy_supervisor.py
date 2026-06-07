@@ -138,6 +138,14 @@ class Handler(BaseHTTPRequestHandler):
             print("[supervisor] /restart received -- killing ComfyUI...", flush=True)
             _kill_comfy()
             time.sleep(1)
+            if not os.path.exists(COMFY_EXE_PATH):
+                print(f"[supervisor] EXE not found: {COMFY_EXE_PATH}", flush=True)
+                self._send_json(503, {
+                    "ok": False,
+                    "error": "exe_not_found",
+                    "detail": f"ComfyUI.exe not found at: {COMFY_EXE_PATH}",
+                })
+                return
             print("[supervisor] Launching ComfyUI...", flush=True)
             _launch_comfy()
             online = _wait_for_online()
@@ -146,6 +154,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "restarted", "online": True})
             else:
                 print("[supervisor] ComfyUI did not come online in time.", flush=True)
+                self._send_json(504, {"status": "timeout", "online": False})
+        elif self.path == "/start":
+            # Stage 9: idempotent cold-start. If ComfyUI is already
+            # answering /system_stats, do nothing. Otherwise launch and
+            # wait. Used by Tier-2 recovery when ComfyUI was never
+            # running (vs. /restart which always kills first).
+            if _is_comfy_online():
+                print("[supervisor] /start: ComfyUI already online, no-op.", flush=True)
+                self._send_json(200, {"status": "already_online", "online": True})
+                return
+            if not os.path.exists(COMFY_EXE_PATH):
+                print(f"[supervisor] /start: EXE not found: {COMFY_EXE_PATH}", flush=True)
+                self._send_json(503, {
+                    "ok": False,
+                    "error": "exe_not_found",
+                    "detail": f"ComfyUI.exe not found at: {COMFY_EXE_PATH}",
+                })
+                return
+            print("[supervisor] /start: launching ComfyUI...", flush=True)
+            _launch_comfy()
+            online = _wait_for_online()
+            if online:
+                print("[supervisor] /start: ComfyUI online.", flush=True)
+                self._send_json(200, {"status": "started", "online": True})
+            else:
+                print("[supervisor] /start: ComfyUI did not come online in time.", flush=True)
                 self._send_json(504, {"status": "timeout", "online": False})
         else:
             self._send_json(404, {"error": "not found"})

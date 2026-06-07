@@ -449,16 +449,41 @@ def _kill_comfy_processes() -> int:
     return killed
 
 
+def _supervisor_url(endpoint: str) -> str:
+    """Derive a sibling supervisor endpoint URL from the configured /restart URL.
+
+    Configured value is e.g. http://host.docker.internal:8787/restart;
+    Stage 9 needs /start (cold-start, idempotent) as well. Returns the
+    configured base + endpoint so future endpoints can be added without
+    a second config knob.
+    """
+    base = COMFY_RESTART_SERVICE_URL or ""
+    for suffix in ("/restart", "/start"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return f"{base.rstrip('/')}{endpoint}"
+
+
 async def _restart_via_host_supervisor() -> None:
     """Container path: POST to the Windows-host comfy_supervisor service.
 
-    The supervisor handles the actual kill+spawn on the host and only returns
+    Stage 9: probe ComfyUI first. If it is reachable but the wrapper still
+    needs Tier-2 (e.g. hung after slowdown), use /restart (kill + relaunch).
+    If ComfyUI is fully offline, use /start (no kill, idempotent) so the
+    supervisor does not waste a kill cycle hunting a process that never
+    existed.
+
+    The supervisor handles the actual spawn on the host and only returns
     once ComfyUI is responding to /system_stats (or its own deadline hits)."""
-    url = COMFY_RESTART_SERVICE_URL
+    # 2s probe is enough — a hung-but-listening ComfyUI still returns the
+    # TCP RST/200 within that window; a stopped one will not.
+    endpoint = "/restart" if await _is_comfy_online(timeout_seconds=2.0) else "/start"
+    url = _supervisor_url(endpoint)
     # Generous client-side timeout: must exceed supervisor's HEALTHCHECK_TIMEOUT
     # (default 120s on supervisor) + spawn/kill overhead.
     client_timeout = max(60, COMFY_HEALTHCHECK_TIMEOUT_SECONDS + 30)
-    print(f"[recovery] POST {url} (timeout {client_timeout}s)")
+    print(f"[recovery] POST {url} (endpoint={endpoint}, timeout {client_timeout}s)")
     try:
         async with httpx.AsyncClient(timeout=client_timeout) as client:
             r = await client.post(url)
@@ -469,12 +494,20 @@ async def _restart_via_host_supervisor() -> None:
         data = r.json()
     except Exception:
         data = {"raw": r.text}
-    if r.status_code != 200 or not data.get("ok"):
+    # Stage 9 supervisor returns {"status": "<restarted|started|already_online>",
+    # "online": True} on success and non-200 with {"ok": False, "error": ...}
+    # on failure (e.g. exe_not_found, timeout).
+    success = r.status_code == 200 and (
+        data.get("online") is True or data.get("ok") is True
+    )
+    if not success:
         raise RuntimeError(
-            f"host_supervisor restart failed (HTTP {r.status_code}): {data}"
+            f"host_supervisor {endpoint} failed (HTTP {r.status_code}): {data}"
         )
-    print(f"[recovery] supervisor reported success: killed={data.get('killed')} "
-          f"wait_ms={data.get('wait_for_online_ms')} total_ms={data.get('total_ms')}")
+    print(
+        f"[recovery] supervisor reported success on {endpoint}: "
+        f"status={data.get('status')!r} online={data.get('online')}"
+    )
     # Defensive: confirm ourselves before returning to the wrapper.
     if not await _is_comfy_online(timeout_seconds=5.0):
         raise RuntimeError(

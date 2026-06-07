@@ -131,3 +131,30 @@ def test_supervisor_returns_first_candidate_when_none_exist(tmp_path, monkeypatc
     )
     # neither exists -> first candidate returned as last-resort
     assert comfy_supervisor._resolve_comfy_exe() == str(a)
+
+
+# ---------------------------------------------------------------------------
+# Stage 9: _supervisor_url derives /start from configured /restart
+# ---------------------------------------------------------------------------
+
+def test_supervisor_url_strips_restart_and_appends_start(monkeypatch):
+    monkeypatch.setattr(
+        comfyui, "COMFY_RESTART_SERVICE_URL",
+        "http://host.docker.internal:8787/restart",
+    )
+    assert comfyui._supervisor_url("/start") == "http://host.docker.internal:8787/start"
+    assert comfyui._supervisor_url("/restart") == "http://host.docker.internal:8787/restart"
+
+
+def test_supervisor_url_handles_base_without_known_suffix(monkeypatch):
+    # operator misconfigured URL without /restart suffix
+    monkeypatch.setattr(comfyui, "COMFY_RESTART_SERVICE_URL", "http://supervisor:9000")
+    assert comfyui._supervisor_url("/start") == "http://supervisor:9000/start"
+
+
+def test_supervisor_url_strips_existing_start_suffix(monkeypatch):
+    monkeypatch.setattr(
+        comfyui, "COMFY_RESTART_SERVICE_URL",
+        "http://host.docker.internal:8787/start",
+    )
+    assert comfyui._supervisor_url("/restart") == "http://host.docker.internal:8787/restart"
