@@ -9,9 +9,11 @@ Konfiguriert im Block `prompt_enhancer` in `config.json`.
 | Task | Funktion / Datei | Config-Key (unter `prompt_enhancer`) | Default-Wert |
 |------|------------------|--------------------------------------|--------------|
 | Lyrics-Generierung + Song-Enhancement | `AudioEnhancer.__init__` (`audio_enhancer.py:376`) | `audio_llm_model` | `google/gemma-4-31b-it` |
-| Video-Segment-Prompts (LTX) | `MusicVideoPrompter.generate_segment_prompts` (`music_video_pipeline.py:2203`) | `openrouter_model` | `qwen/qwen3.5-flash-02-23` |
+| Video-Segment-Prompts + Frame-Variant-Prompts (MCA Startframes) | `MusicVideoPrompter.generate_segment_prompts` (`music_video_pipeline.py:2269`) | `openrouter_model` + `fallback_models` | `qwen/qwen3.5-flash-02-23` |
 | Portrait / Still-Prompts (Flux 2) | `MusicVideoPrompter.generate_character_portrait_prompt` | `openrouter_model` + `fallback_models` | `qwen/qwen3.5-flash-02-23` |
-| Frame-Variant Prompts (MCA, Vision) | `MusicVideoPrompter._call_vision_api` | `vision_model` | `qwen/qwen-2.5-vl-7b-instruct` |
+| Lastframe-Continuity (Vision auf Vorgängersegment) | `MusicVideoPrompter.analyze_frames` (`music_video_pipeline.py:3007`) | `vision_model` + `vision_fallback_models` | `qwen/qwen-2.5-vl-7b-instruct` |
+| Source-Image-Analyse (User-Endpoint `/enhance/prompt`) | `PromptEnhancer._analyze_source_image_with_openrouter` (`prompt_enhancer.py:383`) | `vision_model` + `vision_fallback_models` | `qwen/qwen-2.5-vl-7b-instruct` |
+| Frame-Validierung | `frame_validator.py:64` | `vision_model` + `vision_fallback_models` | `qwen/qwen-2.5-vl-7b-instruct` |
 | Genre-Validierung | `AudioEnhancer._validate_genre` | `genre_validation_model` | `qwen/qwen3.5-9b` |
 | Prompt-Enhance (User-Submit Endpoint `/enhance/prompt`) | `prompt_enhancer.py:183` | `openrouter_model` + `fallback_models` | `qwen/qwen3.5-flash-02-23` |
 
@@ -62,11 +64,13 @@ triggern (z.B. Touch einer Python-Datei).
 
 ## Vision vs Text Endpoints
 
-- **Vision-Model** wird genutzt sobald ein Image als Reference übergeben wird
-  (Frame-Analyse, Flux 2 Multi-Image-Edit, MCA-Frame-Variant). Erfordert
-  multi-modal-capable Modell (Qwen-VL, Claude-3 Opus/Sonnet, GPT-4o, etc).
-- **Text-Model** wird für reine Text-Generierung benutzt (Lyrics, Plan,
-  Prompt-Refinement).
+- **Vision-Model** wird ausschließlich genutzt wenn ein Image als Input
+  übergeben wird (Lastframe-Continuity-Analyse, Source-Image-Analyse im
+  User-Enhance-Endpoint, Frame-Validierung). Erfordert multi-modal-capable
+  Modell (Qwen-VL, Claude-3 Opus/Sonnet, GPT-4o, etc).
+- **Text-Model** wird für ALLE Text-Generierung benutzt — inklusive der
+  MCA-Frame-Variant-Prompts (`frame_variant_prompt`). MCA bekommt einen
+  Text-Prompt, kein Bild → text_model (`openrouter_model`), nicht vision.
 
 Setze `vision_model` NUR auf ein vision-fähiges Model. Sonst schlagen
 Frame-Variant-Calls fehl mit 400 (unsupported_modality).
