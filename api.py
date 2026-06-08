@@ -1104,7 +1104,18 @@ async def _run_create_music_video(
                                 # authority — they need a strong audio signal
                                 # to be overridden. Generic LLM labels (no
                                 # gender suffix) get the lower gate.
-                                _HIGH_CONF = 0.85
+                                # Stage F (2026-06-07 evening): lowered
+                                # _HIGH_CONF from 0.85 → 0.70 after job
+                                # 63486a7a where a male-sung Verse 1 was
+                                # mislabelled "- female" by the LLM and
+                                # InaSpeechSegmenter's 0.78 confidence for
+                                # the same section was insufficient to
+                                # override. 0.70 matches the segmenter's
+                                # `dominant_threshold` floor, so any audio
+                                # classification the segmenter is willing
+                                # to call "solo" can now override an LLM
+                                # mistake.
+                                _HIGH_CONF = 0.70
                                 _LOW_CONF = 0.70
                                 for _sec in aligned:
                                     _label = _sec.get("label", "")
@@ -1259,6 +1270,30 @@ async def _run_create_music_video(
                         await free_comfy()
                 # Fix 32: see all_roles_present rationale above.
                 if "duet" in all_roles_present:
+                    # Stage G (2026-06-07): if duet sections exist but one
+                    # solo role has no anchor segment (e.g. song with only
+                    # female solos + mixed-gender duets), the solo loop
+                    # above skipped generating that role's portrait, so
+                    # _resolve_duet_portrait() below would fail the
+                    # `male_p and female_p` guard and silently leave
+                    # portraits["duet"] as None. Result on 63486a7a: duet
+                    # segments fell back to the female portrait, and the
+                    # video model invented a random male partner per shot
+                    # instead of using a consistent duet composite. Force-
+                    # generate the missing solo portrait(s) now so the
+                    # composite always runs for mixed-gender duets.
+                    for role in ("male", "female"):
+                        if portraits.get(role) is None:
+                            print(
+                                f"[Stage G] no {role} solo anchor in song, "
+                                f"force-generating {role} portrait for duet "
+                                f"composite ({len(all_roles_present)} roles "
+                                f"present, duet detected)"
+                            )
+                            portraits[role] = await _resolve_singer_portrait(
+                                role, theme_eff, lyrics_text, brief, aspect_ratio,
+                            )
+                            await free_comfy()
                     male_p = portraits.get("male")
                     female_p = portraits.get("female")
                     if male_p and female_p:
