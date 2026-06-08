@@ -1,0 +1,464 @@
+{
+  "schema_version": 1,
+  "description": "Empirically researched music video producer style profiles. Used by MVDirector (mv_director.py) to inject per-segment shot directives into plan_segments() system prompt. Profiles are pure data — edit freely without code changes. Each profile lists verifiable signature videos for traceability.",
+  "shot_codes": {
+    "ECU": "extreme close-up",
+    "CU": "close-up",
+    "MCU": "medium close-up",
+    "MS": "medium shot",
+    "MLS": "medium-long shot",
+    "LS": "long shot",
+    "WS": "wide shot",
+    "EWS": "extreme wide shot",
+    "OTS": "over-the-shoulder",
+    "POV": "point of view"
+  },
+  "producers": [
+    {
+      "id": "dave_meyers",
+      "name": "Dave Meyers",
+      "enabled": true,
+      "genres": ["pop"],
+      "sub_genres": ["dance_pop", "hip_hop_pop_crossover", "pop_rap", "alt_pop"],
+      "era": "1998-2024",
+      "ethos_oneliner": "High-concept surreal set-pieces stitched together with whiplash edits — each verse is a new vignette built around one iconic, art-reference-loaded image.",
+      "videos_analyzed": [
+        {"title": "HUMBLE.", "artist": "Kendrick Lamar", "year": 2017, "notes": "Chained tableaux: pope vestments, Last Supper recreation, golf-course bowing servants, fisheye CU, monk gathering. Hard high-contrast key, deep blacks, gold accents. Static centered framing alternating with extreme fisheye CU."},
+        {"title": "Sicko Mode", "artist": "Travis Scott ft. Drake", "year": 2018, "notes": "Kaleidoscopic Houston-at-night fantasia: melting buildings, fluorescent purple/cyan, giant baby/toy iconography, cherry-red lowriders, double-exposure morphs. Every beat-switch triggers world-change."},
+        {"title": "bad guy", "artist": "Billie Eilish", "year": 2019, "notes": "High-key oversaturated yellow/hot-pink/cream sets, Toiletpaper-style absurd tableaux. Centered symmetrical compositions, locked-off camera, hard direct flash. Palette shift on bass-drop."}
+      ],
+      "signature_shots": ["fisheye_extreme_CU", "centered_symmetrical_tableau", "low_angle_hero", "overhead_god_shot", "slow_orbit_around_static_subject", "match_cut_world_change"],
+      "shot_distribution": {"ECU": 0.08, "CU": 0.22, "MCU": 0.15, "MS": 0.15, "MLS": 0.12, "LS": 0.16, "WS": 0.12},
+      "color_palette": ["saturated_primary_yellow", "hot_pink", "neon_cyan", "deep_black", "gold_accent", "high_key_cream"],
+      "lighting_recipes": ["hard_direct_flash", "single_source_chiaroscuro", "neon_practicals_night_exterior", "high_key_studio_seamless"],
+      "edit_tempo": "fast_on_beat",
+      "film_grain": false,
+      "motion_preference": ["slow_orbit", "static_locked", "dolly_push_to_CU", "match_cut_transitions"],
+      "story_archetypes": ["surreal_vignette_chain", "performance_fantasy", "art_reference_tableau", "transformation_per_verse"],
+      "opening_pattern": "Cold open on a single arresting symmetrical tableau, hold 3-5 seconds, then beat drops into rapid vignette cuts.",
+      "closeup_frequency": 0.30,
+      "mood_mapping": {
+        "sad": ["centered_CU_blank_background", "desaturated_cream_palette"],
+        "celebratory": ["wide_crowd_god_shot", "saturated_primary_high_key", "match_cut_party_explosion"],
+        "intimate": ["fisheye_extreme_CU", "single_source_practical"],
+        "aggressive": ["low_angle_hero_chiaroscuro", "hard_flash_direct"],
+        "anthemic": ["overhead_god_shot", "saturated_primary_high_key"],
+        "melancholic": ["centered_CU_blank_background", "desaturated_cream_palette"]
+      },
+      "forbidden_for_genres": {
+        "rock": ["high_key_yellow_pink_pop_palette", "centered_kawaii_tableau", "match_cut_world_change_per_verse"],
+        "country": ["fisheye_extreme_CU", "neon_cyan_palette", "surreal_CGI_sky_replacement"],
+        "folk": ["match_cut_world_change_per_verse", "hot_pink_seamless"]
+      }
+    },
+    {
+      "id": "melina_matsoukas",
+      "name": "Melina Matsoukas",
+      "enabled": true,
+      "genres": ["pop"],
+      "sub_genres": ["dance_pop", "rnb_pop", "electropop", "rnb"],
+      "era": "2006-2024",
+      "ethos_oneliner": "Documentary-grounded cultural portraiture: real locations, low-light realism, and choreography staged as community ritual rather than studio spectacle.",
+      "videos_analyzed": [
+        {"title": "We Found Love", "artist": "Rihanna", "year": 2011, "notes": "Doomed-couple narrative in Belfast estates. Handheld 16mm-look grain, heavy practical neons, strobe-cut montage, bleach-bypass blue/teal shadows under warm skin. Skateboard tracking, macro CU of pills, lips, hands."},
+        {"title": "Formation", "artist": "Beyonce", "year": 2016, "notes": "New Orleans post-Katrina iconography — sinking police car, antebellum porch, second-line dancers, hooded boy. Slow dolly tracking, painterly natural interiors, hard noon sun exteriors. Wide MLS group choreo in parking lot."},
+        {"title": "Pretty Hurts", "artist": "Beyonce", "year": 2013, "notes": "Beauty pageant tragedy in single fluorescent-lit backstage. Cold white practicals, motel-green walls, handheld observational coverage. Long lens MCU of Beyonce silently breaking, intercut locker-room destruction WS."}
+      ],
+      "signature_shots": ["slow_dolly_through_location", "handheld_observational_MCU", "wide_group_choreo_in_real_location", "tracking_through_crowd", "macro_insert_hands_lips", "single_subject_isolated_WS"],
+      "shot_distribution": {"ECU": 0.06, "CU": 0.18, "MCU": 0.20, "MS": 0.18, "MLS": 0.14, "LS": 0.14, "WS": 0.10},
+      "color_palette": ["bleach_bypass_teal", "fluorescent_green_white", "warm_skin_tone_against_cool_shadow", "natural_desaturated", "muted_pastel", "deep_unlit_shadow"],
+      "lighting_recipes": ["available_light_practical", "fluorescent_overhead_unflattering", "hard_noon_sun_exterior", "neon_practical_through_window", "single_motivated_window"],
+      "edit_tempo": "medium_rhythmic",
+      "film_grain": true,
+      "motion_preference": ["slow_dolly_push", "handheld_follow", "steadicam_through_space", "static_locked_for_choreo_wide"],
+      "story_archetypes": ["doomed_couple", "community_ritual", "portrait_of_a_place", "woman_unraveling", "cultural_statement"],
+      "opening_pattern": "Slow location-establishing shot or VO/diegetic-audio cold open — wide on a real place before the song proper begins.",
+      "closeup_frequency": 0.24,
+      "mood_mapping": {
+        "sad": ["handheld_MCU_long_lens", "fluorescent_overhead_desat"],
+        "celebratory": ["wide_group_choreo_real_location", "hard_noon_natural"],
+        "intimate": ["macro_insert_hands", "single_window_motivated_soft"],
+        "aggressive": ["handheld_close_kinetic", "neon_practical_strobe_cut"],
+        "anthemic": ["wide_group_choreo_real_location", "hard_noon_natural"],
+        "melancholic": ["handheld_MCU_long_lens", "fluorescent_overhead_desat", "single_subject_isolated_WS"]
+      },
+      "forbidden_for_genres": {
+        "country": ["fluorescent_green_motel_palette", "bleach_bypass_urban_neon"],
+        "rock": ["antebellum_cultural_iconography", "studio_pageant_realism", "choreographed_dance_routine"],
+        "edm": ["handheld_documentary_observation", "muted_natural_palette"]
+      }
+    },
+    {
+      "id": "floria_sigismondi",
+      "name": "Floria Sigismondi",
+      "enabled": true,
+      "genres": ["pop"],
+      "sub_genres": ["dark_pop", "art_pop", "industrial_pop", "alt_pop", "power_ballad"],
+      "era": "1996-2024",
+      "ethos_oneliner": "Surrealist gothic theatre: painterly tableaux, prosthetic body distortion, and a jittery hand-cranked camera that turns pop performance into hallucinatory ritual.",
+      "videos_analyzed": [
+        {"title": "Unholy", "artist": "Sam Smith ft. Kim Petras", "year": 2022, "notes": "Burlesque-cabaret hellscape: red-velvet curtained club, latex/leather costuming, smoke and gilded ornament. Warm amber/crimson key with hard rim, deep black negative space. Undercranked twitchy camera, fashion-editorial poses. MCU+MS dominant."},
+        {"title": "Mirrors", "artist": "Justin Timberlake", "year": 2013, "notes": "Time-lapse love story across decades in art-deco hotel and mirror-walled rooms. Cool blue/silver palette, slow tracking through symmetrical corridors, dual-exposure reflections. Slow dolly, soft top key, silk diffusion."},
+        {"title": "The Beautiful People", "artist": "Marilyn Manson", "year": 1996, "notes": "Career-defining freak-show vocabulary: stilts, prosthetic mouths, dental headgear, sepia/bleach skip-frame jittery camera, Diane Arbus-style grotesque portraiture. Hard side-key with industrial green-yellow shadow."}
+      ],
+      "signature_shots": ["centered_symmetrical_corridor_tracking", "painterly_tableau_held_still", "undercranked_jitter_performance_MS", "prosthetic_distorted_CU", "mirror_reflection_double_exposure", "low_angle_theatrical_proscenium"],
+      "shot_distribution": {"ECU": 0.10, "CU": 0.18, "MCU": 0.18, "MS": 0.22, "MLS": 0.14, "LS": 0.10, "WS": 0.08},
+      "color_palette": ["crimson_red_velvet", "sepia_bleach_bypass", "cool_silver_blue", "amber_candlelight", "deep_black_negative", "industrial_green_yellow"],
+      "lighting_recipes": ["theatrical_hard_side_key", "single_warm_practical_in_dark", "silk_diffused_top_light", "hard_rim_with_smoke", "chiaroscuro_caravaggio"],
+      "edit_tempo": "medium_rhythmic",
+      "film_grain": true,
+      "motion_preference": ["undercrank_handheld_jitter", "slow_dolly_through_symmetrical_space", "static_tableau_hold", "orbit_around_costumed_figure"],
+      "story_archetypes": ["surreal_ritual", "transformation_body_horror", "fashion_editorial_performance", "gothic_romance", "dream_logic_chain"],
+      "opening_pattern": "Slow reveal on a single painterly tableau or costumed figure — curtain rising, door opening, or slow push into a symmetrical space.",
+      "closeup_frequency": 0.28,
+      "mood_mapping": {
+        "sad": ["silk_top_light_MCU", "cool_silver_palette", "candlelit_single_source_CU"],
+        "celebratory": ["theatrical_proscenium_WS", "warm_amber_practicals"],
+        "intimate": ["candlelit_single_source_CU", "soft_silk_top"],
+        "aggressive": ["undercrank_jitter_MS", "hard_side_key_industrial_green"],
+        "anthemic": ["theatrical_proscenium_WS", "warm_amber_practicals"],
+        "melancholic": ["silk_top_light_MCU", "cool_silver_palette", "single_warm_practical_in_dark"]
+      },
+      "forbidden_for_genres": {
+        "country": ["prosthetic_body_horror", "crimson_velvet_burlesque", "industrial_green_yellow"],
+        "edm": ["undercrank_jitter_performance", "chiaroscuro_caravaggio"],
+        "rock": ["silk_diffused_top_light_dance_pop_glamour", "dance_pop_choreography"]
+      }
+    },
+    {
+      "id": "anton_corbijn",
+      "name": "Anton Corbijn",
+      "enabled": true,
+      "genres": ["rock"],
+      "sub_genres": ["post_punk", "classic_rock", "alt_rock", "new_wave", "grunge", "indie_rock"],
+      "era": "1983-2024",
+      "ethos_oneliner": "Stark monochrome portraiture of the band as mythic, weather-beaten figures in austere landscapes.",
+      "videos_analyzed": [
+        {"title": "Enjoy the Silence", "artist": "Depeche Mode", "year": 1990, "notes": "16mm grainy footage, Dave Gahan as a king in red cloak/crown crossing alpine, desert and coastal landscapes carrying a deck chair. Cool desaturated palette, available daylight, very wide LS/EWS broken by tight portrait CUs."},
+        {"title": "One (v1)", "artist": "U2", "year": 1991, "notes": "Sepia/monochrome footage of Bono in smoky Berlin bar, intercut slow-mo buffalo running off cliff. Warm amber tungsten, heavy grain, static locked-off frames + slow dollies, MCU/CU dominant."},
+        {"title": "Heart-Shaped Box", "artist": "Nirvana", "year": 1993, "notes": "Surreal Wizard-of-Oz colour scheme — hyper-saturated reds/yellows vs bleached high-key whites. Aged crucified Santa, fetuses on tree. Static wide tableau + handheld band performance. Heavy grain, painterly framing, mythic-religious iconography."}
+      ],
+      "signature_shots": ["monochrome_portrait_CU", "wide_isolated_figure_landscape", "static_locked_tableau", "band_walking_through_environment", "high_contrast_silhouette"],
+      "shot_distribution": {"ECU": 0.03, "CU": 0.22, "MCU": 0.15, "MS": 0.15, "MLS": 0.10, "LS": 0.15, "WS": 0.20},
+      "color_palette": ["monochrome_bw", "sepia_warm", "desaturated_earth", "high_contrast_silver", "occasional_hyper_saturated_red"],
+      "lighting_recipes": ["available_light_natural", "stark_single_source", "high_contrast_chiaroscuro", "overcast_diffuse_daylight"],
+      "edit_tempo": "slow_lingering",
+      "film_grain": true,
+      "motion_preference": ["static_locked", "slow_dolly", "occasional_handheld"],
+      "story_archetypes": ["abstract_visual_poem", "band_as_mythic_figures", "wanderer_through_landscape"],
+      "opening_pattern": "Cold open on a wide static landscape or a tight monochrome portrait held in silence before the first downbeat.",
+      "closeup_frequency": 0.40,
+      "mood_mapping": {
+        "aggressive": ["high_contrast_bw_CU", "static_locked_frame"],
+        "melancholic": ["wide_isolated_figure_landscape", "monochrome_bw", "overcast_diffuse_daylight"],
+        "anthemic": ["LS_band_walking_horizon", "sepia_warm"],
+        "intimate": ["CU_singer_portrait", "available_light_window"],
+        "sad": ["wide_isolated_figure_landscape", "monochrome_bw", "overcast_diffuse_daylight"],
+        "celebratory": ["LS_band_walking_horizon", "sepia_warm", "high_contrast_silver"]
+      },
+      "forbidden_for_genres": {
+        "pop": ["choreographed_dance_routine", "hyper_saturated_studio_color", "fast_cut_on_beat"],
+        "hip_hop": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "money_throw", "luxury_car_pan", "champagne_pour"],
+        "edm": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "strobe_rave_lighting"]
+      }
+    },
+    {
+      "id": "samuel_bayer",
+      "name": "Samuel Bayer",
+      "enabled": true,
+      "genres": ["rock"],
+      "sub_genres": ["grunge", "alt_rock", "pop_punk", "punk", "post_grunge", "hard_rock"],
+      "era": "1991-2020",
+      "ethos_oneliner": "Sweat-stained, smoke-filled performance energy on grainy bleach-bypass film, the band as sneering anti-heroes.",
+      "videos_analyzed": [
+        {"title": "Smells Like Teen Spirit", "artist": "Nirvana", "year": 1991, "notes": "High-school pep-rally gymnasium with anarchist cheerleaders, bleach-bypass desaturated greens/ambers, smoky volumetric haze pierced by harsh top light. Handheld shaky on floor, fast on-beat cutting between band MS and crowd-mosh WS. The template for 90s grunge video grammar."},
+        {"title": "Boulevard of Broken Dreams", "artist": "Green Day", "year": 2004, "notes": "Desert highway/Mojave wasteland narrative, sun-bleached high-contrast grade, band walking the empty road intercut broken-down car performance. Wide LS landscapes, low-angle hero MS, heavy lens flares, motivated practical headlights at night."},
+        {"title": "Wake Me Up When September Ends", "artist": "Green Day", "year": 2005, "notes": "Narrative-driven mini-film: young couple, boyfriend enlists. Warm golden-hour intimate exteriors vs cold blue military interiors, anamorphic lens, slow dollies in story scenes, harder handheld in performance, tight CU on tearful faces."}
+      ],
+      "signature_shots": ["handheld_performance_floor_level", "low_angle_hero_singer", "smoke_haze_backlight", "crowd_mosh_WS", "desert_highway_landscape", "lens_flare_sun"],
+      "shot_distribution": {"ECU": 0.05, "CU": 0.20, "MCU": 0.18, "MS": 0.22, "MLS": 0.10, "LS": 0.15, "WS": 0.10},
+      "color_palette": ["desaturated_green_amber", "bleach_bypass", "sun_bleached_warm", "smoky_tungsten", "high_contrast_blacks"],
+      "lighting_recipes": ["harsh_top_light_through_haze", "stage_concert_wash", "motivated_practical_headlights", "golden_hour_natural", "single_hard_key_with_smoke"],
+      "edit_tempo": "fast_on_beat",
+      "film_grain": true,
+      "motion_preference": ["handheld_shaky", "low_angle_track", "shoulder_push_in"],
+      "story_archetypes": ["band_performance_raw", "narrative_protagonist_arc", "anti_establishment_revolt"],
+      "opening_pattern": "Cold open on a single iconic image (janitor mopping, cracked windshield, empty highway), then hard cut on first power chord into band.",
+      "closeup_frequency": 0.43,
+      "mood_mapping": {
+        "aggressive": ["low_angle_handheld", "smoke_haze_backlight", "fast_on_beat_cut", "crowd_mosh_WS"],
+        "melancholic": ["desert_highway_landscape", "bleach_bypass", "slow_dolly_singer"],
+        "anthemic": ["WS_crowd_concert", "stage_wash", "hero_low_angle_singer"],
+        "intimate": ["CU_singer_eyes_closed", "golden_hour_natural"],
+        "sad": ["desert_highway_landscape", "bleach_bypass", "slow_dolly_singer", "CU_singer_eyes_closed"],
+        "celebratory": ["WS_crowd_concert", "stage_wash", "hero_low_angle_singer"]
+      },
+      "forbidden_for_genres": {
+        "pop": ["choreographed_dance_routine", "clean_glossy_color_grade"],
+        "hip_hop": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "money_throw", "champagne_pour", "luxury_car_pan", "bottle_service"],
+        "edm": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "festival_drop_pyro_only", "laser_show_no_band"]
+      }
+    },
+    {
+      "id": "mark_romanek",
+      "name": "Mark Romanek",
+      "enabled": true,
+      "genres": ["rock"],
+      "sub_genres": ["industrial_rock", "alt_rock", "country_rock", "art_rock", "ballad"],
+      "era": "1987-2014",
+      "ethos_oneliner": "Meticulously composed, gallery-grade tableaux that turn a song into a single unflinching confessional image.",
+      "videos_analyzed": [
+        {"title": "Closer", "artist": "Nine Inch Nails", "year": 1994, "notes": "Victorian-scientific-laboratory aesthetic — taxidermied animals, crucified monkey, anatomical diagrams. Sepia/bleach-bypass distressed film treatment mimicking decayed early cinema. Static locked symmetrical tableau, Reznor in restraints. Permanent MoMA collection."},
+        {"title": "The Perfect Drug", "artist": "Nine Inch Nails", "year": 1997, "notes": "Gothic Edward-Gorey manor estate, deep emeralds, rich crimson, candlelit interiors. Reznor in Victorian mourning, absinthe. Symmetrical wide-master tableau, slow dollies, painterly chiaroscuro."},
+        {"title": "Hurt", "artist": "Johnny Cash", "year": 2003, "notes": "Single location (abandoned House of Cash museum) + Cash's home. Warm desaturated tungsten, dust motes in shafts of window light. Almost entirely static MCU/CU of hands, face, decaying memorabilia, intercut archival footage. Edit on emotion, not beat."}
+      ],
+      "signature_shots": ["static_symmetrical_tableau", "locked_off_CU_face", "object_still_life_insert", "slow_push_in_singer", "archival_footage_intercut", "single_source_window_light"],
+      "shot_distribution": {"ECU": 0.10, "CU": 0.28, "MCU": 0.20, "MS": 0.15, "MLS": 0.08, "LS": 0.10, "WS": 0.09},
+      "color_palette": ["sepia_distressed", "desaturated_tungsten_warm", "deep_emerald_crimson", "monochrome_bleach_bypass", "candlelit_amber"],
+      "lighting_recipes": ["single_window_source", "candlelit_practical", "controlled_chiaroscuro", "high_key_clinical_white", "tungsten_warm_motivated"],
+      "edit_tempo": "slow_lingering",
+      "film_grain": true,
+      "motion_preference": ["static_locked", "slow_dolly", "slow_push_in"],
+      "story_archetypes": ["abstract_visual_poem", "confessional_portrait", "symbolic_tableau", "memento_mori"],
+      "opening_pattern": "Open on a single still-life detail (object, hand, wide symmetrical room) held in silence before the first note.",
+      "closeup_frequency": 0.58,
+      "mood_mapping": {
+        "aggressive": ["static_symmetrical_tableau", "distressed_film_treatment", "ECU_restraint_detail"],
+        "melancholic": ["locked_off_CU_face", "single_window_source", "archival_intercut"],
+        "anthemic": ["slow_push_in_singer", "candlelit_amber"],
+        "intimate": ["ECU_hands", "CU_eyes_open_to_camera", "single_window_source"],
+        "sad": ["locked_off_CU_face", "single_window_source", "archival_intercut", "ECU_hands"],
+        "celebratory": ["slow_push_in_singer", "candlelit_amber", "tungsten_warm_motivated"]
+      },
+      "forbidden_for_genres": {
+        "pop": ["choreographed_dance_routine", "fast_on_beat_cut", "glossy_color_grade"],
+        "hip_hop": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "money_throw", "champagne_pour", "luxury_car_pan"],
+        "edm": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "strobe_rave_lighting", "laser_show_no_band"]
+      }
+    },
+    {
+      "id": "hype_williams",
+      "name": "Harold 'Hype' Williams",
+      "enabled": true,
+      "genres": ["hip_hop"],
+      "sub_genres": ["gangster_rap", "boom_bap", "rnb", "pop_rap", "luxury_pop_rap"],
+      "era": "1994-2024",
+      "ethos_oneliner": "Maximalist luxury opulence shot through fisheye glass — bodies, bottles, and chrome smeared in saturated color until the frame itself feels expensive.",
+      "videos_analyzed": [
+        {"title": "Mo Money Mo Problems", "artist": "The Notorious B.I.G. ft. Puff Daddy & Mase", "year": 1997, "notes": "Tuxedo-and-shiny-suit performance on solid color cyc (red, gold, silver), wide fisheye on dance line, mirrored floor, crisp gel-lit primaries, on-beat cuts to Bad Boy ensemble choreo, intercut golf-course skit."},
+        {"title": "The Rain (Supa Dupa Fly)", "artist": "Missy Elliott", "year": 1997, "notes": "Inflated black trash-bag suit on infinity-white cyc, extreme fisheye CU of Missy's distorted face, chrome-and-pearl props, jump cuts on snare, alien-glamour wardrobe, hard-key + colored gel rim."},
+        {"title": "Big Pimpin'", "artist": "Jay-Z ft. UGK", "year": 1999, "notes": "Yacht in Trinidad Carnival, helicopter overhead WS, bikini crowd circle, drenched golden-hour sun + saturated blue water, slow-mo champagne pour, fisheye on deck dance."}
+      ],
+      "signature_shots": ["fisheye_wide", "low_angle_hero", "overhead_group_circle", "mirrored_floor_reflection", "slow_mo_champagne_pour", "crew_horizontal_line"],
+      "shot_distribution": {"ECU": 0.05, "CU": 0.18, "MCU": 0.15, "MS": 0.22, "MLS": 0.15, "LS": 0.15, "WS": 0.10},
+      "color_palette": ["saturated_gold", "chrome_silver", "deep_red", "high_gloss_black", "cyan_pop", "shiny_suit_white"],
+      "lighting_recipes": ["hard_key_on_seamless_cyc", "colored_gel_rim", "mirrored_floor_kick", "golden_hour_yacht_sun", "club_strobe_practical"],
+      "edit_tempo": "fast_on_beat",
+      "film_grain": false,
+      "motion_preference": ["fisheye_push_in", "orbit_around_artist", "overhead_drone_crane", "static_locked_performance"],
+      "story_archetypes": ["luxury_fantasy", "status_display", "crew_solidarity", "performance_on_cyc"],
+      "opening_pattern": "Hero shot on saturated infinity cyc OR aerial pull-back from an overtly expensive location (yacht, helicopter, mansion), beat-synced cut on the one.",
+      "closeup_frequency": 0.38,
+      "mood_mapping": {
+        "aggressive": ["fisheye_intimidation_CU", "low_angle_hero", "hard_red_gel"],
+        "celebratory": ["overhead_crew_circle", "champagne_slow_mo", "warm_gold_key"],
+        "intimate": ["MCU_artist_on_cyc", "soft_white_seamless"],
+        "melancholic": ["desaturated_chrome_WS", "single_practical_neon"],
+        "anthemic": ["overhead_crew_circle", "warm_gold_key", "low_angle_hero"],
+        "sad": ["desaturated_chrome_WS", "single_practical_neon", "MCU_artist_on_cyc"]
+      },
+      "forbidden_for_genres": {
+        "rock": ["yacht_luxury_fantasy", "fisheye_dance_line", "shiny_suit_choreography"],
+        "country": ["chrome_floor_cyc", "shiny_suit_choreography"],
+        "folk": ["champagne_helicopter_overhead", "saturated_gel_cyc"]
+      }
+    },
+    {
+      "id": "hiro_murai",
+      "name": "Hiro Murai",
+      "enabled": true,
+      "genres": ["hip_hop"],
+      "sub_genres": ["conscious", "alternative_hip_hop", "experimental", "rnb", "lyrical"],
+      "era": "2011-2024",
+      "ethos_oneliner": "Cinematic surreal allegory — long takes, naturalistic light, and one unsettling visual idea per video that makes the song mean more than its lyrics.",
+      "videos_analyzed": [
+        {"title": "This Is America", "artist": "Childish Gambino", "year": 2018, "notes": "Single warehouse, oner-style long takes following Glover through choreographed crowd. Naturalistic top light, desaturated warm palette, choreography foreground vs violence/riot in deep background, abrupt tonal cuts on gunshots."},
+        {"title": "Sweatpants", "artist": "Childish Gambino ft. Problem", "year": 2014, "notes": "Diner + suburban-uncanny where every extra slowly becomes a duplicate of Gambino. MS/MCU dolly through booth, flat fluorescent practicals, muted teal/cream, slow-burn surreal escalation, locked-off symmetric framing."},
+        {"title": "Grief", "artist": "Earl Sweatshirt", "year": 2015, "notes": "Shot on thermal/infrared camera, ghostly white-on-black bodies, near-zero recognizable faces, claustrophobic CU, cuts run against the rhythm, body-horror imagery, oppressive sensor grain."}
+      ],
+      "signature_shots": ["long_take_oner", "symmetric_locked_MS", "thermal_or_unusual_sensor", "CU_artist_dead_center", "deep_focus_background_action"],
+      "shot_distribution": {"ECU": 0.08, "CU": 0.22, "MCU": 0.18, "MS": 0.20, "MLS": 0.12, "LS": 0.12, "WS": 0.08},
+      "color_palette": ["desaturated_warm_beige", "muted_teal", "fluorescent_green_practical", "thermal_white_on_black", "dust_brown"],
+      "lighting_recipes": ["naturalistic_top_light", "single_practical_fluorescent", "available_light_warehouse", "thermal_imaging_no_lighting"],
+      "edit_tempo": "slow_lingering",
+      "film_grain": true,
+      "motion_preference": ["long_take_steadicam", "static_locked_symmetric", "slow_dolly_push", "handheld_follow"],
+      "story_archetypes": ["surreal_narrative", "social_allegory", "uncanny_doppelganger", "alienation_in_crowd"],
+      "opening_pattern": "Quiet ambient location with one off-kilter detail; artist enters frame walking, often without a hard cut for 20+ seconds.",
+      "closeup_frequency": 0.30,
+      "mood_mapping": {
+        "aggressive": ["locked_CU_dead_center", "harsh_top_light", "abrupt_silence_cut"],
+        "celebratory": ["dance_in_oner", "warm_naturalistic_key"],
+        "intimate": ["thermal_or_low_light_CU", "ambient_only"],
+        "melancholic": ["WS_artist_alone_in_landscape", "muted_palette", "long_static_hold"],
+        "anthemic": ["dance_in_oner", "warm_naturalistic_key", "deep_focus_background_action"],
+        "sad": ["WS_artist_alone_in_landscape", "muted_palette", "long_static_hold", "CU_artist_dead_center"]
+      },
+      "forbidden_for_genres": {
+        "rock": ["thermal_camera_horror"],
+        "country": ["uncanny_doppelganger_crowd"],
+        "edm": ["slow_lingering_oner"]
+      }
+    },
+    {
+      "id": "cole_bennett",
+      "name": "Cole Bennett",
+      "enabled": true,
+      "genres": ["hip_hop"],
+      "sub_genres": ["trap", "soundcloud_rap", "mumble_rap", "drill", "pop_rap"],
+      "era": "2016-2024",
+      "ethos_oneliner": "Cartoon-overlay hyperreality — saturated cell-shaded color, hand-drawn 2D animation pasted onto live action, edited like a meme to the snare.",
+      "videos_analyzed": [
+        {"title": "Lucid Dreams", "artist": "Juice WRLD", "year": 2018, "notes": "Pastel pink-and-blue exterior, hand-drawn animated stars/flames overlaid on artist, freeze-frame + bounce, MCU centered, doubled/ghosted artist body, on-snare cuts, soft Chicago daylight + ring-light, lo-fi VHS bumper."},
+        {"title": "Godzilla", "artist": "Eminem ft. Juice WRLD", "year": 2020, "notes": "Cartoon kaiju animation destroys Detroit skyline behind Eminem. Handheld MCU of artist rapping to lens, Mike Tyson + Dr. Dre cameo cuts, rapid double-time edits, super-saturated, lens-warp speed FX."},
+        {"title": "D Rose", "artist": "Lil Pump", "year": 2017, "notes": "Bedroom/garage low-budget look, animated dollar signs and stars drawn over frame, fisheye-ish wide on Pump's face, blown-out highlights, MCU handheld, jump cuts on every kick, Chicago Bulls iconography, Lyrical Lemonade title card."}
+      ],
+      "signature_shots": ["MCU_centered_handheld", "fisheye_face_distort", "freeze_frame_bounce", "2D_animation_overlay", "doubled_ghost_artist"],
+      "shot_distribution": {"ECU": 0.05, "CU": 0.20, "MCU": 0.30, "MS": 0.20, "MLS": 0.10, "LS": 0.10, "WS": 0.05},
+      "color_palette": ["pastel_pink", "candy_blue", "neon_yellow", "cartoon_red", "blown_white_highlight"],
+      "lighting_recipes": ["soft_overcast_daylight", "ring_light_face", "available_bedroom_practical", "magic_hour_color_grade"],
+      "edit_tempo": "fast_on_beat",
+      "film_grain": false,
+      "motion_preference": ["handheld_follow", "speed_ramp", "freeze_frame", "static_locked_with_animation_overlay"],
+      "story_archetypes": ["surreal_cartoon_dreamscape", "performance_to_lens", "internet_meme_skit", "lo_fi_origin"],
+      "opening_pattern": "Lyrical Lemonade animated title card or lemon logo, hard cut to artist MCU mid-lyric on saturated exterior.",
+      "closeup_frequency": 0.50,
+      "mood_mapping": {
+        "aggressive": ["fisheye_face_distort_CU", "speed_ramp_punch_in", "saturated_red"],
+        "celebratory": ["freeze_frame_bounce", "cartoon_overlay_confetti", "pastel_key"],
+        "intimate": ["soft_MCU_ringlight", "muted_pastel"],
+        "melancholic": ["rain_VHS_grain_MCU", "cool_blue_grade", "animated_tear_overlay"],
+        "anthemic": ["freeze_frame_bounce", "pastel_key", "MCU_centered_handheld"],
+        "sad": ["rain_VHS_grain_MCU", "cool_blue_grade", "animated_tear_overlay", "soft_MCU_ringlight"]
+      },
+      "forbidden_for_genres": {
+        "rock": ["2D_animation_overlay", "freeze_frame_bounce", "lyrical_lemonade_title_card"],
+        "country": ["lemon_title_card", "cartoon_kaiju"],
+        "classical": ["meme_edit", "speed_ramp"]
+      }
+    }
+  ],
+  "sub_genre_modifiers": {
+    "gangster_rap": {
+      "aggression_mult": 1.5,
+      "closeup_freq_mult": 1.2,
+      "lighting_bias": "hard_shadow",
+      "force_settings": ["night_exterior", "vehicle"],
+      "forbid_extra": ["pastel_palette", "cartoon_overlay", "freeze_frame_bounce"],
+      "preferred_producers": ["hype_williams"]
+    },
+    "drill": {
+      "aggression_mult": 1.6,
+      "closeup_freq_mult": 1.2,
+      "lighting_bias": "hard_shadow",
+      "force_settings": ["night_exterior", "vehicle", "urban_alley"],
+      "forbid_extra": ["pastel_palette", "warm_gold_key"],
+      "preferred_producers": ["hype_williams", "cole_bennett"]
+    },
+    "luxury_pop_rap": {
+      "aggression_mult": 0.8,
+      "closeup_freq_mult": 1.0,
+      "lighting_bias": "warm_gold_key",
+      "force_settings": ["mansion_or_yacht", "champagne_props"],
+      "forbid_extra": ["lo_fi_vhs_grain", "thermal_camera"],
+      "preferred_producers": ["hype_williams"]
+    },
+    "conscious": {
+      "aggression_mult": 0.6,
+      "closeup_freq_mult": 0.9,
+      "edit_tempo_override": "slow_lingering",
+      "film_grain_force": true,
+      "forbid_extra": ["2D_animation_overlay", "shiny_suit_cyc", "champagne_slow_mo"],
+      "preferred_producers": ["hiro_murai"]
+    },
+    "alternative_hip_hop": {
+      "aggression_mult": 0.7,
+      "closeup_freq_mult": 1.0,
+      "edit_tempo_override": "slow_lingering",
+      "film_grain_force": true,
+      "forbid_extra": ["shiny_suit_cyc", "champagne_slow_mo"],
+      "preferred_producers": ["hiro_murai"]
+    },
+    "trap": {
+      "aggression_mult": 1.2,
+      "closeup_freq_mult": 1.3,
+      "closeup_freq_floor": 0.45,
+      "edit_tempo_override": "fast_on_beat",
+      "forbid_extra": ["yacht_luxury_fantasy", "thermal_camera"],
+      "preferred_producers": ["cole_bennett"]
+    },
+    "soundcloud_rap": {
+      "aggression_mult": 1.1,
+      "closeup_freq_mult": 1.3,
+      "closeup_freq_floor": 0.45,
+      "edit_tempo_override": "fast_on_beat",
+      "preferred_producers": ["cole_bennett"]
+    },
+    "mumble_rap": {
+      "aggression_mult": 0.9,
+      "closeup_freq_mult": 1.2,
+      "closeup_freq_floor": 0.40,
+      "preferred_producers": ["cole_bennett"]
+    },
+    "rnb": {
+      "aggression_mult": 0.4,
+      "intimacy_mult": 1.6,
+      "closeup_freq_mult": 1.4,
+      "lighting_bias": "soft_warm",
+      "edit_tempo_override": "medium_rhythmic",
+      "forbid_extra": ["fisheye_distortion", "2D_animation_overlay", "freeze_frame_bounce"],
+      "preferred_producers": ["hype_williams", "hiro_murai", "melina_matsoukas"]
+    },
+    "power_ballad": {
+      "aggression_mult": 0.5,
+      "closeup_freq_mult": 1.5,
+      "edit_tempo_override": "slow_lingering",
+      "lighting_bias": "available_light",
+      "forbid_extra": ["fast_on_beat_cut", "choreographed_dance_routine"],
+      "preferred_producers": ["mark_romanek", "floria_sigismondi", "anton_corbijn"]
+    },
+    "grunge": {
+      "aggression_mult": 1.3,
+      "film_grain_force": true,
+      "lighting_bias": "smoke_haze",
+      "preferred_producers": ["samuel_bayer"]
+    },
+    "post_punk": {
+      "aggression_mult": 0.8,
+      "edit_tempo_override": "slow_lingering",
+      "film_grain_force": true,
+      "preferred_producers": ["anton_corbijn"]
+    },
+    "industrial_rock": {
+      "aggression_mult": 1.2,
+      "closeup_freq_mult": 1.2,
+      "preferred_producers": ["mark_romanek"]
+    },
+    "dance_pop": {
+      "aggression_mult": 0.8,
+      "closeup_freq_mult": 1.0,
+      "preferred_producers": ["dave_meyers", "melina_matsoukas"]
+    },
+    "dark_pop": {
+      "aggression_mult": 1.0,
+      "film_grain_force": true,
+      "preferred_producers": ["floria_sigismondi"]
+    }
+  },
+  "universal_forbidden_by_genre": {
+    "rock": ["dj_booth", "dj_pult", "turntables", "nightclub_dancefloor", "choreographed_dance_routine", "money_throw", "champagne_pour", "luxury_car_pan", "shiny_suit_cyc", "2D_animation_overlay", "freeze_frame_bounce", "cartoon_overlay", "strobe_rave_lighting"],
+    "country": ["dj_booth", "dj_pult", "turntables", "fisheye_distortion", "neon_cyan_palette", "2D_animation_overlay", "champagne_slow_mo", "shiny_suit_cyc"],
+    "folk": ["fast_on_beat_cut", "fisheye_distortion", "2D_animation_overlay", "shiny_suit_cyc", "strobe_rave_lighting"],
+    "classical": ["meme_edit", "fast_on_beat_cut", "2D_animation_overlay", "shiny_suit_cyc"]
+  }
+}

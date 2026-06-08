@@ -19,6 +19,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+try:
+    from mv_director import MVDirector  # Stage K — producer-style director
+    _MV_DIRECTOR_AVAILABLE = True
+except Exception as _mvd_exc:  # pragma: no cover
+    MVDirector = None  # type: ignore
+    _MV_DIRECTOR_AVAILABLE = False
+    print(f"[Stage K] mv_director unavailable ({_mvd_exc}); director brief disabled.")
+
 # Default segmentation settings
 DEFAULT_FALLBACK_SEGMENT_LENGTH = 10  # seconds
 DEFAULT_MAX_SEGMENT_DURATION = 15     # seconds, subdivide longer segments
@@ -2532,6 +2540,64 @@ class MusicVideoPrompter:
                     f"  {i}. {slot} — {WARDROBE_STATES.get(slot, '')}"
                     for i, slot in enumerate(wardrobe_plan)
                 )
+
+                # ── Stage K: Producer-style director brief ─────────────────
+                # Builds a per-segment shot directive table (shot type, motion,
+                # lighting, mood, framing note) injected into the system prompt.
+                # Hard-fails closed: any exception leaves director_brief="" and
+                # the pipeline reverts to the pre-Stage-K prompt verbatim.
+                director_brief = ""
+                if _MV_DIRECTOR_AVAILABLE and os.getenv("MV_DIRECTOR_ENABLED", "1") != "0":
+                    try:
+                        director = MVDirector()
+                        director_rows = [
+                            {
+                                "section_label": r["label"],
+                                "role": (extract_section_role(r["label"]) or "story")
+                                        if r.get("is_vocal") else "story",
+                                "lyrics": r.get("lyrics", "") if r.get("is_vocal") else "",
+                                "text": r.get("lyrics", "") if r.get("is_vocal") else "",
+                            }
+                            for r in rows
+                        ]
+                        song_seed = abs(hash(f"{theme}|{genre}|{lyrics_text[:200]}")) % (2**31)
+
+                        async def _director_text_caller(sys_p: str, usr_p: str) -> str:
+                            return await self._call_openrouter(
+                                messages=[
+                                    {"role": "system", "content": sys_p},
+                                    {"role": "user", "content": usr_p},
+                                ],
+                                max_tokens=2000,
+                            )
+
+                        sentiment = await director.classify_sub_genre_and_sentiment(
+                            lyrics=lyrics_text,
+                            genre=genre,
+                            key=None,
+                            tempo=None,
+                            aligned_sections=director_rows,
+                            text_caller=_director_text_caller,
+                        )
+                        sub_genre = sentiment.get("sub_genre")
+                        profile = director.select_producer_profile(
+                            genre=genre, sub_genre=sub_genre, mood=None, song_seed=song_seed,
+                        )
+                        profile = director.apply_sub_genre_modifiers(profile, sub_genre)
+                        shot_plan = director.build_shot_plan(
+                            aligned_sections=director_rows, profile=profile,
+                            sentiment=sentiment, song_seed=song_seed,
+                        )
+                        director_brief = director.render_director_brief(
+                            profile=profile, shot_plan=shot_plan, song_genre=genre or "pop",
+                        )
+                        print(f"[Stage K] Director: {profile.get('name')} "
+                              f"(sub_genre={sub_genre}); {len(shot_plan)} shot directives.")
+                    except Exception as _mvd_err:
+                        print(f"[Stage K] director brief failed ({_mvd_err}); "
+                              f"falling back to pre-K prompt.")
+                        director_brief = ""
+
                 listing = "\n".join(
                     f'{i}. [{ "VOCAL" if r["is_vocal"] else "STORY" }] '
                     f'{r["label"]} ({round(r["end_time"]-r["start_time"],1)}s) '
@@ -2664,6 +2730,11 @@ class MusicVideoPrompter:
                     "  • global = camera + lighting + grading only (no "
                     "wardrobe, no identity — those come from the image and "
                     "the per-beat text).\n"
+                    + (
+                        "\n## DIRECTOR BRIEF (Stage K — producer style guide)\n"
+                        + director_brief + "\n\n"
+                        if director_brief else ""
+                    ) +
                     "Return ONLY the JSON array, no other text."
                 )
                 aligned_user = (
