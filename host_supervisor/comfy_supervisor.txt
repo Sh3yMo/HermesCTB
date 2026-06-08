@@ -19,7 +19,7 @@ import psutil
 
 COMFY_EXE_PATH = os.environ.get(
     "COMFY_EXE_PATH",
-    r"C:\Users\SheyMo\AppData\Local\Programs\ComfyUI\ComfyUI.exe",
+    r"C:\Users\SheyMo\AppData\Local\Programs\ComfyUI\Comfy Desktop\ComfyUI.exe",
 )
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188")
 SUPERVISOR_HOST = os.environ.get("SUPERVISOR_HOST", "0.0.0.0")

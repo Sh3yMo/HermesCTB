@@ -127,7 +127,7 @@
         "strength": 0.5
       },
       "lora_3": {
-        "on": true,
+        "on": false,
         "lora": "LTX2.3_reasoning_I2V_V3.safetensors",
         "strength": 0.8
       },
