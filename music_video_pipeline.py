@@ -1431,6 +1431,72 @@ _GENRE_WARDROBE_DEFAULT: List[Tuple[str, str]] = [
 _DEFAULT_WARDROBE_ARC = "daywear_to_evening"
 
 
+# Stage I (2026-06-07 evening): genre-specific choreography vocabulary.
+# Used by plan_segments() to replace LLM-generated vague phrases like
+# "energetic dance break" / "instrumental break with dancers" with
+# genre-appropriate concrete moves (testrun 63486a7a produced bland
+# pop-rock choreo without genre anchoring). Substring match: first
+# matching key in iteration order wins. Same pattern as
+# _GENRE_WARDROBE_DEFAULT so a future genre can be added in one place.
+GENRE_DANCE_STYLES: Dict[str, str] = {
+    "metal":        "aggressive headbangs, double-fist horns, wide-stance riff-poses, jump kicks",
+    "rock":         "sharp-edged power poses, headbang accents, energetic stomping moves, raised fists, guitar-leaning stances",
+    "punk":         "pogo jumps, mosh-pit shoves, raised middle fingers, sneer poses, raw stomp footwork",
+    "hip hop":      "fluid isolation moves, freestyle attitude, beat-synced footwork, sharp body rolls, ground hand-touches",
+    "rap":          "swagger struts, hand-throws-to-camera gestures, low-knee bounce, chain-grab poses, head nods on beat",
+    "rnb":          "smooth body rolls, slow grinds, hand-to-chest accents, sensual hip sways",
+    "soul":         "smooth shoulder shimmies, finger-snap sways, hand-on-heart accents, swaying turns",
+    "jazz":         "smooth gliding steps, finger snaps, leg extensions, swing-style turn-outs",
+    "blues":        "slow-step swaying, shoulder shrugs, finger snaps, intimate close-stance partner holds",
+    "reggae":       "loose-hip skanking, slow ground bounces, swaying side-to-side moves",
+    "ska":          "fast skanking jumps, high knee lifts, exaggerated arm swings, off-beat hops",
+    "tropical":     "salsa-influenced hip swivels, shoulder bounces, beach-style barefoot footwork",
+    "surf":         "loose body sways, surfer crouch-poses, casual hip rocks, beach-frame group lines",
+    "country":      "line-dance steps, boot-tap accents, partnered swing-outs, hat tips, hip kicks",
+    "folk":         "barefoot circle steps, joined-hand sways, gentle skipping moves, group hand-holds",
+    "acoustic":     "intimate slow sways, eye-contact mirror moves, soft partnered steps, hand-clasp poses",
+    "flamenco":     "rapid stamping footwork, sharp wrist rotations, raised arms with bent elbows, hand claps (palmas), expressive facial intensity",
+    "latin":        "salsa hip movements, rapid spins, partner-frame holds, bachata side-steps",
+    "edm":          "rave-style jump bounces, raised-arm hand waves, isolation chest pops, glowstick poses",
+    "house":        "smooth gliding footwork, jacking torso bounces, raised-hand counts, four-on-the-floor steps",
+    "techno":       "robotic isolation moves, machine-precise foot taps, raised-arm head-bops, minimal swaying",
+    "trance":       "raised-arms swaying waves, slow group spins, eyes-closed bliss expressions, hand-to-sky reaches",
+    "synthwave":    "neon-lit retro robot moves, isolation chest pops, slow synchronized waves, 80s side-steps",
+    "cyberpunk":    "glitchy isolation pops, sharp angular poses, mechanical strut walks, neon-frame stops",
+    "darkwave":     "slow brooding sways, dramatic arm extensions, gothic spin-falls, mournful poses",
+    "industrial":   "rigid mechanical stomps, robotic arm chops, factory-line synchronized moves, sharp angular angles",
+    "doom":         "slow heavy headbangs, ground-stomp accents, raised-fist crawls, brooding wide-stance poses",
+    "gothic":       "elegant slow spins, brooding gaze poses, dramatic cloak/coat-flourish moves, candlelit sways",
+    "lofi":         "lazy mellow sways, casual head bops, slow finger-snap counts, relaxed shoulder rolls",
+    "ambient":      "minimal slow drifting moves, tai-chi-style arm flows, eyes-closed sways",
+    "classical":    "ballet-style poses, raised arabesques, soft leg extensions, port-de-bras arms",
+    "orchestral":   "elegant ballroom waltz steps, dramatic raised-arm extensions, partnered slow spins",
+    "indie":        "loose freeform hip sways, casual head-tilts, shoebox-stage low-energy steps",
+    "pop":          "synchronised group choreography with hip pops, hair flips, jump-clap accents, mirror-friendly poses",
+}
+
+# Default when no key matches the genre string. Plain enough not to clash
+# with any specific genre, but still concrete (avoids the vague "energetic
+# dance moves" failure mode this dictionary exists to fix).
+_DEFAULT_GENRE_DANCE = (
+    "beat-synced rhythmic steps, sharp-clean arm movements, "
+    "tight group formation moves"
+)
+
+
+def _genre_dance_style(genre: str) -> str:
+    """Pick the choreography vocabulary for a genre by substring match.
+
+    Mirrors `_genre_default_wardrobe_arc` so the lookup contract is
+    uniform across genre-derived defaults. Falls back to
+    _DEFAULT_GENRE_DANCE when nothing matches."""
+    g = (genre or "").lower()
+    for substr, style in GENRE_DANCE_STYLES.items():
+        if substr in g:
+            return style
+    return _DEFAULT_GENRE_DANCE
+
+
 def _expand_wardrobe_plan(arc_key: str, n_segments: int) -> List[str]:
     """Expand a wardrobe arc template to exactly n_segments slot keys.
 
@@ -2445,6 +2511,13 @@ class MusicVideoPrompter:
         wardrobe_template = WARDROBE_ARCS.get(wardrobe_arc_key) or WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
         wardrobe_human = " → ".join(wardrobe_template)
 
+        # Stage I (2026-06-07 evening): resolve the genre-specific dance
+        # vocabulary once and reuse in both aligned + proportional system
+        # prompts below. genre here is the caller-supplied / detected genre
+        # string already used by _genre_default_wardrobe_arc above.
+        _dance_style_text = _genre_dance_style(genre)
+        _genre_label_for_prompt = (genre or "").strip() or "this song's genre"
+
         # ---- RC8 aligned mode: fixed real-timestamp rows ------------------
         if aligned_sections:
             rows = build_aligned_timeline(aligned_sections, min_seg, cap, total_duration)
@@ -2516,6 +2589,34 @@ class MusicVideoPrompter:
                     "performers (guitarist, drummer, DJ) inside STORY "
                     "segments are gendered the same way: 'male guitarist', "
                     "'female DJ', not 'a guitarist'.\n\n"
+                    "GENRE CHOREOGRAPHY (Stage I, 2026-06-07 evening — "
+                    f"graded): the song genre is {_genre_label_for_prompt!r}. "
+                    "When a STORY/instrumental segment includes dancers or "
+                    "dance moves of any kind (dance break, instrumental "
+                    "break with crowd, bridge with backup dancers, etc.), "
+                    "describe the choreography with genre-appropriate "
+                    f"concrete moves: {_dance_style_text}. NEVER write "
+                    "vague filler like 'energetic dance break', 'dance "
+                    "moves', 'performing a dance', 'instrumental break "
+                    "with dancers', 'dancing energetically', or 'rhythmic "
+                    "movements' without naming the actual moves. Apply this "
+                    "to both video_prompt and frame_variant_prompt.\n\n"
+                    "MULTI-CHARACTER COMPOSITION (Stage H, 2026-06-07 evening "
+                    "— graded): when a STORY/instrumental segment depicts "
+                    "TWO OR MORE distinct on-screen performers (dancers, "
+                    "guitarists, crowd members, etc.), both video_prompt "
+                    "and frame_variant_prompt MUST state the EXACT count "
+                    "(two/three/four/...) and an EXPLICIT spatial "
+                    "composition: e.g. 'three female dancers in a V-"
+                    "formation, frontal pose, all three visible from waist "
+                    "up' or 'two guitarists flanking the lead singer, one "
+                    "left, one right, mid-shot'. NEVER write 'a group of "
+                    "dancers', 'backup dancers', 'several performers', "
+                    "'multiple dancers', or 'dancers in the background' "
+                    "without a numeric count and frame placement. The IA2V "
+                    "video model uses a single source frame, so the prompt "
+                    "must encode the full character count up-front or the "
+                    "render produces clones/off-screen entries.\n\n"
                     + (
                         "SAME-GENDER DUET (Fix 32 — graded): this song is a "
                         + ("FEMALE-FEMALE" if duet_kind == "ff" else "MALE-MALE")
