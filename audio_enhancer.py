@@ -36,6 +36,42 @@ INSTRUMENTAL_BLOCKS = {
     "Piano Interlude", "Build", "Drop", "Breakdown", "Fade Out",
 }
 
+# ─── Structure Profiles (Genre → Section DNA) ────────────────
+
+STRUCTURE_PROFILE_KEYWORDS = {
+    "edm": [
+        "edm", "techno", "house", "trance", "synthwave", "synth-pop",
+        "electronic", "dubstep", "drum and bass", "dnb", "electro",
+        "big room", "hardstyle", "future bass", "deep house", "tech house",
+    ],
+    "hiphop": [
+        "hip-hop", "hip hop", "hiphop", "rap", "trap", "drill",
+        "boom bap", "grime", "lo-fi hip hop", "lo-fi hip-hop",
+    ],
+    "ballad": [
+        "ballad", "acoustic", "singer-songwriter", "singer songwriter",
+        "folk", "unplugged", "piano ballad", "guitar ballad", "lullaby",
+    ],
+}
+
+VALID_STRUCTURE_PROFILES = {"edm", "pop", "hiphop", "ballad"}
+
+
+def _default_structure_profile(genre: Optional[str]) -> str:
+    """Map a resolved genre string to a default structure profile.
+
+    Falls back to 'pop' for unknown / empty genres — the safest, most
+    radio-friendly skeleton (Intro → Verse → Pre-Chorus → Chorus …).
+    """
+    if not genre:
+        return "pop"
+    g = genre.lower()
+    for profile, kws in STRUCTURE_PROFILE_KEYWORDS.items():
+        for kw in kws:
+            if kw in g:
+                return profile
+    return "pop"
+
 BPM_PRESETS = [60, 80, 100, 120, 140, 160]
 
 KEY_PRESETS = {
@@ -192,6 +228,9 @@ class AudioSettings:
     caption: str = ""
     current_block_index: int = 0
     seed: Optional[int] = None
+    artist: str = ""
+    title: str = ""
+    structure_profile: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -201,6 +240,8 @@ class AudioSettings:
             "structure": self.structure, "lyrics": dict(self.lyrics),
             "caption": self.caption, "current_block_index": self.current_block_index,
             "seed": self.seed,
+            "artist": self.artist, "title": self.title,
+            "structure_profile": self.structure_profile,
         }
 
     @classmethod
@@ -500,7 +541,15 @@ class AudioEnhancer:
             "must have NO lyrics text below them — leave them empty. "
             "(5) Tags support compound modifiers via dash: [Verse - male], [Chorus - female], "
             "[Bridge - duet], [Chorus - anthemic], [Verse - whispered], [Verse - raspy]. "
-            "Use UPPERCASE lines for high vocal intensity."
+            "Use UPPERCASE lines for high vocal intensity. "
+            "(6) EVERY song MUST begin with [Intro] as the first tag — never start with [Verse 1] "
+            "or any other tag. At short durations the intro may be empty (instrumental opener). "
+            "(7) Follow the structure profile recommended in the user prompt (edm / pop / hiphop / "
+            "ballad). You may override only if the brief explicitly mixes genres — and you MUST "
+            "echo the actual profile used in the JSON field `structure_profile`. "
+            "(8) Always emit `artist` and `title` fields in the JSON — `title` derived from the "
+            "dominant hook/refrain, `artist` either the user-supplied name (if given) or an "
+            "invented genre-fitting stage name."
         )
 
         response = await self._call_openrouter(
@@ -513,6 +562,17 @@ class AudioEnhancer:
         return settings
 
     def _build_vocal_prompt(self, idea: str, settings_str: str, settings: AudioSettings) -> str:
+        recommended_profile = _default_structure_profile(settings.genre)
+        if settings.artist and settings.artist.strip():
+            artist_rule = (
+                f"- ARTIST NAME OVERRIDE: The user supplied an exact artist name. "
+                f"You MUST emit \"artist\": \"{settings.artist.strip()}\" — do not invent a new one."
+            )
+        else:
+            artist_rule = (
+                "- artist: invent a creative, genre-fitting stage / band name (1-3 words). "
+                "Do NOT use real-world artist names. Original only."
+            )
         if settings.voice == "any":
             voice_rule = (
                 "- Vocal arrangement: decide creatively — mix male/female/duet across sections or go solo.\n"
@@ -547,7 +607,10 @@ class AudioEnhancer:
             f'  "key": "C major",\n'
             f'  "time_signature": "4",\n'
             f'  "duration": 180,\n'
-            f'  "genre": "resolved genre tag from vocabulary"\n'
+            f'  "genre": "resolved genre tag from vocabulary",\n'
+            f'  "artist": "Band or stage name (1-3 words, genre-fitting, original)",\n'
+            f'  "title": "Song title (1-5 words, derived from the dominant chorus hook or central theme)",\n'
+            f'  "structure_profile": "edm | pop | hiphop | ballad (which profile you followed)"\n'
             f'}}\n\n'
             f"Rules:\n"
             f"- Caption: richly describe the sound — include:\n"
@@ -559,6 +622,9 @@ class AudioEnhancer:
             f"  • mood\n"
             f"  Caption and lyrics tags MUST be consistent — no conflicts between them.\n"
             f"{voice_rule}\n"
+            f"{artist_rule}\n"
+            f"- title: 1-5 words, derived from the strongest hook/refrain or central theme. "
+            f"ASCII letters/spaces/apostrophe/hyphen only — no quotes, no emojis, no slashes.\n"
             f"- Structure tags — ONLY use tags from this exact list (never invent new ones):\n"
             f"  Basic: [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Final Chorus], [Bridge], [Outro]\n"
             f"  Vocal compound (ONE modifier max): [Verse - male], [Chorus - female], [Bridge - duet],\n"
@@ -567,6 +633,34 @@ class AudioEnhancer:
             f"  Dynamic (no lyrics below): [Build], [Drop], [Breakdown]\n"
             f"  Instrumental (no lyrics below): [Guitar Solo], [Piano Interlude], [Instrumental]\n"
             f"  Special (no lyrics below): [Fade Out], [Silence]\n"
+            f"- STRUCTURE PROFILES BY GENRE — every song MUST start with [Intro] and follow one of these:\n"
+            f"  • edm  (EDM / Techno / House / Synthwave / Trance / Dubstep):\n"
+            f"      [Intro] → [Verse 1] → [Build] → [Drop] → [Verse 2] → [Build] → [Drop]\n"
+            f"      → [Breakdown] → [Build] → [Drop] → [Outro]\n"
+            f"      Use [Build]+[Drop] combos. [Chorus] often replaced by [Drop].\n"
+            f"      Verse text short, punchy, rhythmic.\n"
+            f"  • pop  (Pop / Radio-Rock / Indie / R&B):\n"
+            f"      [Intro] → [Verse 1] → [Pre-Chorus] → [Chorus] → [Verse 2] → [Pre-Chorus]\n"
+            f"      → [Chorus] → [Bridge] → [Chorus] (or [Final Chorus]) → [Outro]\n"
+            f"      [Pre-Chorus] is the energy ramp. [Bridge] right before the final chorus.\n"
+            f"  • hiphop  (Hip-Hop / Rap / Trap / Drill):\n"
+            f"      [Intro] → [Verse 1] (dense, long) → [Chorus] → [Verse 2] (dense, long)\n"
+            f"      → [Chorus] → [Verse 3] → [Chorus] → [Outro]\n"
+            f"      Verses carry the most text. Optional [Instrumental] / [Breakdown] before [Chorus]\n"
+            f"      to let the refrain breathe and contrast vocally.\n"
+            f"  • ballad  (Acoustic / Singer-Songwriter / Piano Ballad / Folk):\n"
+            f"      [Intro] → [Verse 1] → [Chorus] → [Verse 2] → [Chorus] → [Piano Interlude]\n"
+            f"      → [Breakdown] → [Chorus] (or [Final Chorus]) → [Outro] (or [Silence])\n"
+            f"      Reduce, don't drop. [Breakdown] = minimal vocal.\n"
+            f"- RECOMMENDED PROFILE for this song (chosen from genre): {recommended_profile}\n"
+            f"  Follow it by default. You MAY override if the brief mixes genres (e.g. 'EDM-pop hybrid'),\n"
+            f"  but you MUST emit the actual profile you used in the JSON field `structure_profile`.\n"
+            f"- MANDATORY INTRO RULE — non-negotiable, ALL durations including ≤30s:\n"
+            f"  Every song MUST open with [Intro] as the FIRST tag. Never start with [Verse 1].\n"
+            f"  At short durations the intro can be EMPTY (no lyric text under it) so ACE-Step\n"
+            f"  renders ~2-3s of instrumental opener. At longer durations the intro may carry a\n"
+            f"  short lyric line. If the duration cap forces you to drop a section, drop a verse\n"
+            f"  before you drop the intro.\n"
             f"- INVALID tag examples — DO NOT use: [Harp Solo], [Bass Solo], [Flute Solo],\n"
             f"  [Bridge - whisper - male] (two modifiers), [Verse - male - raspy] (two modifiers)\n"
             f"- When vocal style conflicts with one-modifier rule (e.g. 'duet chorus but man whispers'):\n"
@@ -584,22 +678,21 @@ class AudioEnhancer:
             f"- CRITICAL: Match lyrics length AND section count to duration! Too many lyrics or\n"
             f"  sections = ACE-Step crams/garbles them and barely any of it is actually sung.\n"
             f"  Approximate total sung lines by duration (at ~120 BPM):\n"
-            f"  20-30s: ~4-6 lines, 1-2 SUNG sections only (e.g. 1 short verse, or 1 chorus)\n"
-            f"  45s: ~8-10 lines, ≤3 sung sections (short verse + chorus)\n"
-            f"  60s: ~12-16 lines total (intro + verse + chorus + short outro)\n"
-            f"  90s: ~18-26 lines total (intro + verse + chorus + verse + chorus + outro)\n"
-            f"  120s: ~24-32 lines total (intro + 2 verses + 2 choruses + bridge + outro)\n"
-            f"  180s: ~36-48 lines total (full structure with multiple verses)\n"
-            f"  240s: ~48-64 lines total (extended structure, 4+ verses, multiple chorus repeats, solos)\n"
+            f"  20-30s: ~4-6 lines, [Intro] (empty) + 1-2 SUNG sections (e.g. 1 short verse or 1 chorus)\n"
+            f"  45s: ~8-10 lines, [Intro] + ≤3 sung sections (short verse + chorus + optional outro)\n"
+            f"  60s: ~12-16 lines total ([Intro] + verse + chorus + short [Outro])\n"
+            f"  90s: ~18-26 lines total ([Intro] + verse + chorus + verse + chorus + [Outro])\n"
+            f"  120s: ~24-32 lines total ([Intro] + 2 verses + 2 choruses + bridge + [Outro])\n"
+            f"  180s: ~36-48 lines total ([Intro] + full structure with multiple verses + [Outro])\n"
+            f"  240s: ~48-64 lines total ([Intro] + extended structure, 4+ verses, multiple chorus repeats, solos + [Outro])\n"
             f"  At higher BPM (140+), you can fit ~20% more lines. At lower BPM (80-), use ~20% fewer.\n"
             f"  Instrumental/solo sections take time but need no lyrics — count them as ~4-8 lines of time.\n"
             f"- HARD RULE (never violate): output at most as many sections as the duration can\n"
-            f"  realistically sing at normal pace. ≤30s → max 1-2 sung sections (+ optional empty\n"
-            f"  [Intro]/[Outro]); ≤45s → max 3 sung sections; ≤60s → no more than intro+verse+\n"
-            f"  chorus+outro. Do NOT emit a full multi-section song (verse/pre-chorus/chorus/\n"
-            f"  verse/bridge/final-chorus) unless duration ≥ 120s. Keep the song's natural\n"
-            f"  structure (intro / breaks / outro are good) — just scale the NUMBER of sections\n"
-            f"  to the duration so every section is actually rendered.\n"
+            f"  realistically sing at normal pace. ≤30s → [Intro] (empty) + max 1-2 sung sections;\n"
+            f"  ≤45s → [Intro] + max 3 sung sections; ≤60s → [Intro] + verse + chorus + [Outro].\n"
+            f"  Do NOT emit a full multi-section song (verse/pre-chorus/chorus/verse/bridge/\n"
+            f"  final-chorus) unless duration ≥ 120s. Intro is ALWAYS first and ALWAYS present —\n"
+            f"  drop a verse before you drop the intro.\n"
             f"- Keep verses to 4 lines max, choruses to 3-4 lines. Fewer lines is safer than too many.\n"
             f"- ALWAYS use a rhyme scheme — genre doesn't matter. Default AABB (couplets) or ABAB.\n"
             f"  Line-ending words must rhyme. Never write free verse unless the user explicitly requests it.\n"
@@ -669,6 +762,23 @@ class AudioEnhancer:
             settings.time_signature = _normalize_time_signature(data["time_signature"])
         if data.get("genre") and not settings.genre:
             settings.genre = data["genre"]
+
+        # Artist: user-supplied override wins; otherwise take LLM value.
+        llm_artist = (data.get("artist") or "").strip()
+        if not settings.artist and llm_artist:
+            settings.artist = llm_artist
+
+        # Title: always take from LLM (derived from lyrics hook).
+        llm_title = (data.get("title") or "").strip()
+        if llm_title:
+            settings.title = llm_title
+
+        # Structure profile: telemetry / debug field. Normalize to known set.
+        sp = (data.get("structure_profile") or "").strip().lower()
+        if sp in VALID_STRUCTURE_PROFILES:
+            settings.structure_profile = sp
+        elif not settings.structure_profile:
+            settings.structure_profile = _default_structure_profile(settings.genre)
 
     def _parse_lyrics_into_settings(self, raw_lyrics: str, settings: AudioSettings):
         """Parse raw lyrics string with structure tags into settings."""
