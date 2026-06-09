@@ -112,7 +112,11 @@ def _safe_filename(*parts: str, max_len: int = 80) -> str:
     pieces = [p.strip() for p in parts if p and p.strip()]
     if not pieces:
         return ""
-    joined = " - ".join(pieces)
+    trimmed = [p.strip(" .-") for p in pieces]
+    trimmed = [p for p in trimmed if p]
+    if not trimmed:
+        return ""
+    joined = " - ".join(trimmed)
     cleaned = _re.sub(r"[^\w\s\-'.]", "", joined, flags=_re.UNICODE)
     cleaned = _re.sub(r"\s+", " ", cleaned).strip(" .-")
     return cleaned[:max_len] if cleaned else ""
@@ -561,7 +565,7 @@ async def _run_music_video(
 @app.post("/generate/music-video")
 async def generate_music_video(
     audio: UploadFile = File(...),
-    video_workflow_id: str = Form("LTX2.3 - IA2V"),  # non-4.2: 4.2 IA2V has no lip-sync (audio not driving video)
+    video_workflow_id: str = Form("LTX2.3 - IA2V-PromptRelay"),  # Stage L1: PromptRelay is the new default. Pass "LTX2.3 - IA2V" to opt back into legacy single-prompt mode.
     theme: str = Form(...),
     crossfade_duration: float = Form(0.0),
 ):
@@ -1021,7 +1025,7 @@ async def _run_create_music_video(
                 print(f"[create-mv] align_sections crashed (non-fatal): {e!r}")
                 aligned = None
             print(f"[create-mv] lyric alignment: "
-                  f"{'OK ' + str(len(aligned)) + ' sections' if aligned else 'unavailable → proportional fallback'}")
+                  f"{'OK ' + str(len(aligned)) + ' sections' if aligned else 'unavailable -> proportional fallback'}")
 
             # Fix 15: Audio-based gender detection overrides LLM lyrics-tag
             # gender when audio reality differs. Fix 15c: ALSO refines section
@@ -1090,12 +1094,12 @@ async def _run_create_music_video(
                                     _vsecs.append((_g2, max(0.0, _e2 - _s2)))
                                 if same_gender_veto(_vsecs, duet):
                                     print(f"[create-mv] same-gender duet={duet!r} VETOED by audio "
-                                          f"(sustained opposite-gender vocals) → mixed routing")
+                                          f"(sustained opposite-gender vocals) -> mixed routing")
                                     duet = ""
                                     same_gender = False
                                 else:
                                     print(f"[create-mv] same-gender duet={duet!r} confirmed by audio "
-                                          f"→ keeping LLM labels (no gender override)")
+                                          f"-> keeping LLM labels (no gender override)")
                             corrections = 0
                             if not same_gender:
                                 # Fix 36: asymmetric trust + confidence gate.
@@ -1146,7 +1150,7 @@ async def _run_create_music_video(
                                         corrections += 1
                                         print(
                                             f"[Fix 36] overriding {_label!r} "
-                                            f"→ {_new_label!r} "
+                                            f"-> {_new_label!r} "
                                             f"(audio conf={_conf:.2f})."
                                         )
                             # Fix 36: log detected as (gender, conf) tuples so
@@ -1159,7 +1163,7 @@ async def _run_create_music_video(
                                   f"mid-section splits: {mid_splits}; "
                                   f"boundary refinements applied (voice_end tail +0.5s)")
                         else:
-                            print("[create-mv] gender detection: demucs unavailable → skip")
+                            print("[create-mv] gender detection: demucs unavailable -> skip")
                 except Exception as _e:
                     print(f"[create-mv] gender detection failed (non-fatal): {_e!r}")
 
@@ -1269,31 +1273,38 @@ async def _run_create_music_video(
                         )
                         await free_comfy()
                 # Fix 32: see all_roles_present rationale above.
-                if "duet" in all_roles_present:
-                    # Stage G (2026-06-07): if duet sections exist but one
-                    # solo role has no anchor segment (e.g. song with only
-                    # female solos + mixed-gender duets), the solo loop
-                    # above skipped generating that role's portrait, so
-                    # _resolve_duet_portrait() below would fail the
-                    # `male_p and female_p` guard and silently leave
-                    # portraits["duet"] as None. Result on 63486a7a: duet
-                    # segments fell back to the female portrait, and the
-                    # video model invented a random male partner per shot
-                    # instead of using a consistent duet composite. Force-
-                    # generate the missing solo portrait(s) now so the
-                    # composite always runs for mixed-gender duets.
+                # Stage L5 (2026-06-09): force-gen missing portraits whenever
+                # both male AND female roles appear anywhere in the song,
+                # NOT only when a `duet` label exists. The original Stage G
+                # gate (`if "duet" in all_roles_present`) missed the case
+                # where audio Fix 36 promotes solo sections to a different
+                # gender than the anchor labels, producing male + female
+                # roles without a duet tag. In that case the female sections
+                # were routed back to the male source via MCA — the user-
+                # reported "Frau wurde aus dem Frame des Mannes erstellt"
+                # bug. The duet composite still only renders when a duet
+                # section actually exists; otherwise we just guarantee each
+                # solo gender has its own portrait.
+                mixed_gender = {"male", "female"}.issubset(all_roles_present)
+                if mixed_gender or "duet" in all_roles_present:
+                    # Stage G (2026-06-07) + Stage L5 (2026-06-09): force-
+                    # generate the missing solo portrait(s) for any
+                    # mixed-gender song. Stage G originally fired only on
+                    # explicit `duet` labels; L5 widens to any mixed-gender
+                    # detection.
                     for role in ("male", "female"):
                         if portraits.get(role) is None:
                             print(
-                                f"[Stage G] no {role} solo anchor in song, "
-                                f"force-generating {role} portrait for duet "
-                                f"composite ({len(all_roles_present)} roles "
-                                f"present, duet detected)"
+                                f"[Stage G/L5] no {role} solo anchor in song, "
+                                f"force-generating {role} portrait "
+                                f"({len(all_roles_present)} roles present, "
+                                f"duet={'duet' in all_roles_present})"
                             )
                             portraits[role] = await _resolve_singer_portrait(
                                 role, theme_eff, lyrics_text, brief, aspect_ratio,
                             )
                             await free_comfy()
+                if "duet" in all_roles_present:
                     male_p = portraits.get("male")
                     female_p = portraits.get("female")
                     if male_p and female_p:
@@ -1574,7 +1585,7 @@ async def create_music_video(
     source_image: Optional[UploadFile] = File(None),
     source_description: str = Form(""),
     duration: Optional[int] = Form(None),
-    video_workflow_id: str = Form("LTX2.3 - IA2V"),  # non-4.2: 4.2 IA2V has no lip-sync (audio not driving video)
+    video_workflow_id: str = Form("LTX2.3 - IA2V-PromptRelay"),  # Stage L1: PromptRelay is the new default. Pass "LTX2.3 - IA2V" to opt back into legacy single-prompt mode.
     crossfade_duration: float = Form(0.0),
     aspect_ratio: str = Form("16:9"),
     language: str = Form(""),

@@ -588,7 +588,13 @@ def partition_anchors_by_role(
     for i, s in enumerate(segments):
         if s.reuse_of is not None:
             continue
-        role = extract_section_role(s.label)
+        # Stage L8: Intro and Outro are always STORY (role=None) regardless of
+        # any `- male/female/duet` tag the LLM may have added.
+        _head = (s.label or "").lower().strip().split(" - ", 1)[0]
+        if _head.startswith("intro") or _head.startswith("outro"):
+            role = None
+        else:
+            role = extract_section_role(s.label)
         out.setdefault(role, []).append(i)
     return out
 
@@ -1807,12 +1813,19 @@ def build_aligned_timeline(
         for k in range(n):
             a = round(st + step * k, 3)
             b = round(en if k == n - 1 else st + step * (k + 1), 3)
+            # Stage L8: Intro and Outro are always STORY regardless of whether
+            # the lyrics LLM put text under them — they get cinematic
+            # establishing/closing visuals rather than a singer closeup with a
+            # mismatched lyric-bound frame.
+            _label = s.get("label", f"Section {sec_i + 1}")
+            _head = (_label or "").lower().strip().split(" - ", 1)[0]
+            _is_intro_outro = _head.startswith("intro") or _head.startswith("outro")
             rows.append({
                 "start_time": a,
                 "end_time": b,
-                "label": s.get("label", f"Section {sec_i + 1}"),
+                "label": _label,
                 "lyrics": s.get("lyrics", "") if k == 0 else "",
-                "is_vocal": bool(s.get("is_vocal")),
+                "is_vocal": False if _is_intro_outro else bool(s.get("is_vocal")),
                 # reuse only the first row of a repeated section
                 "reuse_of": s.get("reuse_of") if k == 0 else None,
                 "sec_index": sec_i,
@@ -2541,6 +2554,42 @@ class MusicVideoPrompter:
                     for i, slot in enumerate(wardrobe_plan)
                 )
 
+                # ── Stage L3: dominant-gender lock ─────────────────────────
+                # Belt + suspenders for Stage L6: if the lyrics only contain
+                # one gender (e.g. solo-male single-singer song), forbid the
+                # LLM from writing the opposite-gender words anywhere in
+                # video_prompt / frame_variant_prompt. Stops the spurious
+                # "female singer in sequined bodysuit" story prompts in a
+                # rock anthem that has no female vocals at all.
+                _genders_in_lyrics: set[str] = set()
+                for _r in rows:
+                    _g = extract_section_role(_r.get("label", ""))
+                    if _g in ("male", "female"):
+                        _genders_in_lyrics.add(_g)
+                    elif _g == "duet":
+                        _genders_in_lyrics.update({"male", "female"})
+                if len(_genders_in_lyrics) == 1:
+                    _only = next(iter(_genders_in_lyrics))
+                    _ban = "female" if _only == "male" else "male"
+                    _ban_words = (
+                        ["female", "woman", "she", "her", "girl", "lady", "femme"]
+                        if _ban == "female"
+                        else ["male", "man", "he", "his", "boy", "guy", "gent"]
+                    )
+                    dominant_gender_lock = (
+                        f"\n\nDOMINANT GENDER LOCK (Stage L3 — graded): the lyrics of this song "
+                        f"contain ONLY `- {_only}` and/or `- duet` section tags. The vocalist is "
+                        f"exclusively {_only.upper()}. NEVER use the words "
+                        f"{', '.join(repr(w) for w in _ban_words)} anywhere in any video_prompt or "
+                        f"frame_variant_prompt. Story segments depict {_only} protagonists or "
+                        f"gender-neutral subjects (landscapes, vehicles, objects, crowds) — NO "
+                        f"named {_ban} figures, NO {_ban} singer, NO {_ban} dancer leads. "
+                        f"Background extras may include both genders but must not appear as the "
+                        f"vocalist or romantic lead.\n\n"
+                    )
+                else:
+                    dominant_gender_lock = ""
+
                 # ── Stage K: Producer-style director brief ─────────────────
                 # Builds a per-segment shot directive table (shot type, motion,
                 # lighting, mood, framing note) injected into the system prompt.
@@ -2734,7 +2783,8 @@ class MusicVideoPrompter:
                         "\n## DIRECTOR BRIEF (Stage K — producer style guide)\n"
                         + director_brief + "\n\n"
                         if director_brief else ""
-                    ) +
+                    )
+                    + dominant_gender_lock +
                     "Return ONLY the JSON array, no other text."
                 )
                 aligned_user = (
@@ -2761,6 +2811,20 @@ class MusicVideoPrompter:
                     resp = await self._call_openrouter(messages=aligned_msgs, max_tokens=10000)
                     specs = parse_segment_plan(resp)
                 if len(specs) >= len(rows):
+                    # Stage L7: reuse rows inherit the anchor's prompts so
+                    # downstream chorus-frame-reuse (RC8) stays coherent. The
+                    # LLM doesn't see reuse_of in the row listing, so each row
+                    # gets a fresh prompt — but RC8 means a repeat chorus uses
+                    # the anchor chorus's MCA frame, and if the prompts
+                    # diverge LTX renders the anchor frame against the new
+                    # text → mid-segment visual switch.
+                    for _i, _r in enumerate(rows):
+                        _anchor = _r.get("reuse_of")
+                        if _anchor is not None and 0 <= _anchor < len(specs):
+                            for _fld in ("video_prompt", "frame_variant_prompt", "video_prompt_relay"):
+                                if _fld in specs[_anchor]:
+                                    specs[_i][_fld] = specs[_anchor][_fld]
+                            print(f"[Stage L7] reuse row {_i} inherits prompts from anchor {_anchor}")
                     segments: List[Segment] = []
                     for i, r in enumerate(rows):
                         spec = specs[i]

@@ -56,6 +56,39 @@ STRUCTURE_PROFILE_KEYWORDS = {
 
 VALID_STRUCTURE_PROFILES = {"edm", "pop", "hiphop", "ballad"}
 
+# Stage L4: enforce ACE-Step duration sweet spots.
+# Maps (min_seconds_inclusive, max_seconds_exclusive) -> max section count.
+# Tracks which "extras" (Bridge / Guitar Solo / Final Chorus) are allowed.
+DURATION_SECTION_BUDGET = [
+    # (lo, hi, max_sections, allow_bridge, allow_solo, allow_final_chorus)
+    (0,    45,  4,  False, False, False),
+    (45,   75,  6,  False, False, False),
+    (75,   120, 8,  False, False, False),
+    (120,  165, 9,  True,  False, False),
+    (165,  210, 10, True,  True,  True),
+    (210,  9999, 13, True, True,  True),
+]
+
+# Sections we will drop first when over budget, in order of preference.
+# Lower priority items get dropped earlier.
+_OPTIONAL_SECTION_PATTERNS = [
+    # Most-droppable first
+    (r"^guitar\s*solo|^solo$|^drum\s*solo|^bass\s*solo|^piano\s*solo", "solo"),
+    (r"^final\s*chorus", "final_chorus"),
+    (r"^bridge", "bridge"),
+    (r"^breakdown|^build|^drop|^piano\s*interlude|^instrumental", "instrumental"),
+    (r"^pre[\-\s]*chorus", "pre_chorus"),
+]
+
+
+def _section_budget_for(duration: Optional[int]) -> tuple[int, bool, bool, bool]:
+    """Return (max_sections, allow_bridge, allow_solo, allow_final_chorus)."""
+    d = int(duration or 60)
+    for lo, hi, max_s, ab, asol, afc in DURATION_SECTION_BUDGET:
+        if lo <= d < hi:
+            return max_s, ab, asol, afc
+    return 6, False, False, False
+
 
 def _default_structure_profile(genre: Optional[str]) -> str:
     """Map a resolved genre string to a default structure profile.
@@ -539,8 +572,14 @@ class AudioEnhancer:
             "WRONG: (QUIETLY) or (SHOUTED) in lyrics text — these are ignored by ACE-Step. "
             "(4) Instrumental sections ([Guitar Solo], [Piano Interlude], [Instrumental], [Build], [Drop], [Breakdown]) "
             "must have NO lyrics text below them — leave them empty. "
-            "(5) Tags support compound modifiers via dash: [Verse - male], [Chorus - female], "
-            "[Bridge - duet], [Chorus - anthemic], [Verse - whispered], [Verse - raspy]. "
+            "(5) Tags support compound modifiers via dash. The gender modifier is MANDATORY on every "
+            "section that carries sung lyrics (Verse / Pre-Chorus / Chorus / Bridge / Final Chorus). "
+            "Allowed: [Verse - male], [Verse - male - raspy], [Chorus - female], [Chorus - female - anthemic], "
+            "[Bridge - duet], [Bridge - duet - whispered]. "
+            "FORBIDDEN style-only on vocal sections: [Verse - raspy], [Chorus - anthemic], "
+            "[Bridge - whispered] — these miss the gender modifier and break downstream segment routing. "
+            "Instrumental-only sections (Intro/Outro without lyrics, Guitar Solo, Piano Interlude, "
+            "Build, Drop, Breakdown) take NO gender tag. "
             "Use UPPERCASE lines for high vocal intensity. "
             "(6) EVERY song MUST begin with [Intro] as the first tag — never start with [Verse 1] "
             "or any other tag. At short durations the intro may be empty (instrumental opener). "
@@ -575,24 +614,52 @@ class AudioEnhancer:
             )
         if settings.voice == "any":
             voice_rule = (
-                "- Vocal arrangement: decide creatively — mix male/female/duet across sections or go solo.\n"
-                "  Use compound tags: [Verse - male], [Chorus - female], [Bridge - duet].\n"
-                "  Vary textures: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered].\n"
-                "  Caption MUST describe ONLY genre, era, instruments, timbre, production, mood —\n"
-                "  do NOT mention voice gender, vocal roles, or which voice sings which section.\n"
-                "  Voice-role info is auto-injected from your section tags; including it in caption\n"
-                "  causes duplicate phrasing that confuses the audio encoder."
+                "- Vocal arrangement: choose solo (male OR female) OR a mixed-gender duet at the song level.\n"
+                "  HARD RULE (Stage L6): EVERY VOCAL section tag (Verse / Pre-Chorus / Chorus / Bridge /\n"
+                "  Final Chorus) MUST start with a gender modifier. Intro/Outro are always STORY regardless\n"
+                "  of lyrics — they take NO gender tag.\n"
+                "  Allowed compound forms ONLY:\n"
+                "    [Verse - male]                  <- gender alone\n"
+                "    [Verse - male - raspy]          <- gender + style\n"
+                "    [Chorus - female - anthemic]    <- gender + style\n"
+                "    [Bridge - duet - whispered]     <- duet + style\n"
+                "  FORBIDDEN on vocal sections: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered]\n"
+                "  — style-only tags are misclassified as non-vocal STORY and produce bad video frames.\n"
+                "  Vary STYLE freely (raspy, anthemic, whispered, powerful, breathy) but ALWAYS write the\n"
+                "  gender first.\n"
+                "  Single-singer song: pick ONE gender and use it on every vocal section.\n"
+                "  Multi-voice song (mixed-gender duet OR alternating leads): tag each section with the\n"
+                "  gender that actually sings it; tag shared sections with [- duet]; instrumental-only\n"
+                "  sections (Guitar Solo / Piano Interlude / Build / Drop / Breakdown) take no tag.\n"
+                "  Caption rules:\n"
+                "    - Single-singer songs: the caption may omit voice gender (it lives in section tags).\n"
+                "    - Multi-voice songs: the caption MUST append a compact `section gender, ...` list\n"
+                "      at the END, lowercase and comma-separated. Example:\n"
+                "        verses male + chorus female  -> append `verse male, chorus female`\n"
+                "        with a duet bridge           -> append `verse male, chorus female, bridge duet`\n"
+                "      This compact form is what ACE-Step parses for vocal steering and what the\n"
+                "      post-generation Whisper/Demucs check uses to verify ACE rendered the intent."
             )
         elif settings.voice == "male":
             voice_rule = (
-                "- Vocal: solo male throughout. Keep male voice consistent in all section tags.\n"
-                "  Vary textures to avoid monotony: [Verse - raspy], [Chorus - powerful], [Bridge - whispered].\n"
+                "- Vocal: solo male throughout.\n"
+                "  HARD RULE (Stage L6): EVERY vocal section tag MUST include `- male`.\n"
+                "  Allowed: [Verse - male], [Verse - male - raspy], [Chorus - male - powerful],\n"
+                "           [Bridge - male - whispered], [Final Chorus - male - anthemic].\n"
+                "  FORBIDDEN: [Verse - raspy], [Chorus - anthemic], [Bridge - whispered] — these miss the\n"
+                "  gender modifier and break vocal/story routing.\n"
+                "  Intro/Outro take NO gender tag (they are STORY).\n"
                 "  Use (backing vocals) in parentheses for depth. Caption must include 'male vocal'."
             )
         else:
             voice_rule = (
-                "- Vocal: solo female throughout. Keep female voice consistent in all section tags.\n"
-                "  Vary textures to avoid monotony: [Verse - breathy], [Chorus - powerful], [Bridge - whispered].\n"
+                "- Vocal: solo female throughout.\n"
+                "  HARD RULE (Stage L6): EVERY vocal section tag MUST include `- female`.\n"
+                "  Allowed: [Verse - female], [Verse - female - breathy], [Chorus - female - powerful],\n"
+                "           [Bridge - female - whispered], [Final Chorus - female - anthemic].\n"
+                "  FORBIDDEN: [Verse - breathy], [Chorus - powerful], [Bridge - whispered] — these miss\n"
+                "  the gender modifier and break vocal/story routing.\n"
+                "  Intro/Outro take NO gender tag (they are STORY).\n"
                 "  Use (harmonies) in parentheses for depth. Caption must include 'female vocal'."
             )
 
@@ -675,24 +742,28 @@ class AudioEnhancer:
             f"- For an instrumental intro, use [Intro] with no text, or place [Instrumental] first.\n"
             f"- Use UPPERCASE lines for high-intensity vocal moments.\n"
             f"- If the idea mentions an instrumental solo or break, use the closest standard tag.\n"
-            f"- CRITICAL: Match lyrics length AND section count to duration! Too many lyrics or\n"
-            f"  sections = ACE-Step crams/garbles them and barely any of it is actually sung.\n"
-            f"  Approximate total sung lines by duration (at ~120 BPM):\n"
-            f"  20-30s: ~4-6 lines, [Intro] (empty) + 1-2 SUNG sections (e.g. 1 short verse or 1 chorus)\n"
-            f"  45s: ~8-10 lines, [Intro] + ≤3 sung sections (short verse + chorus + optional outro)\n"
-            f"  60s: ~12-16 lines total ([Intro] + verse + chorus + short [Outro])\n"
-            f"  90s: ~18-26 lines total ([Intro] + verse + chorus + verse + chorus + [Outro])\n"
-            f"  120s: ~24-32 lines total ([Intro] + 2 verses + 2 choruses + bridge + [Outro])\n"
-            f"  180s: ~36-48 lines total ([Intro] + full structure with multiple verses + [Outro])\n"
-            f"  240s: ~48-64 lines total ([Intro] + extended structure, 4+ verses, multiple chorus repeats, solos + [Outro])\n"
-            f"  At higher BPM (140+), you can fit ~20% more lines. At lower BPM (80-), use ~20% fewer.\n"
-            f"  Instrumental/solo sections take time but need no lyrics — count them as ~4-8 lines of time.\n"
-            f"- HARD RULE (never violate): output at most as many sections as the duration can\n"
-            f"  realistically sing at normal pace. ≤30s → [Intro] (empty) + max 1-2 sung sections;\n"
-            f"  ≤45s → [Intro] + max 3 sung sections; ≤60s → [Intro] + verse + chorus + [Outro].\n"
-            f"  Do NOT emit a full multi-section song (verse/pre-chorus/chorus/verse/bridge/\n"
-            f"  final-chorus) unless duration ≥ 120s. Intro is ALWAYS first and ALWAYS present —\n"
-            f"  drop a verse before you drop the intro.\n"
+            f"- CRITICAL — ACE-Step sweet spots (Stage L4): clean audio renders ONLY at\n"
+            f"  30-60s (short form) and 120-240s (full form). The 60-120s range is\n"
+            f"  STRUCTURALLY WEAK — ACE truncates or garbles. If duration is in 60-120s,\n"
+            f"  treat it as 60s and use the short-form skeleton.\n"
+            f"- HARD SECTION BUDGET (never exceed for the given duration band):\n"
+            f"  30-45s: EXACTLY 4 sections — [Intro] + [Verse 1] + [Chorus] + [Outro].\n"
+            f"           ~6-10 sung lines total. NO Pre-Chorus, NO Bridge, NO Final Chorus.\n"
+            f"  45-75s (covers 60s sweet spot): MAX 6 sections — [Intro] + [Verse 1] +\n"
+            f"           [Pre-Chorus] + [Chorus] + [Verse 2] + [Outro].\n"
+            f"           ~10-16 sung lines. NO Bridge, NO Guitar Solo, NO Final Chorus.\n"
+            f"  75-120s (discouraged band): MAX 8 sections — add [Pre-Chorus repeat] +\n"
+            f"           [Chorus repeat] only. Still NO Bridge, NO Guitar Solo, NO Final Chorus.\n"
+            f"  120-165s: MAX 9 sections — full ABABCB structure +\n"
+            f"           [Bridge] allowed. NO Guitar Solo, NO Final Chorus yet.\n"
+            f"  165-210s: MAX 10 sections — add [Final Chorus] OR [Guitar Solo].\n"
+            f"  210-240s+: MAX 13 sections — [Final Chorus] + [Guitar Solo] + extended outro all allowed.\n"
+            f"- VIOLATION = WASTED AUDIO. ACE-Step renders ONLY what fits in the duration;\n"
+            f"  if you emit Bridge + Guitar Solo + Final Chorus at 60-90s, the bridge onward\n"
+            f"  will be silently dropped. Intro is ALWAYS first and ALWAYS present — drop a\n"
+            f"  verse or skip Pre-Chorus before you drop the intro.\n"
+            f"- Approximate sung lines by duration (at ~120 BPM, scale ±20% with BPM):\n"
+            f"  30s: ~4-6 lines · 45s: ~8-10 · 60s: ~12-16 · 120s: ~24-32 · 180s: ~36-48 · 240s: ~48-64.\n"
             f"- Keep verses to 4 lines max, choruses to 3-4 lines. Fewer lines is safer than too many.\n"
             f"- ALWAYS use a rhyme scheme — genre doesn't matter. Default AABB (couplets) or ABAB.\n"
             f"  Line-ending words must rhyme. Never write free verse unless the user explicitly requests it.\n"
@@ -779,6 +850,166 @@ class AudioEnhancer:
             settings.structure_profile = sp
         elif not settings.structure_profile:
             settings.structure_profile = _default_structure_profile(settings.genre)
+
+        # Stage L4: enforce ACE-Step section budget post-LLM.
+        self._enforce_section_budget(settings)
+
+        # Stage L6: enforce gender modifier on every vocal section.
+        self._enforce_gender_tags(settings)
+
+    def _enforce_section_budget(self, settings: AudioSettings) -> None:
+        """Drop optional sections when LLM exceeds the duration-band budget.
+
+        ACE-Step truncates audio when too many sections are requested for the
+        chosen duration. We strip Guitar Solo / Final Chorus / Bridge /
+        Pre-Chorus (in that order of dropability) until the section count fits
+        the budget for the configured duration. Intro + first verse + first
+        chorus + last section are always preserved.
+        """
+        max_sections, allow_bridge, allow_solo, allow_final_chorus = _section_budget_for(settings.duration)
+        if not settings.structure:
+            return
+        original = list(settings.structure)
+
+        def is_pattern(tag: str, pat_key: str) -> bool:
+            lowered = tag.lower().strip()
+            for pat, key in _OPTIONAL_SECTION_PATTERNS:
+                if key == pat_key and re.search(pat, lowered):
+                    return True
+            return False
+
+        # First: hard-drop sections that the band does not allow at all.
+        if not allow_solo:
+            settings.structure = [t for t in settings.structure if not is_pattern(t, "solo")]
+        if not allow_final_chorus:
+            settings.structure = [t for t in settings.structure if not is_pattern(t, "final_chorus")]
+        if not allow_bridge:
+            settings.structure = [t for t in settings.structure if not is_pattern(t, "bridge")]
+
+        # Then drop extras in priority order until we fit the budget.
+        # Extras the current band explicitly ALLOWS get protected until last —
+        # drop decoration first (instrumental fills + pre-chorus repeats),
+        # then sacrifice the named extras only if still over.
+        drop_order = ["instrumental", "pre_chorus"]
+        if not allow_solo:
+            drop_order.append("solo")
+        if not allow_final_chorus:
+            drop_order.append("final_chorus")
+        if not allow_bridge:
+            drop_order.append("bridge")
+        drop_order.extend(["solo", "final_chorus", "bridge"])  # last-resort sacrifices
+        for key in drop_order:
+            if len(settings.structure) <= max_sections:
+                break
+            # Drop one occurrence of this pattern at a time, from the END.
+            for i in range(len(settings.structure) - 1, -1, -1):
+                if is_pattern(settings.structure[i], key):
+                    settings.structure.pop(i)
+                    if len(settings.structure) <= max_sections:
+                        break
+
+        # If still over budget after dropping all extras, trim from the middle
+        # (after the second chorus), preserving intro + first verse/chorus + outro.
+        while len(settings.structure) > max_sections and len(settings.structure) > 3:
+            settings.structure.pop(len(settings.structure) // 2)
+
+        # Sync the lyrics dict: drop entries for removed structure tags.
+        kept = set(settings.structure)
+        for tag in list(settings.lyrics.keys()):
+            if tag not in kept:
+                settings.lyrics.pop(tag, None)
+
+        if settings.structure != original:
+            logger.warning(
+                "[Stage L4] section budget: duration=%ss max=%s, trimmed %s -> %s "
+                "(removed %s)",
+                settings.duration, max_sections,
+                len(original), len(settings.structure),
+                [t for t in original if t not in settings.structure],
+            )
+
+    # ── Stage L6: gender-tag enforcement on vocal sections ──────────
+
+    # Sections that carry sung lyrics and therefore MUST carry a gender
+    # modifier (male / female / duet). Intro and Outro are STORY (Stage L8)
+    # and do NOT take a gender tag even if they carry lyrics. Instrumental
+    # blocks are listed in INSTRUMENTAL_BLOCKS at the top of this module.
+    _VOCAL_TAG_PREFIXES = (
+        "verse", "pre-chorus", "prechorus", "chorus", "bridge",
+        "final chorus", "post-chorus", "postchorus", "hook", "refrain",
+    )
+
+    _GENDER_TOKENS = ("male", "female", "duet", "both", "together")
+
+    def _enforce_gender_tags(self, settings: AudioSettings) -> None:
+        """Ensure every vocal section's label carries a gender modifier.
+
+        Style-only tags like [Chorus - anthemic] get an inferred gender
+        prepended so that the downstream music-video segmenter classifies
+        the row as VOCAL with a proper male/female/duet bucket instead of
+        STORY. Inference order:
+          1. settings.voice when fixed (male / female).
+          2. majority gender across already-tagged sections.
+          3. default 'male' (single-singer fallback).
+
+        Instrumental tags (Guitar Solo, Piano Interlude, etc.) are left alone.
+        Intro/Outro are left alone (Stage L8 forces them to STORY downstream).
+        """
+        if not settings.structure:
+            return
+
+        existing_genders = []
+        for label in settings.structure:
+            mod_tokens = [tok.strip().lower() for tok in label.split(" - ")[1:]]
+            for tok in mod_tokens:
+                if tok in self._GENDER_TOKENS:
+                    existing_genders.append(tok)
+                    break
+
+        if settings.voice in ("male", "female"):
+            default_gender = settings.voice
+        elif existing_genders:
+            from collections import Counter
+            default_gender = Counter(existing_genders).most_common(1)[0][0]
+            if default_gender in ("both", "together"):
+                default_gender = "duet"
+        else:
+            default_gender = "male"
+
+        new_structure: list[str] = []
+        new_lyrics: dict[str, str] = {}
+        injected = 0
+        for label in settings.structure:
+            lowered = label.lower().strip()
+            head = lowered.split(" - ", 1)[0].strip()
+            is_intro_outro = head.startswith("intro") or head.startswith("outro")
+            is_instrumental = any(head.startswith(b.lower()) for b in INSTRUMENTAL_BLOCKS)
+            is_vocal_tag = any(head.startswith(p) for p in self._VOCAL_TAG_PREFIXES)
+
+            lyrics_text = (settings.lyrics.get(label) or "").strip()
+            has_lyrics = bool(lyrics_text)
+            mod_tokens = [tok.strip().lower() for tok in label.split(" - ")[1:]]
+            has_gender = any(tok in self._GENDER_TOKENS for tok in mod_tokens)
+
+            new_label = label
+            if not is_intro_outro and not is_instrumental and is_vocal_tag and has_lyrics and not has_gender:
+                # Inject gender as the FIRST modifier after the section name.
+                parts = [p.strip() for p in label.split(" - ")]
+                head_part = parts[0]
+                rest = parts[1:]
+                new_label = " - ".join([head_part, default_gender] + rest)
+                injected += 1
+
+            new_structure.append(new_label)
+            new_lyrics[new_label] = settings.lyrics.get(label, "")
+
+        if injected:
+            settings.structure = new_structure
+            settings.lyrics = new_lyrics
+            logger.warning(
+                "[Stage L6] gender-tag injection: added '%s' to %d vocal section(s)",
+                default_gender, injected,
+            )
 
     def _parse_lyrics_into_settings(self, raw_lyrics: str, settings: AudioSettings):
         """Parse raw lyrics string with structure tags into settings."""
