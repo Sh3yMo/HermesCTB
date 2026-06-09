@@ -302,11 +302,19 @@
   },
   "759:1065": {
     "inputs": {
-      "sigmas": "1., 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+      "steps": 14,
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "stretch": true,
+      "terminal": 0.1,
+      "latent": [
+        "759:1055",
+        0
+      ]
     },
-    "class_type": "ManualSigmas",
+    "class_type": "LTXVScheduler",
     "_meta": {
-      "title": "ManualSigmas"
+      "title": "LTXVScheduler (Pass 1, 14 steps, R3G4L)"
     }
   },
   "759:1064": {
@@ -1262,11 +1270,16 @@
   },
   "759:1069": {
     "inputs": {
-      "sigmas": "0.8025, 0.6332, 0.3425, 0.0"
+      "start": 0.75,
+      "end": 0,
+      "sigmas": [
+        "759:1069_base",
+        0
+      ]
     },
-    "class_type": "ManualSigmas",
+    "class_type": "Sigmas Rescale",
     "_meta": {
-      "title": "ManualSigmas"
+      "title": "Sigmas Rescale (Pass 2, start=0.75, R3G4L)"
     }
   },
   "759:1073": {
@@ -1328,6 +1341,21 @@
     "class_type": "FinalFrameSelector",
     "_meta": {
       "title": "Final Frame Selector"
+    }
+  },
+  "759:1069_base": {
+    "inputs": {
+      "scheduler": "linear_quadratic",
+      "steps": 6,
+      "denoise": 0.45,
+      "model": [
+        "759:1075",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler (Pass 2 base, 3 steps, linear_quadratic, denoise 0.45)"
     }
   }
 }
