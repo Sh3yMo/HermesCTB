@@ -508,6 +508,16 @@ class MVDirector:
             return f"story tableau honoring archetype: {(profile.get('story_archetypes') or ['narrative'])[0]}"
         return f"{shot} framing matching mood {mood}"
 
+    # Stage M: universal mouth-pose forbidden list — applies to every song
+    # regardless of genre. Open-mouth stills cause LTX stroke-like freeze
+    # before the first sung syllable; LTX animates the mouth from audio.
+    _UNIVERSAL_MOUTH_FORBIDDEN: tuple[str, ...] = (
+        "open mouth at frame start",
+        "mid-singing pose in still",
+        "teeth bared",
+        "microphone touching lips",
+    )
+
     def _collect_forbidden(self, profile: dict, song_genre: str) -> list[str]:
         out: list[str] = []
         for fb_genre, fb_list in (profile.get("forbidden_for_genres") or {}).items():
@@ -516,6 +526,7 @@ class MVDirector:
         out.extend(profile.get("_extra_forbidden", []))
         universal = self._universal_forbidden.get(self._canonicalise_genre(song_genre.lower()), [])
         out.extend(universal)
+        out.extend(self._UNIVERSAL_MOUTH_FORBIDDEN)
         return out
 
 
