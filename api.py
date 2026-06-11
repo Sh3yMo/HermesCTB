@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 import httpx
 from contextlib import asynccontextmanager
@@ -604,6 +605,16 @@ def _mca_cfg() -> dict:
 # required image inputs, so queuing it with placeholders would 400.
 MSR_FALLBACK_WORKFLOW = "LTX2.3 - IA2V-PromptRelay"
 
+# Stage O3: the character portrait is a FULL-BODY frontal shot rendered in
+# portrait orientation (it doubles as the character sheet's full-body front
+# cell). Per-segment MCA frames keep the video aspect ratio via an explicit
+# resolution override (MCA output otherwise follows its source image).
+MSR_PORTRAIT_ASPECT = "2:3"
+_PORTRAIT_FULLBODY_SUFFIX = (
+    "full body shot, standing, facing the camera directly, head to toe "
+    "visible, entire figure including footwear in frame"
+)
+
 # RC9: deterministic lip-sync booster appended to VOCAL segment prompts (LLM
 # may forget it; this guarantees it). Story/instrumental segments never get it.
 LIPSYNC_BOOSTER = (
@@ -615,13 +626,21 @@ LIPSYNC_BOOSTER = (
 async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) -> str:
     """Synchronously generate one still image; returns a local file path."""
     from comfyui import randomize_seeds
+    # Stage O7: ALWAYS defrag before a Flux2 still. Job 67ed4b23 ran the
+    # single-role path (no free between ACE-Step/LTX and F2K9B), leaving the
+    # 9B UNet "loaded partially, ~10.5 GB offloaded" → ~15 min per image
+    # instead of <1 min. A full unload + clean reload is far cheaper.
+    await free_comfy()
+    _t0 = time.monotonic()
     wf = load_workflow(workflow_name)
     wf = inject_prompt(wf, prompt)
     if aspect_ratio:
         wf = inject_resolution(wf, aspect_ratio)
     wf = randomize_seeds(wf)
     prompt_id, info = await queue_and_wait_with_recovery(wf)
-    return await download_output_to_local(info, _outputs_dir())
+    path = await download_output_to_local(info, _outputs_dir())
+    print(f"[still] {workflow_name}: {time.monotonic() - _t0:.1f}s")
+    return path
 
 
 async def _resolve_source_image(
@@ -736,7 +755,13 @@ async def _resolve_singer_portrait(
         seed_body = (lyrics_text[:600] + "\n" + theme).strip() or theme
         seed = prefix + seed_body
         t2i = await MV_PROMPTER.generate_character_portrait_prompt(seed, genre)
-        return await _generate_still(_mca_cfg()["t2i_workflow"], t2i, aspect_ratio)
+        # Stage O3: enforce full-body framing deterministically (the LLM is
+        # instructed too, but the suffix guarantees it) and render in portrait
+        # orientation — the image doubles as the MSR sheet's full-body cell.
+        t2i = f"{t2i}, {_PORTRAIT_FULLBODY_SUFFIX}"
+        return await _generate_still(
+            _mca_cfg()["t2i_workflow"], t2i, MSR_PORTRAIT_ASPECT,
+        )
     except Exception as e:
         print(f"[create-mv] {role} portrait generation failed: {e}")
     return None
@@ -878,11 +903,20 @@ async def _resolve_duet_portrait(
         return None
 
 
-async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) -> list[str]:
+async def _run_mca_variants(
+    source_image_path: str,
+    variant_prompts: list[str],
+    aspect_ratio: Optional[str] = None,
+) -> list[str]:
     """One source image -> N variant stills via F2K9B MCA, in VRAM-safe chunks.
 
     Returns local paths aligned to variant_prompts order (best-effort; may be
     shorter if a chunk yields fewer images).
+
+    Stage O3: without `aspect_ratio` the MCA workflow sizes its latent from
+    the source image (GetImageSize -> EmptyFlux2LatentImage). The portrait is
+    now 2:3 full-body, so per-segment startframes MUST pass the video aspect
+    ratio explicitly or every IA2V clip would render in portrait orientation.
     """
     from music_video_pipeline import chunk_list
     from comfyui import randomize_seeds
@@ -894,6 +928,9 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
     src_bytes = open(source_image_path, "rb").read()
     out_dir = os.path.join(_outputs_dir(), "mca_frames")
     os.makedirs(out_dir, exist_ok=True)
+    # Stage O7: ALWAYS defrag before the F2K9B MCA batch (see _generate_still
+    # — partially-offloaded Flux2 sampling cost ~15 min/frame on 67ed4b23).
+    await free_comfy()
     # Unique per-call batch id so concurrent or sequential invocations don't
     # overwrite each other's frame_NNN.png files. Critical for multi-role
     # rendering where this helper is called once per role group.
@@ -902,6 +939,7 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
     idx = 0
 
     for chunk in chunk_list(variant_prompts, cfg["batch_size"]):
+        _t0 = time.monotonic()
         with open(wf_path, encoding="utf-8") as f:
             wf = json.load(f)
         async with httpx.AsyncClient(timeout=30) as client:
@@ -914,6 +952,10 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
             uploaded_name = up.json().get("name")
         wf[cfg["input_node"]]["inputs"]["image"] = uploaded_name
         wf[cfg["prompt_node"]]["inputs"]["prompts"] = "\n".join(p.strip() for p in chunk)
+        if aspect_ratio:
+            # Replaces the GetImageSize-wired latent dimensions with literals
+            # (~1MP, matching the workflow's ImageScaleToTotalPixels budget).
+            wf = inject_resolution(wf, aspect_ratio, megapixels=1.0)
         wf = randomize_seeds(wf)
 
         # Recovery-wrapped queue+wait. wait_for_completion_async's _extract_output
@@ -943,6 +985,9 @@ async def _run_mca_variants(source_image_path: str, variant_prompts: list[str]) 
                 fh.write(view.content)
             results.append(dest)
             idx += 1
+        _dt = time.monotonic() - _t0
+        print(f"[MCA] chunk of {len(chunk)}: {_dt:.1f}s "
+              f"({_dt / max(1, len(chunk)):.1f}s/frame)")
 
     return results
 
@@ -969,6 +1014,7 @@ async def _run_create_music_video(
     artist: str = "",
     msr_ref_mode: str = "sheet",
     msr_prop_paths: Optional[list] = None,
+    wardrobe_enabled: bool = False,
 ) -> None:
     _job_running(jid)
     # Threaded through the whole pipeline so the final output can be named
@@ -1024,6 +1070,9 @@ async def _run_create_music_video(
         #     section boundaries, not mid-vocal) + chorus reuse. Fail-soft:
         #     None -> plan_segments uses legacy proportional segmentation.
         aligned = None
+        # Stage O5: per-section audio gender detection results, persisted to
+        # the job status + segments sidecar for log-free diagnosis.
+        gender_detection_compact: Dict[str, tuple] = {}
         if lyrics_path and os.path.exists(lyrics_path):
             lang_code = to_ace_language(language, brief) or "en"
             try:
@@ -1048,6 +1097,7 @@ async def _run_create_music_video(
                     import re as _re
                     import tempfile as _tempfile
                     from audio_gender_detect import (
+                        _DUET_OVERRIDE_CONF,
                         _segment_audio,
                         _classify_section,
                         refine_section_boundaries,
@@ -1143,6 +1193,13 @@ async def _run_create_music_video(
                                         r' - (male|female|duet)\b', _label
                                     ))
                                     _required = _HIGH_CONF if _has_explicit else _LOW_CONF
+                                    # Stage O5 duet bias: duet confidence is
+                                    # 2×min(ratio) and caps at 1.0 only for a
+                                    # perfect 50/50 split — gate it at 0.5 so
+                                    # alternating duets can actually override
+                                    # a solo lyrics label.
+                                    if _g == "duet":
+                                        _required = _DUET_OVERRIDE_CONF
                                     if _conf < _required:
                                         print(
                                             f"[Fix 36] keeping LLM label "
@@ -1157,6 +1214,9 @@ async def _run_create_music_video(
                                     )
                                     if _new_label != _label:
                                         _sec["label"] = _new_label
+                                        # Stage O5: keep the detection visible
+                                        # under the post-override label too.
+                                        detected[_new_label] = _result
                                         corrections += 1
                                         print(
                                             f"[Fix 36] overriding {_label!r} "
@@ -1168,6 +1228,14 @@ async def _run_create_music_video(
                             _detected_compact = {
                                 k: (v[0], round(v[1], 2)) for k, v in detected.items()
                             }
+                            # Stage O5: expose the detection on the job status
+                            # and remember it for the segments JSON sidecar —
+                            # diagnosable without server-log access.
+                            gender_detection_compact = _detected_compact
+                            try:
+                                JOBS[jid]["gender_detection"] = _detected_compact
+                            except Exception:
+                                pass
                             print(f"[create-mv] gender detection: {_detected_compact}; "
                                   f"gender corrections: {corrections}; "
                                   f"mid-section splits: {mid_splits}; "
@@ -1189,6 +1257,9 @@ async def _run_create_music_video(
             time_of_day_arc=(time_of_day_arc or None),
             wardrobe_arc=(wardrobe_arc or None),
             duet_kind=(duet if duet in ("ff", "mm") else "mixed"),
+            # Stage O4: default False — one fixed outfit from the character
+            # reference images (no per-segment wardrobe arcs/tags).
+            wardrobe_enabled=wardrobe_enabled,
         )
 
         seg_dir = os.path.join(tmp_dir, "segments")
@@ -1344,6 +1415,141 @@ async def _run_create_music_video(
                     aspect_ratio, consistent_character, tmp_dir,
                 )
 
+        # 3b. MSR (Multiple Subject Reference): when the selected workflow
+        # contains a LiconMSR node, build the reference assets once per song —
+        # per-role character refs (multi-view via MCA, optionally composed
+        # into one character sheet), one background still per unique
+        # background_prompt (LLM-planned per section; RC8 reuse rows share
+        # the anchor's prompt via Stage L7 inheritance, hence the same image),
+        # and optional prop refs (user uploads win over the LLM prop).
+        # Stage O2: this block runs BEFORE the per-segment MCA frames (3c) so
+        # every reference asset (sheet, backgrounds) exists before any
+        # segment-bound generation starts.
+        msr_active = False
+        msr_char_refs: Dict[str, list] = {}
+        msr_char_descs: Dict[str, str] = {}
+        msr_prop_refs: list = []
+        msr_bg_by_seg: Dict[int, str] = {}
+        try:
+            msr_active = has_msr_nodes(load_workflow(video_workflow_id))
+        except Exception as e:
+            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
+        if msr_active:
+            from msr_refs import (
+                MSR_VIEW_PROMPTS,
+                background_prompt_mentions_people,
+                compose_character_sheet,
+                derive_background_prompt,
+            )
+            msr_dir = os.path.join(_outputs_dir(), "msr_refs")
+            os.makedirs(msr_dir, exist_ok=True)
+
+            # Props first — their count decides whether views-mode can fit.
+            for p in (msr_prop_paths or []):
+                msr_prop_refs.append((
+                    p, "the signature prop shown in the reference, kept visually identical",
+                ))
+            if not msr_prop_refs:
+                llm_prop = next((s.prop_prompt for s in segments if s.prop_prompt), "")
+                if llm_prop:
+                    try:
+                        await free_comfy()
+                        prop_img = await _generate_still(
+                            _mca_cfg()["t2i_workflow"],
+                            f"product still of {llm_prop}, single object, centered, "
+                            f"plain neutral background, no people",
+                            "1:1",
+                        )
+                        msr_prop_refs.append((prop_img, llm_prop))
+                        print(f"[MSR] LLM prop generated: {llm_prop!r}")
+                    except Exception as e:
+                        print(f"[MSR] prop still generation failed (non-fatal): {e}")
+
+            ref_mode = msr_ref_mode if msr_ref_mode in ("sheet", "views") else "sheet"
+            char_portraits = {
+                r: p for r, p in portraits.items() if p and r and r != "duet"
+            }
+            if not char_portraits and source:
+                # Legacy single-portrait path: one implicit lead character;
+                # allocate_msr_subjects falls back to it for every role.
+                char_portraits["lead"] = source
+            need_duet = any(extract_section_role(s.label) == "duet" for s in segments)
+            if ref_mode == "views" and (need_duet or msr_prop_refs):
+                print("[MSR] views mode would overflow the 4 subject slots "
+                      f"(duet={need_duet}, props={len(msr_prop_refs)}) -> forcing sheet mode")
+                ref_mode = "sheet"
+
+            _role_desc = {
+                "male": "the male singer", "female": "the female singer",
+                "male2": "the second male singer", "female2": "the second female singer",
+                "lead": "the lead performer",
+            }
+            for r, portrait in char_portraits.items():
+                views: list = []
+                try:
+                    await free_comfy()
+                    # Stage O3: the portrait IS the full-body front view; MCA
+                    # renders only the 4 missing views, in the same portrait
+                    # orientation so the sheet cells match.
+                    views = await _run_mca_variants(
+                        portrait, MSR_VIEW_PROMPTS,
+                        aspect_ratio=MSR_PORTRAIT_ASPECT,
+                    )
+                except Exception as e:
+                    print(f"[MSR] view generation for role {r!r} failed; "
+                          f"falling back to plain portrait: {e}")
+                desc = _role_desc.get(r, "the performer")
+                if ref_mode == "sheet" and views:
+                    sheet = compose_character_sheet(
+                        [portrait] + views,
+                        os.path.join(msr_dir, f"sheet_{r}_{jid[:8]}.png"),
+                    )
+                    msr_char_refs[r] = [sheet]
+                    msr_char_descs[r] = (
+                        f"{desc} (character turnaround sheet: full body front, "
+                        f"back and side views, face close-up front and side)"
+                    )
+                else:
+                    msr_char_refs[r] = (([portrait] + views)[:4]
+                                        if ref_mode == "views" and views
+                                        else [portrait])
+                    msr_char_descs[r] = desc
+
+            # Backgrounds: one T2I still per unique prompt (sections sharing a
+            # location are instructed to emit identical background_prompt).
+            bg_cache: Dict[str, str] = {}
+            for i, s in enumerate(segments):
+                bgp = (s.background_prompt or "").strip()
+                if not bgp:
+                    # Stage O1: the LLM is now required to emit this field;
+                    # log when the neutral fallback has to step in anyway.
+                    bgp = derive_background_prompt(s.frame_variant_prompt or s.prompt)
+                    print(f"[MSR] segment {i}: LLM omitted background_prompt "
+                          f"-> neutral fallback: {bgp!r}")
+                elif background_prompt_mentions_people(bgp):
+                    # Stage O1 defense-in-depth: a background prompt that
+                    # mentions a person would render a person — and the MSR
+                    # background slot must never contain one (character bleed).
+                    print(f"[MSR] segment {i}: background_prompt mentions "
+                          f"people ({bgp!r}) -> neutral fallback")
+                    bgp = derive_background_prompt(bgp)
+                s.background_prompt = bgp
+                if bgp not in bg_cache:
+                    try:
+                        await free_comfy()
+                        bg_cache[bgp] = await _generate_still(
+                            _mca_cfg()["t2i_workflow"],
+                            f"{bgp}, no people, no characters",
+                            aspect_ratio,
+                        )
+                    except Exception as e:
+                        print(f"[MSR] background generation failed for segment {i} "
+                              f"(segment falls back to non-MSR workflow): {e}")
+                        bg_cache[bgp] = ""
+                msr_bg_by_seg[i] = bg_cache[bgp]
+            print(f"[MSR] assets ready: mode={ref_mode}, characters={list(msr_char_refs)}, "
+                  f"props={len(msr_prop_refs)}, unique backgrounds={len(bg_cache)}")
+
         # RC8 chorus reuse: only generate MCA frames for non-repeated segments.
         # Multi-role path: each anchor gets the portrait matching its role.
         # None-role anchors (Intro/Outro/Fade) are reassigned to their nearest
@@ -1450,124 +1656,17 @@ async def _run_create_music_video(
                 ]
                 if is_multi_role:
                     await free_comfy()  # RC10 VRAM hygiene between MCA passes
-                frames = await _run_mca_variants(portrait, prompts)
+                # Stage O3: explicit video aspect — the 2:3 full-body portrait
+                # must not dictate the startframe (and thus clip) orientation.
+                frames = await _run_mca_variants(
+                    portrait, prompts, aspect_ratio=aspect_ratio,
+                )
                 for k, i in enumerate(idxs):
                     frame_by_seg[i] = frames[k] if k < len(frames) else portrait
             for i, s in enumerate(segments):
                 if s.reuse_of is not None:
                     frame_by_seg[i] = frame_by_seg.get(s.reuse_of, source)
 
-        # 3b. MSR (Multiple Subject Reference): when the selected workflow
-        # contains a LiconMSR node, build the reference assets once per song —
-        # per-role character refs (multi-view via MCA, optionally composed
-        # into one character sheet), one background still per unique
-        # background_prompt (LLM-planned per section; RC8 reuse rows share
-        # the anchor's prompt via Stage L7 inheritance, hence the same image),
-        # and optional prop refs (user uploads win over the LLM prop).
-        msr_active = False
-        msr_char_refs: Dict[str, list] = {}
-        msr_char_descs: Dict[str, str] = {}
-        msr_prop_refs: list = []
-        msr_bg_by_seg: Dict[int, str] = {}
-        try:
-            msr_active = has_msr_nodes(load_workflow(video_workflow_id))
-        except Exception as e:
-            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
-        if msr_active:
-            from msr_refs import (
-                MSR_VIEW_PROMPTS,
-                compose_character_sheet,
-                derive_background_prompt,
-            )
-            msr_dir = os.path.join(_outputs_dir(), "msr_refs")
-            os.makedirs(msr_dir, exist_ok=True)
-
-            # Props first — their count decides whether views-mode can fit.
-            for p in (msr_prop_paths or []):
-                msr_prop_refs.append((
-                    p, "the signature prop shown in the reference, kept visually identical",
-                ))
-            if not msr_prop_refs:
-                llm_prop = next((s.prop_prompt for s in segments if s.prop_prompt), "")
-                if llm_prop:
-                    try:
-                        await free_comfy()
-                        prop_img = await _generate_still(
-                            _mca_cfg()["t2i_workflow"],
-                            f"product still of {llm_prop}, single object, centered, "
-                            f"plain neutral background, no people",
-                            "1:1",
-                        )
-                        msr_prop_refs.append((prop_img, llm_prop))
-                        print(f"[MSR] LLM prop generated: {llm_prop!r}")
-                    except Exception as e:
-                        print(f"[MSR] prop still generation failed (non-fatal): {e}")
-
-            ref_mode = msr_ref_mode if msr_ref_mode in ("sheet", "views") else "sheet"
-            char_portraits = {
-                r: p for r, p in portraits.items() if p and r and r != "duet"
-            }
-            if not char_portraits and source:
-                # Legacy single-portrait path: one implicit lead character;
-                # allocate_msr_subjects falls back to it for every role.
-                char_portraits["lead"] = source
-            need_duet = any(extract_section_role(s.label) == "duet" for s in segments)
-            if ref_mode == "views" and (need_duet or msr_prop_refs):
-                print("[MSR] views mode would overflow the 4 subject slots "
-                      f"(duet={need_duet}, props={len(msr_prop_refs)}) -> forcing sheet mode")
-                ref_mode = "sheet"
-
-            _role_desc = {
-                "male": "the male singer", "female": "the female singer",
-                "male2": "the second male singer", "female2": "the second female singer",
-                "lead": "the lead performer",
-            }
-            for r, portrait in char_portraits.items():
-                views: list = []
-                try:
-                    await free_comfy()
-                    views = await _run_mca_variants(portrait, MSR_VIEW_PROMPTS)
-                except Exception as e:
-                    print(f"[MSR] view generation for role {r!r} failed; "
-                          f"falling back to plain portrait: {e}")
-                desc = _role_desc.get(r, "the performer")
-                if ref_mode == "sheet" and views:
-                    sheet = compose_character_sheet(
-                        views, os.path.join(msr_dir, f"sheet_{r}_{jid[:8]}.png"),
-                    )
-                    msr_char_refs[r] = [sheet]
-                    msr_char_descs[r] = (
-                        f"{desc} (character turnaround sheet: front, back, "
-                        f"side views and face close-up)"
-                    )
-                else:
-                    msr_char_refs[r] = (views[:4] if ref_mode == "views" and views
-                                        else [portrait])
-                    msr_char_descs[r] = desc
-
-            # Backgrounds: one T2I still per unique prompt (sections sharing a
-            # location are instructed to emit identical background_prompt).
-            bg_cache: Dict[str, str] = {}
-            for i, s in enumerate(segments):
-                bgp = (s.background_prompt or "").strip() or derive_background_prompt(
-                    s.frame_variant_prompt or s.prompt,
-                )
-                s.background_prompt = bgp
-                if bgp not in bg_cache:
-                    try:
-                        await free_comfy()
-                        bg_cache[bgp] = await _generate_still(
-                            _mca_cfg()["t2i_workflow"],
-                            f"{bgp}, no people, no characters",
-                            aspect_ratio,
-                        )
-                    except Exception as e:
-                        print(f"[MSR] background generation failed for segment {i} "
-                              f"(segment falls back to non-MSR workflow): {e}")
-                        bg_cache[bgp] = ""
-                msr_bg_by_seg[i] = bg_cache[bgp]
-            print(f"[MSR] assets ready: mode={ref_mode}, characters={list(msr_char_refs)}, "
-                  f"props={len(msr_prop_refs)}, unique backgrounds={len(bg_cache)}")
 
         # Optional pause gate: lets the operator hold a job here (after T2I +
         # Flux2 + MCA, before the loud LTX video loop kicks off) by touching
@@ -1722,6 +1821,10 @@ async def _run_create_music_video(
             seg_records = []
             for s in segments:
                 lbl = getattr(s, "label", "") or ""
+                # Stage O5: per-section audio detection (gender, confidence)
+                # so lyrics-tag vs. audio vs. plan mismatches are diagnosable
+                # straight from the sidecar.
+                _gd = gender_detection_compact.get(lbl, ("", 0.0))
                 seg_records.append({
                     "index": int(getattr(s, "index", 0)),
                     "start": float(getattr(s, "start_time", 0.0)),
@@ -1729,6 +1832,8 @@ async def _run_create_music_video(
                     "section_label": lbl,
                     "is_vocal": bool(getattr(s, "lyrics", "")),
                     "portrait_role": _portrait_role(lbl),
+                    "audio_gender": _gd[0],
+                    "audio_gender_conf": _gd[1],
                     "video_path": getattr(s, "video_clip", "") or "",
                     "prompt_snippet": (getattr(s, "prompt", "") or "")[:200],
                     "reuse_of": getattr(s, "reuse_of", None),
@@ -1767,6 +1872,7 @@ async def create_music_video(
     duet: str = Form(""),
     time_of_day_arc: str = Form(""),
     wardrobe_arc: str = Form(""),
+    wardrobe_enabled: bool = Form(False),  # Stage O4: False (default) = one fixed outfit from the character reference images; True re-enables Fix-30 wardrobe arcs.
     artist: str = Form(""),
     msr_ref_mode: str = Form("sheet"),  # MSR: "sheet" = one composed character sheet per role, "views" = 4 single-view refs. Only used when video_workflow_id contains a LiconMSR node.
     msr_prop_images: Optional[List[UploadFile]] = File(None),  # MSR: optional prop reference uploads, kept identical across all segments (win over the LLM-planned prop).
@@ -1826,6 +1932,7 @@ async def create_music_video(
         source_description, duration, video_workflow_id, crossfade_duration,
         aspect_ratio, language, consistent_character, tmp_dir, duet, tod_arc,
         wardrobe_arc_eff, artist, msr_ref_mode, msr_prop_paths,
+        wardrobe_enabled=wardrobe_enabled,
     ))
     return {"job_id": jid}
 

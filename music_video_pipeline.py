@@ -2512,6 +2512,7 @@ class MusicVideoPrompter:
         time_of_day_arc: Optional[str] = None,
         wardrobe_arc: Optional[str] = None,
         duet_kind: str = "mixed",
+        wardrobe_enabled: bool = False,
     ) -> List[Segment]:
         """Plan creative, variably-sized segments from lyrics + theme.
 
@@ -2549,7 +2550,21 @@ class MusicVideoPrompter:
         # User override > LLM mini-call > genre default. The arc is later
         # expanded to a per-segment outfit plan injected into the LLM
         # prompt AND appended to each final prompt as a clothing tag.
-        if wardrobe_arc and wardrobe_arc in WARDROBE_ARCS:
+        # Stage O4: wardrobe_enabled=False (default) disables the arc system
+        # entirely — ONE fixed outfit for the whole video, defined by the
+        # character reference images. Empty slot keys make every downstream
+        # wardrobe helper (_append_wardrobe_tag, duet outfit anchor) a no-op.
+        if not wardrobe_enabled:
+            wardrobe_arc_key = "disabled"
+            wardrobe_human = (
+                "wardrobe arcs DISABLED — one fixed outfit for the entire "
+                "video; NEVER describe, change or invent clothing in any "
+                "prompt: identity and clothing come from the character "
+                "reference images"
+            )
+            print("[Stage O4] wardrobe arcs disabled — "
+                  "fixed single outfit from the character reference.")
+        elif wardrobe_arc and wardrobe_arc in WARDROBE_ARCS:
             wardrobe_arc_key = wardrobe_arc
             print(f"[Fix 30] wardrobe arc: '{wardrobe_arc_key}' (caller override).")
         else:
@@ -2560,8 +2575,9 @@ class MusicVideoPrompter:
                 theme=theme, genre=genre,
                 lyrics_text=lyrics_text, total_duration=total_duration,
             )
-        wardrobe_template = WARDROBE_ARCS.get(wardrobe_arc_key) or WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
-        wardrobe_human = " → ".join(wardrobe_template)
+        if wardrobe_enabled:
+            wardrobe_template = WARDROBE_ARCS.get(wardrobe_arc_key) or WARDROBE_ARCS[_DEFAULT_WARDROBE_ARC]
+            wardrobe_human = " → ".join(wardrobe_template)
 
         # Stage I (2026-06-07 evening): resolve the genre-specific dance
         # vocabulary once and reuse in both aligned + proportional system
@@ -2575,14 +2591,22 @@ class MusicVideoPrompter:
             rows = build_aligned_timeline(aligned_sections, min_seg, cap, total_duration)
             if rows:
                 tod_plan = _expand_tod_plan(arc_key, len(rows))
-                wardrobe_plan = _expand_wardrobe_plan(wardrobe_arc_key, len(rows))
+                # Stage O4: disabled -> empty slot keys (all helpers no-op).
+                wardrobe_plan = (
+                    _expand_wardrobe_plan(wardrobe_arc_key, len(rows))
+                    if wardrobe_enabled else [""] * len(rows)
+                )
                 tod_listing = "\n".join(
                     f"  {i}. {state} — {TIME_OF_DAY_STATES.get(state, '')}"
                     for i, state in enumerate(tod_plan)
                 )
-                wardrobe_listing = "\n".join(
-                    f"  {i}. {slot} — {WARDROBE_STATES.get(slot, '')}"
-                    for i, slot in enumerate(wardrobe_plan)
+                wardrobe_listing = (
+                    "\n".join(
+                        f"  {i}. {slot} — {WARDROBE_STATES.get(slot, '')}"
+                        for i, slot in enumerate(wardrobe_plan)
+                    )
+                    if wardrobe_enabled
+                    else "  (none — one fixed outfit from the character reference images)"
                 )
 
                 # ── Stage L3: dominant-gender lock ─────────────────────────
@@ -2810,9 +2834,11 @@ class MusicVideoPrompter:
                     "  • global = camera + lighting + grading only (no "
                     "wardrobe, no identity — those come from the image and "
                     "the per-beat text).\n\n"
-                    "OPTIONAL FIELD background_prompt (MSR scene reference — "
-                    "a SHORT standalone description of the segment's location/"
-                    "backdrop WITHOUT any people, e.g. 'neon-lit rain-slick "
+                    "REQUIRED FIELD background_prompt (MSR scene reference — "
+                    "you MUST emit it for EVERY row): a SHORT standalone "
+                    "description of the segment's location/backdrop with "
+                    "STRICTLY NO people, no characters, no faces, no clothing "
+                    "— scenery and lighting only, e.g. 'neon-lit rain-slick "
                     "alley at night, shallow depth of field'. Under 25 words. "
                     "Consistent with the segment's lighting state. Sections "
                     "that share a location (e.g. repeated choruses) MUST use "
@@ -2851,11 +2877,27 @@ class MusicVideoPrompter:
                 # diagnosable next run); if still short, fall through to the
                 # legacy proportional path — which produces real scene prompts —
                 # rather than degrading to raw lyrics.
-                if len(specs) < len(rows):
-                    print(f"Warning: aligned segment plan returned {len(specs)}/{len(rows)} "
-                          f"specs; retrying once.\nFull response:\n{resp}")
+                # Stage O1: background_prompt is REQUIRED per row (MSR scene
+                # reference). Missing fields count as an incomplete plan and
+                # trigger the same single retry; rows still missing afterwards
+                # are covered by the neutral fallback in the render loop.
+                def _bg_missing(_specs: list) -> list:
+                    return [
+                        _j for _j in range(min(len(_specs), len(rows)))
+                        if not str(_specs[_j].get("background_prompt", "")).strip()
+                    ]
+
+                if len(specs) < len(rows) or _bg_missing(specs):
+                    print(f"Warning: aligned segment plan incomplete "
+                          f"({len(specs)}/{len(rows)} specs, "
+                          f"background_prompt missing on rows {_bg_missing(specs)}); "
+                          f"retrying once.\nFull response:\n{resp}")
                     resp = await self._call_openrouter(messages=aligned_msgs, max_tokens=10000)
                     specs = parse_segment_plan(resp)
+                    if _bg_missing(specs):
+                        print(f"Warning: background_prompt still missing on rows "
+                              f"{_bg_missing(specs)} after retry; neutral "
+                              f"fallback will cover those segments.")
                 if len(specs) >= len(rows):
                     # Stage L7: reuse rows inherit the anchor's prompts so
                     # downstream chorus-frame-reuse (RC8) stays coherent. The
@@ -3084,10 +3126,14 @@ class MusicVideoPrompter:
             f"Lighting progresses through this arc across the video; every "
             f"segment must describe lighting consistent with its position in "
             f"the arc. Never jump backward in time.\n"
-            f"Wardrobe arc (Fix 30 — graded): {wardrobe_arc_key} ({wardrobe_human}). "
-            f"The performer wears each slot's outfit for one or more consecutive "
-            f"segments — keep the SAME outfit until the slot changes; do NOT "
-            f"invent a new outfit per segment.\n\n"
+            + (
+                f"Wardrobe arc (Fix 30 — graded): {wardrobe_arc_key} ({wardrobe_human}). "
+                f"The performer wears each slot's outfit for one or more consecutive "
+                f"segments — keep the SAME outfit until the slot changes; do NOT "
+                f"invent a new outfit per segment.\n\n"
+                if wardrobe_enabled else
+                f"Wardrobe: {wardrobe_human}.\n\n"
+            ) +
             f"Lyrics (with [section] tags):\n{lyrics_text or '(instrumental — no lyrics)'}\n\n"
             "Return the JSON array now."
         )
@@ -3100,21 +3146,31 @@ class MusicVideoPrompter:
             "Lighting only moves FORWARD across segments — never jump "
             "backward in time. Mention the appropriate lighting in BOTH "
             "video_prompt and frame_variant_prompt for each segment.\n"
-            "WARDROBE COHERENCE (Fix 30 — graded): the song is locked to the "
-            f"'{wardrobe_arc_key}' wardrobe arc ({wardrobe_human}). The "
-            "performer wears each outfit slot for one or more consecutive "
-            "segments; clothing only changes at slot boundaries. Within a "
-            "slot the outfit description must be IDENTICAL (same colour, cut, "
-            "accessories). Only pose, location and background vary inside a "
-            "slot. Do NOT invent a new outfit each segment.\n"
-            "ROLE-AWARE WARDROBE (Fix 31 — graded): the wardrobe outfit "
-            "applies ONLY to the named recurring performer of the segment "
-            "(female lead in FEMALE sections, male lead in MALE sections, "
-            "BOTH performers in DUET sections). STORY/instrumental sections "
-            "without a named recurring performer MUST NOT impose the "
-            "performer's outfit on other characters (children, crowds, DJs, "
-            "surfers, etc.) — those subjects wear contextually appropriate "
-            "clothing for their own role."
+            + (
+                "WARDROBE COHERENCE (Fix 30 — graded): the song is locked to the "
+                f"'{wardrobe_arc_key}' wardrobe arc ({wardrobe_human}). The "
+                "performer wears each outfit slot for one or more consecutive "
+                "segments; clothing only changes at slot boundaries. Within a "
+                "slot the outfit description must be IDENTICAL (same colour, cut, "
+                "accessories). Only pose, location and background vary inside a "
+                "slot. Do NOT invent a new outfit each segment.\n"
+                "ROLE-AWARE WARDROBE (Fix 31 — graded): the wardrobe outfit "
+                "applies ONLY to the named recurring performer of the segment "
+                "(female lead in FEMALE sections, male lead in MALE sections, "
+                "BOTH performers in DUET sections). STORY/instrumental sections "
+                "without a named recurring performer MUST NOT impose the "
+                "performer's outfit on other characters (children, crowds, DJs, "
+                "surfers, etc.) — those subjects wear contextually appropriate "
+                "clothing for their own role."
+                if wardrobe_enabled else
+                "FIXED WARDROBE (Stage O4): wardrobe arcs are DISABLED. The "
+                "performer keeps ONE fixed outfit for the entire video — the "
+                "outfit shown in the character reference images. NEVER "
+                "describe, change or invent the performer's clothing in any "
+                "video_prompt or frame_variant_prompt; identity and clothing "
+                "come from the reference images. Other scene characters wear "
+                "contextually appropriate clothing for their own role."
+            )
             + (
                 f"\nSAME-GENDER DUET (Fix 32 — graded): this song is a "
                 f"{'female-female' if duet_kind == 'ff' else 'male-male'} duet. "
@@ -3143,7 +3199,11 @@ class MusicVideoPrompter:
         # Fix 29 + Fix 30: per-segment lighting and wardrobe plans +
         # deterministic post-injection guards.
         tod_plan = _expand_tod_plan(arc_key, len(timeline))
-        wardrobe_plan = _expand_wardrobe_plan(wardrobe_arc_key, len(timeline))
+        # Stage O4: disabled -> empty slot keys (all wardrobe helpers no-op).
+        wardrobe_plan = (
+            _expand_wardrobe_plan(wardrobe_arc_key, len(timeline))
+            if wardrobe_enabled else [""] * len(timeline)
+        )
         segments: List[Segment] = []
         for i, row in enumerate(timeline):
             vp = row.get("video_prompt") or theme
@@ -3328,8 +3388,9 @@ class MusicVideoPrompter:
                     "content": (
                         "Generate a text-to-image prompt for a CLEAN CHARACTER REFERENCE "
                         "PORTRAIT of the singer/performer of this song. Hard requirements: "
-                        "the subject faces the camera directly (front-facing), shown head "
-                        "to waist or full body, face and mouth clearly visible and in sharp "
+                        "the subject faces the camera directly (front-facing), shown FULL "
+                        "BODY, standing, head to toe visible (entire figure including "
+                        "footwear in frame), face and mouth clearly visible and in sharp "
                         "focus, mouth CLOSED in a relaxed neutral expression (lips lightly "
                         "together, no teeth showing, no microphone-held pose, NOT mid-song); "
                         "plain neutral background (white, light grey, or soft studio "
@@ -3349,7 +3410,10 @@ class MusicVideoPrompter:
         # Fix 23: on empty LLM response, NEVER fall back to `seed` — it contains
         # raw lyrics (lyrics[:600]+theme) and the portrait path runs no
         # strip_lyrics, so the T2I model would paint the lyrics onto the portrait.
-        return response or "front-facing studio portrait of a singer, neutral grey background"
+        return response or (
+            "front-facing full body studio shot of a singer, standing, "
+            "head to toe visible, neutral grey background"
+        )
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""

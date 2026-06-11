@@ -531,7 +531,10 @@ def test_portrait_empty_llm_returns_lyrics_free_default():
     prompter._call_openrouter = _empty
     seed = "Rain on the midnight glass\nWatching the neon pass"  # raw lyric lines
     out = asyncio.run(prompter.generate_character_portrait_prompt(seed, "synthwave"))
-    assert out == "front-facing studio portrait of a singer, neutral grey background"
+    # Stage O3: the default is now a FULL-BODY studio shot (the portrait
+    # doubles as the character sheet's full-body front cell).
+    assert out == ("front-facing full body studio shot of a singer, standing, "
+                   "head to toe visible, neutral grey background")
     assert "midnight glass" not in out
 
 

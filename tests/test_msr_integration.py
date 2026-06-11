@@ -242,10 +242,53 @@ def test_build_msr_reference_block():
 
 
 def test_derive_background_prompt():
-    out = derive_background_prompt("a female singer on a rooftop at dusk")
+    # Stage O1: segment text must NEVER be copied into the background prompt
+    # (a character description overrides the "no people" prefix and Flux
+    # renders a person into the MSR background slot — job ffd3b9a6).
+    seg = (
+        "Close-up of a female singer with bold black tribal tattoos, "
+        "wearing a neon-pink oversized hoodie, on a rooftop at night"
+    )
+    out = derive_background_prompt(seg)
     assert "no people" in out
-    assert "rooftop" in out
-    assert derive_background_prompt("")  # non-empty fallback
+    assert "rooftop" in out  # scene hint survives as a neutral phrase
+    for leak in ("singer", "tattoo", "hoodie", "wearing", "female", "close-up"):
+        assert leak not in out.lower()
+    assert derive_background_prompt("")  # non-empty neutral fallback
+
+
+def test_background_prompt_people_guard():
+    # Stage O1 defense-in-depth: detect person/wardrobe vocabulary so the
+    # render loop can swap in the neutral fallback before the T2I call.
+    from msr_refs import background_prompt_mentions_people
+
+    assert background_prompt_mentions_people(
+        "a female singer wearing a pink hoodie in an alley"
+    )
+    assert background_prompt_mentions_people("portrait of a man at night")
+    # negated exclusions must NOT trip the guard
+    assert not background_prompt_mentions_people(
+        "empty neon-lit alley at night, no people, no characters, no faces"
+    )
+    assert not background_prompt_mentions_people(
+        "rain-slick rooftop overlooking the city skyline at dusk"
+    )
+    assert not background_prompt_mentions_people("")
+
+
+def test_compose_character_sheet_five_views(tmp_path):
+    # Stage O3: full-body front (portrait) + 4 MCA views = 5 cells -> 3x2 grid
+    from PIL import Image
+
+    paths = []
+    for i in range(5):
+        p = tmp_path / f"v{i}.png"
+        Image.new("RGB", (200, 300), (i * 40, 10, 10)).save(p)
+        paths.append(str(p))
+    out = compose_character_sheet(paths, str(tmp_path / "sheet.png"),
+                                  cell_size=128, border=8)
+    with Image.open(out) as sheet:
+        assert sheet.size == (3 * 128 + 4 * 8, 2 * 128 + 3 * 8)
 
 
 def test_msr_view_prompts_closed_mouth():
@@ -287,8 +330,25 @@ def test_segment_carries_msr_fields():
     assert merged.background_prompt == "bg"
 
 
+def test_msr_assets_built_before_segment_frames():
+    # Stage O2: the MSR reference stage (character sheet + backgrounds) must
+    # run BEFORE the per-segment MCA frame stage — in job ffd3b9a6 segment
+    # frames and even first renders existed before the sheet was composed.
+    with open(os.path.join(os.path.dirname(__file__), "..", "api.py"),
+              encoding="utf-8") as f:
+        src = f.read()
+    pos_msr = src.index("# 3b. MSR (Multiple Subject Reference)")
+    pos_frames = src.index("# RC8 chorus reuse: only generate MCA frames")
+    assert pos_msr < pos_frames, (
+        "MSR reference assets (3b) must be built before per-segment "
+        "MCA frames (3c)"
+    )
+
+
 def test_aligned_system_prompt_mentions_msr_fields():
     import inspect
     src = inspect.getsource(mvp)
-    assert "OPTIONAL FIELD background_prompt" in src
+    # Stage O1: background_prompt is REQUIRED (missing field caused the
+    # character-bleed fallback in job ffd3b9a6); prop_prompt stays optional.
+    assert "REQUIRED FIELD background_prompt" in src
     assert "OPTIONAL FIELD prop_prompt" in src

@@ -67,6 +67,28 @@ def test_vocal_role_tags_same_section_different_gender_keeps_both():
     assert "duet chorus" in result
 
 
+def test_strip_vocal_role_phrases_removes_llm_duplicates():
+    """Stage O6: LLM-authored role lists in the caption ('verse male,
+    chorus female' AND 'male verse') must be stripped — the programmatic
+    _build_vocal_role_tags list is the single source (job 67ed4b23 carried
+    both spellings at once)."""
+    enh = _make_enhancer()
+    caption = (
+        "male verse, male pre-chorus, female chorus, synth-pop, analog "
+        "synthesizers, gated reverb drums, powerful vocals, bright, punchy, "
+        "studio-polished, energetic, verse male, chorus female"
+    )
+    out = enh._strip_vocal_role_phrases(caption)
+    low = out.lower()
+    for phrase in ("male verse", "verse male", "female chorus",
+                   "chorus female", "male pre-chorus"):
+        assert phrase not in low, f"{phrase!r} survived the strip: {out!r}"
+    # musical content must survive
+    for keep in ("synth-pop", "gated reverb drums", "powerful vocals",
+                 "studio-polished", "energetic"):
+        assert keep in out, f"{keep!r} was wrongly removed: {out!r}"
+
+
 def test_vocal_role_tags_hyphenated_section_not_truncated():
     """Fix 22: 'Pre-Chorus - female' must keep the full hyphenated name, not 'female pre'."""
     enh = _make_enhancer()

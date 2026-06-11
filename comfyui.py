@@ -885,9 +885,26 @@ async def queue_and_wait_with_recovery(
     attempt = 0
     last_error: Exception | None = None
 
+    async def _interrupt_orphan_prompt(orphan_id: str) -> None:
+        """Stage O8: stop the abandoned render BEFORE re-queuing.
+
+        Cancelling wait_task only stops OUR waiter — ComfyUI keeps rendering
+        the prompt to completion (job 67ed4b23: the slowdown-aborted segment
+        finished anyway as ltx2_00797, competing with its own retry for the
+        GPU and leaving a duplicate output). /interrupt stops it if running;
+        the /queue delete removes it if still pending."""
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post(f"{COMFYUI_URL}/interrupt")
+                await c.post(f"{COMFYUI_URL}/queue", json={"delete": [orphan_id]})
+            print(f"[recovery] interrupted orphan prompt {orphan_id}")
+        except Exception as int_err:
+            print(f"[recovery] orphan interrupt failed (non-fatal): {int_err!r}")
+
     while attempt <= max_restarts:
         monitor: SlowdownMonitor | None = None
         wait_task: asyncio.Task | None = None
+        prompt_id = ""
         try:
             prompt_id = await queue_prompt_async(workflow)
             print(f"[queue] prompt {prompt_id} (attempt {attempt + 1}/{max_restarts + 1})")
@@ -939,6 +956,12 @@ async def queue_and_wait_with_recovery(
                 raise
 
             attempt += 1
+            # Stage O8: the orphan prompt would keep rendering (and produce a
+            # duplicate output) while the retry runs — stop it first. On the
+            # Tier-2 path the subsequent full restart kills it anyway, but
+            # interrupting first lets the restart shut down cleanly.
+            if prompt_id:
+                await _interrupt_orphan_prompt(prompt_id)
             if attempt == 1:
                 print(f"[recovery] Tier-1 (attempt {attempt}/{max_restarts}): /free + retry — reason: {e!r}")
                 await free_comfy()

@@ -19,6 +19,14 @@ from typing import Dict, List, Optional, Tuple
 # Module-level cache: Segmenter init is expensive (TF model load), do it once.
 _SEGMENTER = None
 
+# Stage O5 duet bias: alternating-vocal duets rarely split 50/50 — a 70/30
+# verse is still a duet. Both voices ≥ _DUET_MIN_RATIO of the voiced time
+# classify as duet; the caller gates the override with _DUET_OVERRIDE_CONF
+# instead of the 0.70 solo gate (duet confidence = 2×min(ratio) caps at 1.0
+# only for a perfect 50/50 split, so 0.70 made duet effectively unreachable).
+_DUET_MIN_RATIO = 0.25
+_DUET_OVERRIDE_CONF = 0.5
+
 
 def _get_segmenter():
     global _SEGMENTER
@@ -42,7 +50,7 @@ def _classify_section(
     section_end: float,
     segments: List[Tuple[str, float, float]],
     dominant_threshold: float = 0.7,
-    duet_threshold: float = 0.2,
+    duet_threshold: float = _DUET_MIN_RATIO,
 ) -> Tuple[str, float]:
     """Determine the dominant gender for a single section based on overlapping segments.
 

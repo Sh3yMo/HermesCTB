@@ -74,12 +74,17 @@ def test_classify_mixed_not_duet():
 
 
 def test_classify_duet_threshold_edge():
-    # 80/20 split → exactly at duet threshold
+    # Stage O5: duet needs BOTH voices ≥ 0.25 (_DUET_MIN_RATIO).
+    # 80/20 split → below threshold → solo male with ratio confidence.
     segs = [("male", 0.0, 8.0), ("female", 8.0, 10.0)]
     gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "male"
+    assert abs(conf - 0.8) < 0.01
+    # 70/30 split → both ≥ 0.25 → duet, balance = 2 * 0.3 = 0.6
+    segs = [("male", 0.0, 7.0), ("female", 7.0, 10.0)]
+    gender, conf = _classify_section(0.0, 10.0, segs)
     assert gender == "duet"
-    # balance = 2 * 0.2 = 0.4
-    assert abs(conf - 0.4) < 0.01
+    assert abs(conf - 0.6) < 0.01
 
 
 def test_classify_dominant_with_silence_padding():

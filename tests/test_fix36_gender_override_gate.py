@@ -13,7 +13,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-HIGH_CONF = 0.85
+from audio_gender_detect import _DUET_OVERRIDE_CONF  # noqa: E402
+
+# Stage F lowered HIGH_CONF 0.85 -> 0.70 (matches the segmenter's
+# dominant_threshold floor); replica mirrors api.py.
+HIGH_CONF = 0.70
 LOW_CONF = 0.70
 
 
@@ -26,6 +30,10 @@ def _override_decision(label, detected_gender, confidence):
         return (label, False, False)
     has_explicit = bool(re.search(r' - (male|female|duet)\b', label))
     required = HIGH_CONF if has_explicit else LOW_CONF
+    # Stage O5 duet bias: duet confidence (2×min ratio) caps at 1.0 only for
+    # a perfect 50/50 split — it gets its own, lower gate.
+    if detected_gender == "duet":
+        required = _DUET_OVERRIDE_CONF
     if confidence < required:
         return (label, False, True)  # kept
     new_label = re.sub(r' - (male|female|duet)\b',
@@ -58,15 +66,34 @@ def test_explicit_label_overridden_when_audio_confidence_high():
 
 
 def test_explicit_label_kept_at_exact_threshold_minus_epsilon():
-    new, corrected, kept = _override_decision("Verse - male", "female", 0.849)
+    new, corrected, kept = _override_decision("Verse - male", "female", 0.699)
     assert new == "Verse - male"
     assert kept is True
 
 
 def test_explicit_label_overridden_at_exact_threshold():
-    new, corrected, kept = _override_decision("Verse - male", "female", 0.85)
+    new, corrected, kept = _override_decision("Verse - male", "female", 0.70)
     assert new == "Verse - female"
     assert corrected is True
+
+
+# ---------------------------------------------------------------------------
+# Stage O5 — duet bias: balanced alternating vocals must win over solo labels
+# ---------------------------------------------------------------------------
+
+def test_duet_bias_overrides_solo_label_at_balanced_split():
+    """70/30 alternating duet (job ffd3b9a6 pattern): classification must say
+    'duet' and its 0.6 balance confidence must pass the duet gate and rewrite
+    an explicit solo lyrics label."""
+    from audio_gender_detect import _classify_section
+    segs = [("male", 0.0, 7.0), ("female", 7.0, 10.0)]
+    gender, conf = _classify_section(0.0, 10.0, segs)
+    assert gender == "duet"
+    assert abs(conf - 0.6) < 0.01
+    new, corrected, kept = _override_decision("Verse 1 - male", gender, conf)
+    assert new == "Verse 1 - duet"
+    assert corrected is True
+    assert kept is False
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +156,10 @@ def test_close_call_50_50_returns_duet_with_balance_one():
 
 
 def test_skewed_duet_returns_lower_balance_confidence():
-    """80/20 → balance = 0.4, the gate will block a 'duet' override of an
-    explicit gender label."""
+    """Stage O5: 80/20 is no duet anymore (below _DUET_MIN_RATIO=0.25) —
+    it classifies as solo male whose 0.8 ratio passes the solo gate."""
     from audio_gender_detect import _classify_section
     segs = [("male", 0.0, 8.0), ("female", 8.0, 10.0)]
     gender, conf = _classify_section(0.0, 10.0, segs)
-    assert gender == "duet"
-    assert abs(conf - 0.4) < 0.01
-    # Apply gate: explicit gender label needs HIGH_CONF=0.85
-    new, corrected, _ = _override_decision("Verse - male", gender, conf)
-    assert new == "Verse - male"
-    assert corrected is False
+    assert gender == "male"
+    assert abs(conf - 0.8) < 0.01

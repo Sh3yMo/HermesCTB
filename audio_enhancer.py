@@ -631,14 +631,12 @@ class AudioEnhancer:
                 "  Multi-voice song (mixed-gender duet OR alternating leads): tag each section with the\n"
                 "  gender that actually sings it; tag shared sections with [- duet]; instrumental-only\n"
                 "  sections (Guitar Solo / Piano Interlude / Build / Drop / Breakdown) take no tag.\n"
-                "  Caption rules:\n"
-                "    - Single-singer songs: the caption may omit voice gender (it lives in section tags).\n"
-                "    - Multi-voice songs: the caption MUST append a compact `section gender, ...` list\n"
-                "      at the END, lowercase and comma-separated. Example:\n"
-                "        verses male + chorus female  -> append `verse male, chorus female`\n"
-                "        with a duet bridge           -> append `verse male, chorus female, bridge duet`\n"
-                "      This compact form is what ACE-Step parses for vocal steering and what the\n"
-                "      post-generation Whisper/Demucs check uses to verify ACE rendered the intent."
+                "  Caption rules (Stage O6):\n"
+                "    - Do NOT list voice genders in the caption (no 'verse male' / 'male verse' lists).\n"
+                "      The pipeline automatically prepends a compact vocal-role list derived from the\n"
+                "      section tags — the tags are the single source of truth, and a second hand-written\n"
+                "      list would duplicate it in a different spelling. The caption carries genre,\n"
+                "      instrumentation, production style and mood ONLY."
             )
         elif settings.voice == "male":
             voice_rule = (
@@ -1280,6 +1278,27 @@ class AudioEnhancer:
             out.append(f"{role} {section}")
         return ", ".join(out)
 
+    def _strip_vocal_role_phrases(self, caption: str) -> str:
+        """Stage O6: remove LLM-authored vocal-role phrases ('verse male',
+        'male verse', 'bridge duet', ...) from the caption.
+
+        _build_vocal_role_tags (derived from the final section tags) is the
+        single source of truth and is prepended in inject_audio_settings —
+        without this strip the caption carried the same information twice in
+        two different spellings (job 67ed4b23: 'male verse, ... , verse male')."""
+        import re
+        sections = (r"(?:final\s+)?(?:verse|chorus|pre-chorus|prechorus|"
+                    r"bridge|intro|outro|hook|drop)")
+        genders = r"(?:male|female|duet)"
+        pat = re.compile(
+            rf"\s*\b(?:{genders}\s+{sections}|{sections}\s+{genders})\b\s*,?",
+            re.IGNORECASE,
+        )
+        out = pat.sub(" ", caption or "")
+        out = re.sub(r"\s*,(\s*,)+", ", ", out)
+        out = re.sub(r"\s{2,}", " ", out).strip(" ,")
+        return out
+
     def inject_audio_settings(self, workflow: Dict, settings: AudioSettings) -> Dict:
         """
         Inject audio settings into ACE-Step 1.5 workflow JSON.
@@ -1298,6 +1317,9 @@ class AudioEnhancer:
                 effective_tags = settings.caption or ""
             assembled = settings.assemble_lyrics()
             vocal_role_desc = self._build_vocal_role_tags(assembled)
+            # Stage O6: strip any LLM-authored vocal-role phrases BEFORE
+            # prepending the canonical list — single source, no duplicates.
+            effective_tags = self._strip_vocal_role_phrases(effective_tags)
             if vocal_role_desc:
                 effective_tags = f"{vocal_role_desc}, {effective_tags}"
             node_94["tags"] = effective_tags

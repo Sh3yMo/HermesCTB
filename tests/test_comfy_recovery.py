@@ -95,6 +95,52 @@ async def test_tier1_free_then_retry_success():
 
 
 @pytest.mark.asyncio
+async def test_orphan_prompt_interrupted_before_retry():
+    """Stage O8: an aborted attempt must /interrupt + dequeue its orphan
+    prompt BEFORE re-queuing — otherwise ComfyUI renders it to completion in
+    parallel with the retry (job 67ed4b23: duplicate segment ltx2_00797)."""
+    posts: list[tuple[str, object]] = []
+
+    class _FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kwargs):
+            posts.append((url, kwargs.get("json")))
+            return _FakeResp()
+
+    wait = AsyncMock(side_effect=[_conn_error(), {"filename": "x.png"}])
+    with patch("comfyui.queue_prompt_async", new=AsyncMock(side_effect=["pid-a", "pid-b"])), \
+         patch("comfyui.wait_for_completion_async", new=wait), \
+         patch("comfyui.free_comfy", new=AsyncMock(return_value=True)), \
+         patch("comfyui._restart_comfy_process_and_wait", new=AsyncMock()), \
+         patch("comfyui.httpx.AsyncClient", new=_FakeClient), \
+         patch("comfyui.asyncio.sleep", new=_yield_sleep):
+        pid, info = await queue_and_wait_with_recovery({})
+
+    assert pid == "pid-b"
+    assert info == {"filename": "x.png"}
+    urls = [u for u, _ in posts]
+    assert any(u.endswith("/interrupt") for u in urls), f"no /interrupt sent: {urls}"
+    queue_deletes = [j for u, j in posts if u.endswith("/queue")]
+    assert {"delete": ["pid-a"]} in queue_deletes, (
+        f"orphan pid-a not removed from queue: {posts}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tier2_restart_after_repeat_failure():
     """Two failures → /free first, full restart second, third attempt succeeds."""
     wait = AsyncMock(side_effect=[_conn_error(), _conn_error(), {"filename": "x.png"}])
