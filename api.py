@@ -11,7 +11,7 @@ import uuid
 import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -22,7 +22,9 @@ from comfyui import (
     build_smart_prompt,
     download_output_to_local,
     get_file_bytes,
+    has_msr_nodes,
     has_relay_smart_node,
+    inject_msr_images,
     inject_input_audio,
     inject_input_image,
     inject_prompt,
@@ -597,6 +599,11 @@ def _mca_cfg() -> dict:
     }
 
 
+# MSR: workflow a segment falls back to when the MSR graph cannot be fed
+# (failed background T2I / missing character refs) — the LiconMSR node has
+# required image inputs, so queuing it with placeholders would 400.
+MSR_FALLBACK_WORKFLOW = "LTX2.3 - IA2V-PromptRelay"
+
 # RC9: deterministic lip-sync booster appended to VOCAL segment prompts (LLM
 # may forget it; this guarantees it). Story/instrumental segments never get it.
 LIPSYNC_BOOSTER = (
@@ -638,7 +645,8 @@ async def _resolve_source_image(
 
     RC7a: when consistent_character (default), describe/auto generate a CLEAN
     front-facing singer PORTRAIT (identity anchor, face/mouth visible for
-    lip-sync) instead of a cinematic scene. False -> legacy scene image
+    lip-sync, closed mouth at rest — LTX drives lip-sync from audio, Stage M)
+    instead of a cinematic scene. False -> legacy scene image
     (intentional varied/different characters per voice).
     """
     try:
@@ -959,6 +967,8 @@ async def _run_create_music_video(
     time_of_day_arc: str = "",
     wardrobe_arc: str = "",
     artist: str = "",
+    msr_ref_mode: str = "sheet",
+    msr_prop_paths: Optional[list] = None,
 ) -> None:
     _job_running(jid)
     # Threaded through the whole pipeline so the final output can be named
@@ -1447,6 +1457,118 @@ async def _run_create_music_video(
                 if s.reuse_of is not None:
                     frame_by_seg[i] = frame_by_seg.get(s.reuse_of, source)
 
+        # 3b. MSR (Multiple Subject Reference): when the selected workflow
+        # contains a LiconMSR node, build the reference assets once per song —
+        # per-role character refs (multi-view via MCA, optionally composed
+        # into one character sheet), one background still per unique
+        # background_prompt (LLM-planned per section; RC8 reuse rows share
+        # the anchor's prompt via Stage L7 inheritance, hence the same image),
+        # and optional prop refs (user uploads win over the LLM prop).
+        msr_active = False
+        msr_char_refs: Dict[str, list] = {}
+        msr_char_descs: Dict[str, str] = {}
+        msr_prop_refs: list = []
+        msr_bg_by_seg: Dict[int, str] = {}
+        try:
+            msr_active = has_msr_nodes(load_workflow(video_workflow_id))
+        except Exception as e:
+            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
+        if msr_active:
+            from msr_refs import (
+                MSR_VIEW_PROMPTS,
+                compose_character_sheet,
+                derive_background_prompt,
+            )
+            msr_dir = os.path.join(_outputs_dir(), "msr_refs")
+            os.makedirs(msr_dir, exist_ok=True)
+
+            # Props first — their count decides whether views-mode can fit.
+            for p in (msr_prop_paths or []):
+                msr_prop_refs.append((
+                    p, "the signature prop shown in the reference, kept visually identical",
+                ))
+            if not msr_prop_refs:
+                llm_prop = next((s.prop_prompt for s in segments if s.prop_prompt), "")
+                if llm_prop:
+                    try:
+                        await free_comfy()
+                        prop_img = await _generate_still(
+                            _mca_cfg()["t2i_workflow"],
+                            f"product still of {llm_prop}, single object, centered, "
+                            f"plain neutral background, no people",
+                            "1:1",
+                        )
+                        msr_prop_refs.append((prop_img, llm_prop))
+                        print(f"[MSR] LLM prop generated: {llm_prop!r}")
+                    except Exception as e:
+                        print(f"[MSR] prop still generation failed (non-fatal): {e}")
+
+            ref_mode = msr_ref_mode if msr_ref_mode in ("sheet", "views") else "sheet"
+            char_portraits = {
+                r: p for r, p in portraits.items() if p and r and r != "duet"
+            }
+            if not char_portraits and source:
+                # Legacy single-portrait path: one implicit lead character;
+                # allocate_msr_subjects falls back to it for every role.
+                char_portraits["lead"] = source
+            need_duet = any(extract_section_role(s.label) == "duet" for s in segments)
+            if ref_mode == "views" and (need_duet or msr_prop_refs):
+                print("[MSR] views mode would overflow the 4 subject slots "
+                      f"(duet={need_duet}, props={len(msr_prop_refs)}) -> forcing sheet mode")
+                ref_mode = "sheet"
+
+            _role_desc = {
+                "male": "the male singer", "female": "the female singer",
+                "male2": "the second male singer", "female2": "the second female singer",
+                "lead": "the lead performer",
+            }
+            for r, portrait in char_portraits.items():
+                views: list = []
+                try:
+                    await free_comfy()
+                    views = await _run_mca_variants(portrait, MSR_VIEW_PROMPTS)
+                except Exception as e:
+                    print(f"[MSR] view generation for role {r!r} failed; "
+                          f"falling back to plain portrait: {e}")
+                desc = _role_desc.get(r, "the performer")
+                if ref_mode == "sheet" and views:
+                    sheet = compose_character_sheet(
+                        views, os.path.join(msr_dir, f"sheet_{r}_{jid[:8]}.png"),
+                    )
+                    msr_char_refs[r] = [sheet]
+                    msr_char_descs[r] = (
+                        f"{desc} (character turnaround sheet: front, back, "
+                        f"side views and face close-up)"
+                    )
+                else:
+                    msr_char_refs[r] = (views[:4] if ref_mode == "views" and views
+                                        else [portrait])
+                    msr_char_descs[r] = desc
+
+            # Backgrounds: one T2I still per unique prompt (sections sharing a
+            # location are instructed to emit identical background_prompt).
+            bg_cache: Dict[str, str] = {}
+            for i, s in enumerate(segments):
+                bgp = (s.background_prompt or "").strip() or derive_background_prompt(
+                    s.frame_variant_prompt or s.prompt,
+                )
+                s.background_prompt = bgp
+                if bgp not in bg_cache:
+                    try:
+                        await free_comfy()
+                        bg_cache[bgp] = await _generate_still(
+                            _mca_cfg()["t2i_workflow"],
+                            f"{bgp}, no people, no characters",
+                            aspect_ratio,
+                        )
+                    except Exception as e:
+                        print(f"[MSR] background generation failed for segment {i} "
+                              f"(segment falls back to non-MSR workflow): {e}")
+                        bg_cache[bgp] = ""
+                msr_bg_by_seg[i] = bg_cache[bgp]
+            print(f"[MSR] assets ready: mode={ref_mode}, characters={list(msr_char_refs)}, "
+                  f"props={len(msr_prop_refs)}, unique backgrounds={len(bg_cache)}")
+
         # Optional pause gate: lets the operator hold a job here (after T2I +
         # Flux2 + MCA, before the loud LTX video loop kicks off) by touching
         # the flag file. Job stays in "running" state but sits idle until the
@@ -1468,13 +1590,54 @@ async def _run_create_music_video(
         if is_multi_role:
             await free_comfy()
         free_every = _mca_cfg()["free_every"]
+        # MSR: per-run upload cache (reference images are shared across
+        # segments — upload each local file to ComfyUI exactly once).
+        msr_upload_names: Dict[str, str] = {}
+
+        async def _msr_upload(path: str) -> str:
+            if path not in msr_upload_names:
+                with open(path, "rb") as fh:
+                    msr_upload_names[path] = await upload_file_to_comfy(
+                        fh.read(), os.path.basename(path), "image",
+                    )
+            return msr_upload_names[path]
+
         for i, seg in enumerate(segments):
             # RC11: free VRAM BEFORE queuing this segment (not after the prior
             # one) so the next queue command lands on a fresh state. Boundary
             # is identical to the old RC10 placement; only the timing moved.
             if free_every > 0 and i > 0 and i % free_every == 0:
                 await free_comfy()
-            wf = load_workflow(video_workflow_id)
+            # MSR: resolve this segment's reference set BEFORE choosing the
+            # workflow — a segment without usable refs (e.g. background T2I
+            # failed) cannot run the MSR graph (LiconMSR would reject its
+            # placeholder inputs) and falls back to the standard relay workflow.
+            msr_subjects: list = []
+            msr_descs: list = []
+            msr_bg = ""
+            if msr_active:
+                from msr_refs import allocate_msr_subjects, build_msr_reference_block
+                msr_subjects, msr_descs = allocate_msr_subjects(
+                    extract_section_role(seg.label),
+                    msr_char_refs, msr_char_descs, msr_prop_refs,
+                )
+                msr_bg = msr_bg_by_seg.get(i, "")
+            use_msr = bool(
+                msr_subjects and msr_bg and os.path.exists(msr_bg)
+                and all(os.path.exists(p) for p in msr_subjects)
+            )
+            msr_ref_block = (
+                build_msr_reference_block(msr_descs, seg.background_prompt)
+                if use_msr else ""
+            )
+            if msr_active and not use_msr:
+                print(f"[MSR] segment {i}: refs incomplete "
+                      f"(subjects={len(msr_subjects)}, bg={bool(msr_bg)}) "
+                      f"-> falling back to {MSR_FALLBACK_WORKFLOW!r}")
+            wf = load_workflow(
+                video_workflow_id if (use_msr or not msr_active)
+                else MSR_FALLBACK_WORKFLOW
+            )
             # RC9: vocal segments (have lyrics) get the lip-sync booster so the
             # character actually sings; story/instrumental segments do not.
             seg_prompt = seg.prompt
@@ -1493,12 +1656,19 @@ async def _run_create_music_video(
                     # the same latent region as the dialog beat per the
                     # recency rule encoded in the LLM system-prompt.
                     beats[-1] = f"{beats[-1]} {LIPSYNC_BOOSTER}"
+                # MSR: the reference block goes into the GLOBAL prompt so the
+                # ref descriptions apply across all beats of the clip.
+                relay_global = relay["global"]
+                if msr_ref_block:
+                    relay_global = f"{relay_global} {msr_ref_block}".strip()
                 wf = inject_prompt(
                     wf,
                     build_smart_prompt(beats),
-                    global_prompt=relay["global"],
+                    global_prompt=relay_global,
                 )
             else:
+                if msr_ref_block:
+                    seg_prompt = f"{seg_prompt} {msr_ref_block}".strip()
                 wf = inject_prompt(wf, seg_prompt)
             frame = frame_by_seg.get(i, source or "")
             if frame and os.path.exists(frame):
@@ -1509,6 +1679,10 @@ async def _run_create_music_video(
                 with open(seg.audio_clip, "rb") as af:
                     ua = await upload_file_to_comfy(af.read(), os.path.basename(seg.audio_clip), "audio")
                 wf = inject_input_audio(wf, ua)
+            if use_msr:
+                subj_names = [await _msr_upload(p) for p in msr_subjects]
+                bg_name = await _msr_upload(msr_bg)
+                wf = inject_msr_images(wf, subj_names, bg_name)
             # Best-effort: ineffective on LTX2.3 (4.2) IA2V (latent length is a
             # wired compute chain that ignores a literal) — clips come out at the
             # workflow's fixed length there. Kept for workflows where it works.
@@ -1594,6 +1768,8 @@ async def create_music_video(
     time_of_day_arc: str = Form(""),
     wardrobe_arc: str = Form(""),
     artist: str = Form(""),
+    msr_ref_mode: str = Form("sheet"),  # MSR: "sheet" = one composed character sheet per role, "views" = 4 single-view refs. Only used when video_workflow_id contains a LiconMSR node.
+    msr_prop_images: Optional[List[UploadFile]] = File(None),  # MSR: optional prop reference uploads, kept identical across all segments (win over the LLM-planned prop).
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -1634,12 +1810,22 @@ async def create_music_video(
     src_bytes = await source_image.read() if source_image is not None else None
     src_name = source_image.filename if source_image is not None else None
 
+    # MSR: persist prop uploads into the job tmp_dir; the pipeline assigns
+    # them to free subject slots (priority over the LLM-planned prop).
+    msr_prop_paths: list = []
+    for k, up_file in enumerate(msr_prop_images or []):
+        prop_path = os.path.join(tmp_dir, f"msr_prop_{k}_{up_file.filename or 'prop.png'}")
+        with open(prop_path, "wb") as f:
+            f.write(await up_file.read())
+        msr_prop_paths.append(prop_path)
+    msr_ref_mode = msr_ref_mode if msr_ref_mode in ("sheet", "views") else "sheet"
+
     jid = _new_job()
     asyncio.create_task(_run_create_music_video(
         jid, brief, song_path, theme, source_mode, src_bytes, src_name,
         source_description, duration, video_workflow_id, crossfade_duration,
         aspect_ratio, language, consistent_character, tmp_dir, duet, tod_arc,
-        wardrobe_arc_eff, artist,
+        wardrobe_arc_eff, artist, msr_ref_mode, msr_prop_paths,
     ))
     return {"job_id": jid}
 

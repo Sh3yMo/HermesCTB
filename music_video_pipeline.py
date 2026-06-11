@@ -250,8 +250,11 @@ def build_duet_portrait_prompt(
     )
     return (
         "Two performers standing side-by-side as a single front-facing "
-        "couple portrait, shown from head to waist, both faces and mouths "
-        "clearly visible and in sharp focus. Plain neutral white-to-light-"
+        "couple portrait, shown from head to waist, both faces clearly "
+        "visible and in sharp focus, both mouths CLOSED in a relaxed neutral "
+        "expression (lips lightly together, no teeth showing, no singing "
+        "pose, NOT mid-song — LTX-Video will animate mouth opening when audio "
+        "drives lip-sync). Plain neutral white-to-light-"
         "grey studio background, even soft studio lighting, no shadows, "
         "no props or scenery, no other people. Preserve each performer's "
         "face, hair colour, hair style, skin tone, build, eye colour, "
@@ -286,6 +289,12 @@ class Segment:
     status: str = "pending"  # "pending", "generating", "completed"
     reuse_of: Optional[int] = None  # RC8: reuse this earlier segment's MCA frame (repeated chorus)
     wardrobe_slot: str = ""  # Fix 30: wardrobe slot key for this segment (identity anchor)
+    # MSR: people-free scene description feeding the background reference slot.
+    # Empty string -> render loop derives a fallback from the segment prompt.
+    background_prompt: str = ""
+    # MSR: song-wide signature prop description (LLM emits the identical text
+    # in every row; the render loop uses the first non-empty occurrence).
+    prop_prompt: str = ""
     # PromptRelay (Smart-Node): per-segment multi-beat block. None = legacy single-prompt path.
     # `global` = camera+lighting+grading anchor (NO identity — image carries identity).
     # `beats` = 1-4 entries; beat 1 strictly static + generic subject for IA2V.
@@ -314,6 +323,8 @@ class Segment:
             "reuse_of": self.reuse_of,
             "wardrobe_slot": self.wardrobe_slot,
             "video_prompt_relay": self.video_prompt_relay,
+            "background_prompt": self.background_prompt,
+            "prop_prompt": self.prop_prompt,
         }
 
     @classmethod
@@ -815,6 +826,15 @@ def parse_segment_plan(response_text: str) -> List[Dict[str, Any]]:
             "duration": dur,
             "label": str(item.get("label", "")).strip(),
             "lyrics": str(item.get("lyrics", "")).strip(),
+            # MSR: optional people-free scene description for the background
+            # reference slot. Empty string when the LLM omitted it (caller
+            # derives a fallback from the segment prompt).
+            "background_prompt": str(item.get("background_prompt", "")).strip(),
+            # MSR: optional song-wide signature prop (same text in every row).
+            "prop_prompt": str(item.get("prop_prompt", "")).strip(),
+            # PromptRelay multi-beat block, passed through raw —
+            # extract_relay_spec validates shape and returns None on garbage.
+            "video_prompt_relay": item.get("video_prompt_relay"),
         })
     return out
 
@@ -933,6 +953,7 @@ def _build_merged_segment(group: List["Segment"]) -> "Segment":
         reuse_of=None,
         wardrobe_slot=first.wardrobe_slot,
         video_prompt_relay=merged_relay,
+        background_prompt=first.background_prompt,
     )
 
 
@@ -1653,9 +1674,14 @@ _SEG_DIRECTOR_RULES = (
     "for an mm-duet (two male performers) both wear the slot's male "
     "outfit. NEVER invent a performer of the opposite gender in a "
     "same-gender duet, regardless of how cinematic the framing might be.\n\n"
-    "CRITICAL for lip-sync: a VOCAL section's still/clip MUST keep the singer's "
-    "MOUTH clearly visible and readable — the model can only lip-sync a visible "
-    "mouth. Scenery is BACKGROUND behind the singer, not a replacement.\n\n"
+    "CRITICAL for lip-sync (Stage M — closed-mouth default): a VOCAL section's "
+    "still/clip MUST keep the singer's MOUTH clearly visible (front 3/4 or "
+    "near-frontal). The mouth in the STILL itself MUST be CLOSED / relaxed-"
+    "neutral (lips lightly together, no teeth showing, no mid-singing pose). "
+    "LTX-Video will open and animate the mouth automatically when audio drives "
+    "lip-sync — an open-mouth still produces a stroke-like freeze in the "
+    "seconds before the first sung syllable. Scenery is BACKGROUND behind the "
+    "singer, not a replacement.\n\n"
     "VARY THE CAMERA per segment for cinematic variety — do NOT repeat the same "
     "framing. Camera-move latitude depends on section KIND (see below):\n\n"
     "VOCAL-section allowed shot types (the singer's face MUST stay in frame "
@@ -1674,7 +1700,10 @@ _SEG_DIRECTOR_RULES = (
     "singer, faceless object shots, dolly-out / pull-back / zoom-out, "
     "zoom-out-then-zoom-in moves, flyovers, rack-focus away from the face. The "
     "singer's face must remain in frame and recognizable for the ENTIRE clip — "
-    "any move that loses the face mid-shot breaks identity continuity.\n\n"
+    "any move that loses the face mid-shot breaks identity continuity. "
+    "FORBIDDEN mouth-state in the STILL (Stage M): open mouth, mouth wide open, "
+    "teeth bared mid-shout, microphone pressed to lips, mid-syllable freeze, "
+    "screaming pose at frame start.\n\n"
     "STORY-section allowed shot types (no singer required; identity does NOT "
     "need to be preserved across the clip — these are scenery/narrative beats):\n"
     "  • wide-landscape, drone-style aerial, dolly-out / pull-back\n"
@@ -1683,12 +1712,14 @@ _SEG_DIRECTOR_RULES = (
     "  • everything in the VOCAL list above is also fine for STORY\n\n"
     "TWO KINDS:\n"
     "- VOCAL (has lyric lines): singer performs to camera, close framing, "
-    "face/mouth visible; video_prompt MUST include the exact lyrics in double "
+    "face/mouth visible (mouth CLOSED in the still — see Stage M rule above); "
+    "video_prompt MUST include the exact lyrics in double "
     "quotes (e.g. he sings \"...\").\n"
     "- STORY (instrumental: Intro/Outro/Build/Drop/Instrumental/Break/Fade — no "
     "lyrics): a cinematic SHORT-FILM narrative beat advancing the song's "
     "story/theme; the singer is NOT required (wide/action/landscape ok); no "
-    "lyrics quoted.\n"
+    "lyrics quoted. If a character is visible in a STORY frame, default "
+    "expression: mouth closed, neutral — STORY frames are NEVER mid-song poses.\n"
     "STRICT RULE for frame_variant_prompt (Fix 26 + Fix 33 + Fix 34): "
     "this field is MANDATORY — NEVER leave it empty. The startframe is a "
     "still image fed to a text-to-image model. NEVER include song lyrics "
@@ -2778,7 +2809,22 @@ class MusicVideoPrompter:
                     "matching the vocal hit) and NEVER in beat 1.\n"
                     "  • global = camera + lighting + grading only (no "
                     "wardrobe, no identity — those come from the image and "
-                    "the per-beat text).\n"
+                    "the per-beat text).\n\n"
+                    "OPTIONAL FIELD background_prompt (MSR scene reference — "
+                    "a SHORT standalone description of the segment's location/"
+                    "backdrop WITHOUT any people, e.g. 'neon-lit rain-slick "
+                    "alley at night, shallow depth of field'. Under 25 words. "
+                    "Consistent with the segment's lighting state. Sections "
+                    "that share a location (e.g. repeated choruses) MUST use "
+                    "an IDENTICAL background_prompt.\n\n"
+                    "OPTIONAL FIELD prop_prompt: when the song concept "
+                    "benefits from ONE signature object that stays visually "
+                    "identical across the whole video (a pendant, a guitar, "
+                    "a letter, a vintage car), emit a SHORT standalone "
+                    "description of that object alone on a plain background "
+                    "(under 15 words) — and use the IDENTICAL text in EVERY "
+                    "segment row. Omit the field entirely when no such "
+                    "object exists.\n"
                     + (
                         "\n## DIRECTOR BRIEF (Stage K — producer style guide)\n"
                         + director_brief + "\n\n"
@@ -2821,7 +2867,7 @@ class MusicVideoPrompter:
                     for _i, _r in enumerate(rows):
                         _anchor = _r.get("reuse_of")
                         if _anchor is not None and 0 <= _anchor < len(specs):
-                            for _fld in ("video_prompt", "frame_variant_prompt", "video_prompt_relay"):
+                            for _fld in ("video_prompt", "frame_variant_prompt", "video_prompt_relay", "background_prompt"):
                                 if _fld in specs[_anchor]:
                                     specs[_i][_fld] = specs[_anchor][_fld]
                             print(f"[Stage L7] reuse row {_i} inherits prompts from anchor {_anchor}")
@@ -2893,6 +2939,8 @@ class MusicVideoPrompter:
                             reuse_of=r.get("reuse_of"),
                             wardrobe_slot=slot,
                             video_prompt_relay=relay,
+                            background_prompt=str(spec.get("background_prompt", "")).strip(),
+                            prop_prompt=str(spec.get("prop_prompt", "")).strip(),
                         ))
                     if segments:
                         print(f"[Fix 29] aligned lighting plan applied: "
@@ -2931,9 +2979,13 @@ class MusicVideoPrompter:
             "performs the song on camera. Vary location, outfit detail, pose and "
             "background per segment for a dynamic video — but the SAME singer is the "
             "clear main subject in every segment.\n\n"
-            "CRITICAL for lip-sync: when a segment has sung lyrics, the singer's MOUTH "
-            "must be clearly visible and readable — the model can only lip-sync a "
-            "visible mouth. Scenery/location is BACKGROUND behind the singer, never "
+            "CRITICAL for lip-sync (Stage M — closed-mouth default): when a segment "
+            "has sung lyrics, the singer's MOUTH must be clearly visible "
+            "(front 3/4 or near-frontal) AND the mouth in the STILL must be CLOSED / "
+            "relaxed-neutral (lips lightly together, no teeth showing, no mid-singing "
+            "pose). LTX-Video animates the mouth from audio — an open-mouth still "
+            "produces a stroke-like freeze in the seconds before the first sung "
+            "syllable. Scenery/location is BACKGROUND behind the singer, never "
             "a replacement for them.\n\n"
             "VARY THE CAMERA per VOCAL segment for cinematic variety — do NOT repeat "
             "the same framing. Camera-move latitude depends on section KIND (see "
@@ -2954,7 +3006,10 @@ class MusicVideoPrompter:
             "the singer, faceless object shots, dolly-out / pull-back / zoom-out, "
             "zoom-out-then-zoom-in moves, flyovers, rack-focus away from the face. "
             "The singer's face must remain in frame and recognizable for the ENTIRE "
-            "clip — any move that loses the face mid-shot breaks identity continuity.\n\n"
+            "clip — any move that loses the face mid-shot breaks identity continuity. "
+            "FORBIDDEN mouth-state in the STILL (Stage M): open mouth, mouth wide "
+            "open, teeth bared mid-shout, microphone pressed to lips, mid-syllable "
+            "freeze, screaming pose at frame start.\n\n"
             "STORY-section allowed shot types (no singer required; identity does NOT "
             "need to be preserved across the clip — these are scenery/narrative beats):\n"
             "  • wide-landscape, drone-style aerial, dolly-out / pull-back\n"
@@ -2964,12 +3019,15 @@ class MusicVideoPrompter:
             "TWO SEGMENT KINDS — classify each section by whether it has sung lyrics:\n"
             "1. VOCAL (has lyric lines: Verse/Chorus/Pre-Chorus/Bridge/etc.): the "
             "recurring singer performs to camera, medium/close framing, face & mouth "
-            "visible for lip-sync (rules above). kind=\"vocal\".\n"
+            "visible for lip-sync (rules above). Mouth in the STILL must be CLOSED / "
+            "relaxed-neutral (Stage M) — LTX animates it from audio. kind=\"vocal\".\n"
             "2. STORY (instrumental: Intro/Outro/Build/Drop/Instrumental/Break/Fade — "
             "no lyric lines): treat this like a SHORT FILM beat — a cinematic narrative "
             "shot that advances the song's story/theme (e.g. the battle, the journey, "
             "the world). The singer is NOT required here; it can be a wide establishing "
-            "shot, action, landscape or scene with no person. No lyrics. kind=\"story\".\n"
+            "shot, action, landscape or scene with no person. No lyrics. kind=\"story\". "
+            "If a character IS visible in a STORY frame, default expression: mouth "
+            "closed, neutral — STORY frames are NEVER mid-song poses (Stage M).\n"
             "This is a music video AND a story: vocal beats = performance, instrumental "
             "beats = narrative cinema. Use the song's natural structure as the story arc.\n\n"
             "For EACH segment return:\n"
@@ -3272,11 +3330,15 @@ class MusicVideoPrompter:
                         "PORTRAIT of the singer/performer of this song. Hard requirements: "
                         "the subject faces the camera directly (front-facing), shown head "
                         "to waist or full body, face and mouth clearly visible and in sharp "
-                        "focus; plain neutral background (white, light grey, or soft studio "
+                        "focus, mouth CLOSED in a relaxed neutral expression (lips lightly "
+                        "together, no teeth showing, no microphone-held pose, NOT mid-song); "
+                        "plain neutral background (white, light grey, or soft studio "
                         "gradient); even studio lighting. NO scenery, environment, action, "
                         "props or other people. Establish the character's face, hair, skin "
                         "tone, age, build and outfit so they stay recognizable across the "
                         "video. Derive a fitting performer from the genre/lyrics mood. "
+                        "LTX-Video will animate mouth opening for lip-sync when audio is "
+                        "applied — the still MUST start from a closed-mouth resting state. "
                         "Under 80 words. Always write in English. Output ONLY the prompt."
                     ),
                 },

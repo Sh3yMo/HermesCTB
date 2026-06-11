@@ -272,6 +272,37 @@ def test_parse_missing_fields_defaulted():
     assert out[0]["label"] == ""
 
 
+def test_parse_passes_video_prompt_relay_through_raw():
+    # Regression: parse_segment_plan used to drop video_prompt_relay, so the
+    # aligned path never saw LLM-emitted multi-beat blocks (extract_relay_spec
+    # always got None). The block must survive parsing untouched — validation
+    # happens later in extract_relay_spec.
+    from music_video_pipeline import extract_relay_spec
+    txt = (
+        '[{"video_prompt":"a","duration":10,'
+        '"video_prompt_relay":{"global":"slow dolly-in, warm grade",'
+        '"beats":["A figure sits at a piano.","She lifts her head and sings."]}}]'
+    )
+    out = parse_segment_plan(txt)
+    assert out[0]["video_prompt_relay"] == {
+        "global": "slow dolly-in, warm grade",
+        "beats": ["A figure sits at a piano.", "She lifts her head and sings."],
+    }
+    relay = extract_relay_spec(out[0])
+    assert relay is not None
+    assert relay["beats"] == [
+        "A figure sits at a piano.", "She lifts her head and sings.",
+    ]
+    # Omitted field stays None (extract_relay_spec → None → legacy fallback).
+    out2 = parse_segment_plan('[{"video_prompt":"only"}]')
+    assert out2[0]["video_prompt_relay"] is None
+    assert extract_relay_spec(out2[0]) is None
+    # Malformed block passes through raw; extract_relay_spec rejects it.
+    out3 = parse_segment_plan('[{"video_prompt":"x","video_prompt_relay":"not a dict"}]')
+    assert out3[0]["video_prompt_relay"] == "not a dict"
+    assert extract_relay_spec(out3[0]) is None
+
+
 def test_parse_malformed_returns_empty():
     assert parse_segment_plan("not json at all") == []
     assert parse_segment_plan("") == []

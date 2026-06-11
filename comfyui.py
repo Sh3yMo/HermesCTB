@@ -187,7 +187,11 @@ def inject_input_image(workflow: dict, image_filename: str) -> dict:
     nodes = []
     for node_id, node in workflow.items():
         if node.get("class_type") == "LoadImage" and "inputs" in node and "image" in node["inputs"]:
-            nodes.append({"id": node_id, "title": node.get("_meta", {}).get("title", ""), "node": node})
+            title = node.get("_meta", {}).get("title", "")
+            # MSR reference slots are patched exclusively by inject_msr_images
+            if MSR_TITLE_TAG in title:
+                continue
+            nodes.append({"id": node_id, "title": title, "node": node})
     if not nodes:
         return workflow
     target = next((n for n in nodes if "input" in n["title"].lower()), nodes[0])
@@ -200,6 +204,96 @@ def inject_input_audio(workflow: dict, audio_filename: str) -> dict:
         if node.get("class_type") == "LoadAudio":
             node["inputs"]["audio"] = audio_filename
             break
+    return workflow
+
+
+# ---------------------------------------------------------------------------
+# MSR (Multiple Subject Reference) helpers — LTX2.3 - IA2V-PromptRelay-MSR
+# ---------------------------------------------------------------------------
+
+MSR_TITLE_TAG = "[[P:MSR]]"
+
+# LiconMSR only accepts these frame counts; each reference image should fill a
+# whole 8-frame temporal VAE block, hence smallest value >= 8*images+1.
+_MSR_FRAME_COUNTS = (17, 25, 33, 41)
+MSR_MAX_SUBJECTS = 4
+
+
+def has_msr_nodes(workflow: dict) -> bool:
+    """True when the workflow contains a LiconMSR reference node."""
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "LiconMSR":
+            return True
+    return False
+
+
+def msr_frame_count(image_count: int) -> int:
+    """Smallest valid LiconMSR frame_count giving every image a full latent block."""
+    needed = 8 * image_count + 1
+    for fc in _MSR_FRAME_COUNTS:
+        if fc >= needed:
+            return fc
+    return _MSR_FRAME_COUNTS[-1]
+
+
+def inject_msr_images(workflow: dict, subject_images: list[str], background_image: str) -> dict:
+    """Patch MSR reference slots: subjects into slots 1..4, background into slot 5.
+
+    `subject_images` / `background_image` are ComfyUI input filenames (already
+    uploaded via /upload/image). Unused subject slots are removed entirely —
+    both the LiconMSR input key and the orphaned LoadImage node — so ComfyUI
+    validation never sees a placeholder filename. frame_count is set to the
+    smallest valid value covering all connected images.
+    """
+    if len(subject_images) > MSR_MAX_SUBJECTS:
+        raise ValueError(f"MSR supports at most {MSR_MAX_SUBJECTS} subject images, got {len(subject_images)}")
+    if not subject_images:
+        raise ValueError("MSR requires at least one subject image")
+
+    licon_id = next(
+        (nid for nid, n in workflow.items() if isinstance(n, dict) and n.get("class_type") == "LiconMSR"),
+        None,
+    )
+    if licon_id is None:
+        return workflow
+    licon = workflow[licon_id]
+
+    slot_nodes: dict[str, str] = {}  # slot key ("1".."4", "background") -> LoadImage node id
+    for node_id, node in workflow.items():
+        if not (isinstance(node, dict) and node.get("class_type") == "LoadImage"):
+            continue
+        title = node.get("_meta", {}).get("title", "")
+        if MSR_TITLE_TAG not in title:
+            continue
+        lowered = title.lower()
+        if "background" in lowered:
+            slot_nodes["background"] = node_id
+        else:
+            for slot in ("1", "2", "3", "4"):
+                if f"subject {slot}" in lowered:
+                    slot_nodes[slot] = node_id
+                    break
+
+    if "background" not in slot_nodes:
+        raise ValueError("MSR workflow is missing the 'MSR Background' LoadImage node")
+
+    workflow[slot_nodes["background"]]["inputs"]["image"] = background_image
+    for i, filename in enumerate(subject_images, start=1):
+        slot = str(i)
+        if slot not in slot_nodes:
+            raise ValueError(f"MSR workflow is missing the 'MSR Subject {slot}' LoadImage node")
+        workflow[slot_nodes[slot]]["inputs"]["image"] = filename
+
+    # Drop unused subject slots: LiconMSR input key + orphaned LoadImage node.
+    for slot in ("1", "2", "3", "4"):
+        if int(slot) <= len(subject_images):
+            continue
+        licon["inputs"].pop(slot, None)
+        node_id = slot_nodes.get(slot)
+        if node_id is not None:
+            workflow.pop(node_id, None)
+
+    licon["inputs"]["frame_count"] = msr_frame_count(len(subject_images) + 1)
     return workflow
 
 
