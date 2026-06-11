@@ -302,7 +302,7 @@
   },
   "759:1065": {
     "inputs": {
-      "steps": 14,
+      "steps": 12,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
@@ -1346,7 +1346,7 @@
   "759:1069_base": {
     "inputs": {
       "scheduler": "linear_quadratic",
-      "steps": 6,
+      "steps": 4,
       "denoise": 0.45,
       "model": [
         "759:1075",
