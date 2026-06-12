@@ -794,12 +794,30 @@ async def _resolve_singer_portrait(
 # queue-time so a 2-input duet portrait runs cheaply.
 _FLUX2_MIEDIT = {
     "workflow": "Flux2 Klein M-I Edit.json",
-    "load_img_a": "33",
+    "load_img_a": "33",   # primary ref — drives output dimensions (GetImageSize 22)
     "load_img_b": "34",
     "load_img_c": "36",
     "prompt_node": "30",
     "save_node": "80",
+    "unet_loader": "61",  # UNETLoader feeding CFGGuider 60
+    "gguf_unet": "flux-2-klein-9b-Q8_0.gguf",
 }
+
+
+def _flux2_use_gguf(wf: Dict[str, Any]) -> Dict[str, Any]:
+    """Swap the fp8mixed UNETLoader (node 61) for the GGUF loader.
+
+    The Flux2-Klein fp8mixed build drifts the subject's ethnicity on edit; the
+    Q8_0 GGUF holds the source identity far better (user A/B test 2026-06-12 —
+    Stage P). Applied at queue-time so the static workflow JSON stays pristine
+    and UI-editable. Requires the ComfyUI-GGUF custom node (already installed —
+    the LTX workflows load GGUF UNets).
+    """
+    nid = _FLUX2_MIEDIT["unet_loader"]
+    if nid in wf and wf[nid].get("class_type") == "UNETLoader":
+        wf[nid]["class_type"] = "UnetLoaderGGUF"
+        wf[nid]["inputs"] = {"unet_name": _FLUX2_MIEDIT["gguf_unet"]}
+    return wf
 
 
 def _strip_flux2_miedit_unused(wf: Dict[str, Any]) -> Dict[str, Any]:
@@ -854,6 +872,7 @@ async def _resolve_duet_portrait(
         with open(wf_path, encoding="utf-8") as f:
             wf = json.load(f)
         wf = _strip_flux2_miedit_unused(wf)
+        wf = _flux2_use_gguf(wf)  # Stage P: GGUF holds ethnicity; fp8mixed drifts
 
         # Fix 24A: deterministic identity-neutral prompt — no LLM call. See
         # build_duet_portrait_prompt() docstring for the rationale.
@@ -919,6 +938,99 @@ async def _resolve_duet_portrait(
         return local
     except Exception as e:
         print(f"[create-mv] duet portrait generation failed: {e}")
+        return None
+
+
+async def _run_flux2_segment_frame(
+    background_path: str,
+    singer_path: str,
+    prompt: str,
+    style_descriptor: str = "",
+) -> Optional[str]:
+    """Stage P (2D): composite one per-segment START FRAME via Flux2 Klein M-I Edit.
+
+    Replaces the MCA path for MSR segments. The MCA frame was generated from the
+    singer portrait + prompt ALONE — it re-invented the background (diverging
+    from the dedicated MSR background still) and, under a stylized director,
+    drifted into a new cell-shaded character. Flux2 M-I Edit instead composites
+    the singer INTO the actual generated background:
+
+      slot 33 (dims driver) = background  -> output matches the real scene AND
+                                             the video aspect ratio
+      slot 34 + 36          = singer x2   -> strong identity/clothing/hair weight
+
+    The prompt pins wardrobe/hair ("Keep clothing and hairstyle.") and the
+    producer visual medium so the frame matches the portrait/grid look LTX
+    anchors on. Returns a local PNG path, or None on failure (caller falls back
+    to MCA / the portrait).
+    """
+    try:
+        from comfyui import randomize_seeds
+        wf_path = os.path.join(CONFIG.get("workflows_dir", "./Workflows"),
+                               _FLUX2_MIEDIT["workflow"])
+        if not os.path.exists(wf_path):
+            raise FileNotFoundError(f"Flux2 M-I Edit workflow missing: {wf_path}")
+        with open(wf_path, encoding="utf-8") as f:
+            wf = json.load(f)
+        wf = _strip_flux2_miedit_unused(wf)
+        wf = _flux2_use_gguf(wf)
+
+        guard = " Keep clothing and hairstyle. Keep the singer's face and skin tone."
+        full_prompt = prompt.rstrip()
+        if style_descriptor:
+            full_prompt += f" Rendered in this visual medium: {style_descriptor.rstrip('.')}."
+        full_prompt += guard
+
+        bg_bytes = open(background_path, "rb").read()
+        singer_bytes = open(singer_path, "rb").read()
+        bg_name = f"segbg_{uuid.uuid4().hex}.png"
+        s_name = f"segsinger_{uuid.uuid4().hex}.png"
+        s_name_dup = f"segsinger2_{uuid.uuid4().hex}.png"
+        await free_comfy()  # Stage O7 defrag before the Flux2 9B edit
+        async with httpx.AsyncClient(timeout=30) as client:
+            for name, blob in (
+                (bg_name, bg_bytes),
+                (s_name, singer_bytes),
+                (s_name_dup, singer_bytes),
+            ):
+                up = await client.post(
+                    f"{COMFYUI_URL}/upload/image",
+                    files={"image": (name, blob, "image/png")},
+                    data={"overwrite": "true"},
+                )
+                up.raise_for_status()
+
+        wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = bg_name      # 33: dims
+        wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = s_name       # 34: singer
+        wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = s_name_dup   # 36: singer dup
+        wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = full_prompt
+        wf = randomize_seeds(wf)
+
+        prompt_id, _ = await queue_and_wait_with_recovery(wf)
+        async with httpx.AsyncClient(timeout=10) as client:
+            hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
+        outputs = hist.get(prompt_id, {}).get("outputs", {})
+        images = outputs.get(_FLUX2_MIEDIT["save_node"], {}).get("images", [])
+        if not images:
+            raise RuntimeError(
+                f"[segframe] history missing SaveImage {_FLUX2_MIEDIT['save_node']} output"
+            )
+        img = images[0]
+        out_dir = os.path.join(_outputs_dir(), "segment_frames")
+        os.makedirs(out_dir, exist_ok=True)
+        local = os.path.join(out_dir, f"seg_{uuid.uuid4().hex}.png")
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(
+                f"{COMFYUI_URL}/view",
+                params={"filename": img["filename"], "type": img.get("type", "output"),
+                        "subfolder": img.get("subfolder", "")},
+            )
+            r.raise_for_status()
+            with open(local, "wb") as f:
+                f.write(r.content)
+        return local
+    except Exception as e:
+        print(f"[create-mv] Flux2 segment frame failed: {e}")
         return None
 
 
@@ -1695,15 +1807,38 @@ async def _run_create_music_video(
                     enforce_performer_role(_resolve_fvp_for_mca(i), role)
                     for i in idxs
                 ]
-                if is_multi_role:
-                    await free_comfy()  # RC10 VRAM hygiene between MCA passes
-                # Stage O3: explicit video aspect — the 2:3 full-body portrait
-                # must not dictate the startframe (and thus clip) orientation.
-                frames = await _run_mca_variants(
-                    portrait, prompts, aspect_ratio=aspect_ratio,
-                )
-                for k, i in enumerate(idxs):
-                    frame_by_seg[i] = frames[k] if k < len(frames) else portrait
+                # Stage P (2D): when MSR backgrounds exist, composite the singer
+                # INTO the real per-segment background via Flux2 Klein M-I Edit
+                # (bg drives dims+scene, singer x2 weights identity) instead of
+                # letting MCA re-invent a background from the portrait + prompt
+                # alone — that divergence + stylized-director drift was the
+                # cell-shaded new-character / wrong-background bug. Falls back to
+                # MCA per-segment when a given background is missing.
+                seg_bgs = {i: msr_bg_by_seg.get(i, "") for i in idxs} if msr_active else {}
+                if any(seg_bgs.values()):
+                    for k, i in enumerate(idxs):
+                        bg = seg_bgs.get(i, "")
+                        if bg:
+                            fr = await _run_flux2_segment_frame(
+                                bg, portrait, prompts[k], style_descriptor=style_desc,
+                            )
+                            frame_by_seg[i] = fr or portrait
+                        else:
+                            fr = await _run_mca_variants(
+                                portrait, [prompts[k]], aspect_ratio=aspect_ratio,
+                            )
+                            frame_by_seg[i] = fr[0] if fr else portrait
+                else:
+                    if is_multi_role:
+                        await free_comfy()  # RC10 VRAM hygiene between MCA passes
+                    # Stage O3: explicit video aspect — the 2:3 full-body
+                    # portrait must not dictate the startframe (and thus clip)
+                    # orientation.
+                    frames = await _run_mca_variants(
+                        portrait, prompts, aspect_ratio=aspect_ratio,
+                    )
+                    for k, i in enumerate(idxs):
+                        frame_by_seg[i] = frames[k] if k < len(frames) else portrait
             for i, s in enumerate(segments):
                 if s.reuse_of is not None:
                     frame_by_seg[i] = frame_by_seg.get(s.reuse_of, source)
