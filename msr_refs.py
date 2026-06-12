@@ -48,6 +48,36 @@ MSR_VIEW_LABELS: List[str] = [
 ]
 
 
+def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") -> List[str]:
+    """The 4 MCA reference-view prompts, pinned to a concrete appearance + medium.
+
+    The static MSR_VIEW_PROMPTS only say "identical hairstyle, identical outfit"
+    — too vague, so the model invents per-angle details that disagree (phantom
+    bun in the side view, recoloured garment). `appearance_desc` (the portrait's
+    own concrete appearance text) and `style_descriptor` (the producer visual
+    medium) are injected so all reference cells depict the SAME person in the
+    SAME look. Both empty -> identical to the static prompts (back-compat).
+    """
+    extras: List[str] = []
+    if appearance_desc:
+        extras.append(
+            "the SAME person with this exact appearance, do not alter or invent "
+            "any detail: " + appearance_desc.strip().rstrip(".")
+        )
+    if style_descriptor:
+        extras.append(
+            "rendered in this exact visual medium: "
+            + style_descriptor.strip().rstrip(".")
+        )
+    common = _VIEW_COMMON + ((", " + ", ".join(extras)) if extras else "")
+    return [
+        f"full body shot, standing, seen from behind, back view showing the back of the head and outfit, {common}",
+        f"full body shot, standing, strict side profile view facing left, {common}",
+        f"close-up portrait of the face, head and shoulders, facing the camera, {common}",
+        f"close-up portrait of the face in strict side profile view, head and shoulders, {common}",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Character sheet composition (msr_ref_mode="sheet")
 # ---------------------------------------------------------------------------

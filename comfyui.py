@@ -956,13 +956,20 @@ async def queue_and_wait_with_recovery(
                 raise
 
             attempt += 1
-            # Stage O8: the orphan prompt would keep rendering (and produce a
-            # duplicate output) while the retry runs — stop it first. On the
-            # Tier-2 path the subsequent full restart kills it anyway, but
-            # interrupting first lets the restart shut down cleanly.
-            if prompt_id:
-                await _interrupt_orphan_prompt(prompt_id)
             if attempt == 1:
+                # Stage O8: the orphan prompt would keep rendering (duplicate
+                # output + GPU contention) on the SAME process → stop it before
+                # /free + retry.
+                # Stage P (crash fix): interrupt ONLY on the Tier-1 path. The
+                # ComfyUI /interrupt API is global (no prompt_id targeting); on
+                # the Tier-2 path the full process restart already kills the
+                # orphan, and a global interrupt there races the ComfyUI-MultiGPU
+                # memory monitor's async cache reset (unload_all_models) → a core
+                # free_memory IndexError that kills the prompt_worker thread and
+                # hangs the queue (observed on job LTX2_00796 after a 40-min
+                # render). Skipping the redundant interrupt removes that race.
+                if prompt_id:
+                    await _interrupt_orphan_prompt(prompt_id)
                 print(f"[recovery] Tier-1 (attempt {attempt}/{max_restarts}): /free + retry — reason: {e!r}")
                 await free_comfy()
                 await asyncio.sleep(5)

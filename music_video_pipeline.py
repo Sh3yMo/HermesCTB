@@ -299,6 +299,11 @@ class Segment:
     # `global` = camera+lighting+grading anchor (NO identity — image carries identity).
     # `beats` = 1-4 entries; beat 1 strictly static + generic subject for IA2V.
     video_prompt_relay: Optional[Dict[str, Any]] = None
+    # Song-wide producer visual medium (cel-shaded vs photoreal + palette/grain),
+    # derived from the Stage-K producer profile. Stamped on every segment so the
+    # character portrait + MSR reference grid render in the SAME look the segment
+    # frames inherit — prevents the photoreal-grid vs stylized-segment style war.
+    visual_style: str = ""
 
     @property
     def duration(self) -> float:
@@ -325,6 +330,7 @@ class Segment:
             "video_prompt_relay": self.video_prompt_relay,
             "background_prompt": self.background_prompt,
             "prop_prompt": self.prop_prompt,
+            "visual_style": self.visual_style,
         }
 
     @classmethod
@@ -2651,6 +2657,7 @@ class MusicVideoPrompter:
                 # Hard-fails closed: any exception leaves director_brief="" and
                 # the pipeline reverts to the pre-Stage-K prompt verbatim.
                 director_brief = ""
+                _visual_style = ""  # producer visual medium for portrait + MSR grid
                 if _MV_DIRECTOR_AVAILABLE and os.getenv("MV_DIRECTOR_ENABLED", "1") != "0":
                     try:
                         director = MVDirector()
@@ -2688,6 +2695,7 @@ class MusicVideoPrompter:
                             genre=genre, sub_genre=sub_genre, mood=None, song_seed=song_seed,
                         )
                         profile = director.apply_sub_genre_modifiers(profile, sub_genre)
+                        _visual_style = director.visual_style_descriptor(profile)
                         shot_plan = director.build_shot_plan(
                             aligned_sections=director_rows, profile=profile,
                             sentiment=sentiment, song_seed=song_seed,
@@ -2696,7 +2704,8 @@ class MusicVideoPrompter:
                             profile=profile, shot_plan=shot_plan, song_genre=genre or "pop",
                         )
                         print(f"[Stage K] Director: {profile.get('name')} "
-                              f"(sub_genre={sub_genre}); {len(shot_plan)} shot directives.")
+                              f"(sub_genre={sub_genre}); {len(shot_plan)} shot directives. "
+                              f"Visual style: {_visual_style!r}")
                     except Exception as _mvd_err:
                         print(f"[Stage K] director brief failed ({_mvd_err}); "
                               f"falling back to pre-K prompt.")
@@ -2983,6 +2992,7 @@ class MusicVideoPrompter:
                             video_prompt_relay=relay,
                             background_prompt=str(spec.get("background_prompt", "")).strip(),
                             prop_prompt=str(spec.get("prop_prompt", "")).strip(),
+                            visual_style=_visual_style,
                         ))
                     if segments:
                         print(f"[Fix 29] aligned lighting plan applied: "
@@ -3371,16 +3381,35 @@ class MusicVideoPrompter:
         )
         return response if response else theme
 
-    async def generate_character_portrait_prompt(self, seed: str, genre: str = "") -> str:
+    async def generate_character_portrait_prompt(
+        self, seed: str, genre: str = "", style_descriptor: str = "",
+    ) -> str:
         """RC7a: T2I prompt for a clean SINGER reference portrait (identity anchor).
 
         Front-facing, face & upper body clearly visible, plain neutral studio
         background — so MCA can derive consistent per-segment frames and LTX has
         a real face/mouth to lip-sync. NOT a cinematic scene.
+
+        style_descriptor: the producer's visual medium (Stage K). When set the
+        portrait renders in that look (e.g. cel-shaded cartoon) so the MSR grid
+        and segment frames it seeds all share ONE style instead of warring
+        photoreal-vs-stylized.
         """
         context = f"Music / lyrics context: {seed}"
         if genre:
             context += f"\nGenre: {genre}"
+        if style_descriptor:
+            context += (
+                f"\nMANDATORY RENDER STYLE (the whole video uses this look — the "
+                f"portrait MUST be in it): {style_descriptor}"
+            )
+        style_clause = (
+            (
+                "The portrait MUST be rendered in this exact visual medium (do NOT "
+                "default to photorealism): " + style_descriptor + ". "
+            )
+            if style_descriptor else ""
+        )
         response = await self._call_openrouter(
             messages=[
                 {
@@ -3395,17 +3424,24 @@ class MusicVideoPrompter:
                         "together, no teeth showing, no microphone-held pose, NOT mid-song); "
                         "plain neutral background (white, light grey, or soft studio "
                         "gradient); even studio lighting. NO scenery, environment, action, "
-                        "props or other people. Establish the character's face, hair, skin "
-                        "tone, age, build and outfit so they stay recognizable across the "
-                        "video. Derive a fitting performer from the genre/lyrics mood. "
+                        "props or other people. " + style_clause +
+                        "Establish the character's face, hair (length, exact style, colour), "
+                        "skin tone, age, build, and EXACT outfit (each garment named with "
+                        "its cut and colour, plus footwear) in CONCRETE detail so every "
+                        "later view renders the identical look — this description is reused "
+                        "verbatim to generate the back/side/face reference views, so vague "
+                        "wording makes them hallucinate. PRESERVE the user's exact garment "
+                        "words from the context — if it says 'bikini' write 'bikini', never "
+                        "generalize to 'outfit'; keep the named body shape (e.g. "
+                        "'hourglass'). Derive a fitting performer from the genre/lyrics mood. "
                         "LTX-Video will animate mouth opening for lip-sync when audio is "
                         "applied — the still MUST start from a closed-mouth resting state. "
-                        "Under 80 words. Always write in English. Output ONLY the prompt."
+                        "Under 90 words. Always write in English. Output ONLY the prompt."
                     ),
                 },
                 {"role": "user", "content": context},
             ],
-            max_tokens=200,
+            max_tokens=220,
         )
         # Fix 23: on empty LLM response, NEVER fall back to `seed` — it contains
         # raw lyrics (lyrics[:600]+theme) and the portrait path runs no

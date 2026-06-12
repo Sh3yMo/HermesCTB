@@ -654,6 +654,9 @@ async def _resolve_source_image(
     aspect_ratio: str,
     consistent_character: bool,
     tmp_dir: str,
+    style_descriptor: str = "",
+    out_prompts: Optional[Dict[str, str]] = None,
+    out_key: str = "lead",
 ) -> Optional[str]:
     """Resolve the single source character image. Returns a local path or None.
 
@@ -680,7 +683,11 @@ async def _resolve_source_image(
             else:
                 seed = (lyrics_text[:600] + "\n" + theme).strip() or theme
             if consistent_character:
-                t2i = await MV_PROMPTER.generate_character_portrait_prompt(seed, genre)
+                t2i = await MV_PROMPTER.generate_character_portrait_prompt(
+                    seed, genre, style_descriptor=style_descriptor,
+                )
+                if out_prompts is not None and out_key:
+                    out_prompts[out_key] = t2i  # appearance anchor for MSR views
             else:
                 t2i = await MV_PROMPTER.generate_start_image_prompt(seed, genre)
             return await _generate_still(_mca_cfg()["t2i_workflow"], t2i, aspect_ratio)
@@ -739,6 +746,9 @@ async def _resolve_singer_portrait(
     lyrics_text: str,
     genre: str,
     aspect_ratio: str,
+    style_descriptor: str = "",
+    out_prompts: Optional[Dict[str, str]] = None,
+    out_key: str = "",
 ) -> Optional[str]:
     """Generate a clean front-facing portrait for a specific performer role.
 
@@ -747,6 +757,11 @@ async def _resolve_singer_portrait(
     portrait seed with an identity-locking prefix so multi-singer songs produce
     distinct portraits instead of collapsing to whichever performer the LLM
     picks first.
+
+    style_descriptor: producer visual medium (Stage K) so the portrait renders
+    in the same look the MSR grid + segment frames inherit. out_prompts: when
+    given, the portrait's appearance text is stored under `role` so the MSR view
+    prompts can pin the back/side/face views to the same concrete appearance.
     """
     prefix = _ROLE_SEED_PREFIX.get(role)
     if not prefix:
@@ -754,7 +769,11 @@ async def _resolve_singer_portrait(
     try:
         seed_body = (lyrics_text[:600] + "\n" + theme).strip() or theme
         seed = prefix + seed_body
-        t2i = await MV_PROMPTER.generate_character_portrait_prompt(seed, genre)
+        t2i = await MV_PROMPTER.generate_character_portrait_prompt(
+            seed, genre, style_descriptor=style_descriptor,
+        )
+        if out_prompts is not None:
+            out_prompts[out_key or role] = t2i  # appearance anchor for the MSR views
         # Stage O3: enforce full-body framing deterministically (the LLM is
         # instructed too, but the suffix guarantees it) and render in portrait
         # orientation — the image doubles as the MSR sheet's full-body cell.
@@ -1298,6 +1317,16 @@ async def _run_create_music_video(
             duet, all_roles_present, consistent_character, source_mode,
         )
 
+        # Stage K visual medium (cel-shaded vs photoreal + palette) stamped on
+        # every segment in plan_segments. The portrait + MSR reference grid
+        # render in this look so they match the segment frames LTX anchors on.
+        style_desc = segments[0].visual_style if segments else ""
+        # Captured per-role portrait appearance text — pins the MSR back/side/
+        # face views to the SAME concrete look (no per-angle hallucination).
+        portrait_prompts: Dict[str, str] = {}
+        if style_desc:
+            print(f"[Stage K] portrait + MSR grid visual style: {style_desc!r}")
+
         portraits: Dict[str, Optional[str]] = {}
         if sg_plan is not None:
             is_multi_role = True
@@ -1308,6 +1337,7 @@ async def _run_create_music_video(
             # singers (distinct from the partner).
             portraits[base] = await _resolve_singer_portrait(
                 base + "1", theme_eff, lyrics_text, brief, aspect_ratio,
+                style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=base,
             )
             await free_comfy()
             # Partner = the SECOND same-gender singer; appears only in the duet
@@ -1316,6 +1346,7 @@ async def _run_create_music_video(
             if make_duet:
                 portraits[partner] = await _resolve_singer_portrait(
                     partner, theme_eff, lyrics_text, brief, aspect_ratio,
+                    style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=partner,
                 )
                 await free_comfy()
                 if portraits.get(base) and portraits.get(partner):
@@ -1351,6 +1382,7 @@ async def _run_create_music_video(
                     if role in roles_present:
                         portraits[role] = await _resolve_singer_portrait(
                             role, theme_eff, lyrics_text, brief, aspect_ratio,
+                            style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=role,
                         )
                         await free_comfy()
                 # Fix 32: see all_roles_present rationale above.
@@ -1383,6 +1415,7 @@ async def _run_create_music_video(
                             )
                             portraits[role] = await _resolve_singer_portrait(
                                 role, theme_eff, lyrics_text, brief, aspect_ratio,
+                                style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=role,
                             )
                             await free_comfy()
                 if "duet" in all_roles_present:
@@ -1413,6 +1446,7 @@ async def _run_create_music_video(
                     source_mode, source_image_bytes, source_image_name,
                     source_description, theme_eff, lyrics_text, brief,
                     aspect_ratio, consistent_character, tmp_dir,
+                    style_descriptor=style_desc, out_prompts=portrait_prompts, out_key="lead",
                 )
 
         # 3b. MSR (Multiple Subject Reference): when the selected workflow
@@ -1436,8 +1470,8 @@ async def _run_create_music_video(
             print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
         if msr_active:
             from msr_refs import (
-                MSR_VIEW_PROMPTS,
                 background_prompt_mentions_people,
+                build_view_prompts,
                 compose_character_sheet,
                 derive_background_prompt,
             )
@@ -1490,9 +1524,16 @@ async def _run_create_music_video(
                     await free_comfy()
                     # Stage O3: the portrait IS the full-body front view; MCA
                     # renders only the 4 missing views, in the same portrait
-                    # orientation so the sheet cells match.
+                    # orientation so the sheet cells match. The views are pinned
+                    # to this role's concrete portrait appearance + the producer
+                    # visual medium so back/side/face don't hallucinate (phantom
+                    # bun, recoloured garment) and stay in the same look.
+                    view_prompts = build_view_prompts(
+                        style_descriptor=style_desc,
+                        appearance_desc=portrait_prompts.get(r, ""),
+                    )
                     views = await _run_mca_variants(
-                        portrait, MSR_VIEW_PROMPTS,
+                        portrait, view_prompts,
                         aspect_ratio=MSR_PORTRAIT_ASPECT,
                     )
                 except Exception as e:

@@ -347,6 +347,53 @@ class MVDirector:
 
         return "\n".join(lines)
 
+    # ── Visual-medium descriptor ─────────────────────────────────────
+
+    def visual_style_descriptor(self, profile: dict) -> str:
+        """Render-ready IMAGE-LOOK string for the T2I character portrait + MSR views.
+
+        The producer profile's art medium (e.g. Cole Bennett's "cell-shaded /
+        cartoon-overlay" ethos) historically leaked ONLY into the LLM-written
+        segment/background prompts, while the portrait + reference grid stayed
+        photorealistic — two incompatible looks that make LTX switch style
+        mid-clip. This returns the SAME medium so the portrait and grid render in
+        the producer's look from the start; everything downstream inherits it.
+
+        Medium is taken from an explicit `visual_medium` profile field when set,
+        otherwise inferred from the ethos/signature-shot vocabulary. Photoreal is
+        the safe default for producers without a stylized medium.
+        """
+        explicit = str(profile.get("visual_medium") or "").strip()
+        if explicit:
+            medium = explicit
+        else:
+            haystack = " ".join([
+                str(profile.get("ethos_oneliner", "")),
+                " ".join(profile.get("signature_shots", []) or []),
+                " ".join(profile.get("story_archetypes", []) or []),
+            ]).lower()
+            stylized_keys = (
+                "cell-shad", "cel-shad", "cartoon", "2d animation", "2d_animation",
+                "hand-drawn", "hand drawn", "anime", "illustrat", "comic",
+            )
+            if any(k in haystack for k in stylized_keys):
+                medium = (
+                    "bold cel-shaded 2D cartoon illustration style (GTA-art / "
+                    "Lyrical-Lemonade look), clean ink outlines, flat saturated "
+                    "comic shading"
+                )
+            else:
+                medium = "photorealistic cinematic still"
+        palette = ", ".join(
+            p.replace("_", " ") for p in (profile.get("color_palette") or [])[:4]
+        )
+        grain = "subtle film grain" if profile.get("film_grain") else "clean digital finish"
+        parts = [medium]
+        if palette:
+            parts.append(f"color palette: {palette}")
+        parts.append(grain)
+        return "; ".join(parts)
+
     # ── Helpers ─────────────────────────────────────────────────────
 
     def _canonicalise_genre(self, genre_norm: str) -> str:
