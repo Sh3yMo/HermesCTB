@@ -597,7 +597,35 @@ def _mca_cfg() -> dict:
         "batch_size": int(c.get("mca_batch_size", 4)),
         "t2i_workflow": c.get("t2i_workflow", "Flux2 Klein 9B - T2I"),
         "free_every": int(c.get("comfy_free_every", 3)),
+        # Perf (12GB VRAM): optional smaller Qwen text encoder for stills. ""
+        # keeps the default 8.1GB qwen_3_8b_fp8mixed. See PERF_NOTES.md.
+        "t2i_text_encoder": c.get("t2i_text_encoder", ""),
     }
+
+
+def _swap_text_encoder_if_configured(wf: Dict[str, Any]) -> Dict[str, Any]:
+    """Perf lever for the 12GB RTX 3060: swap the Qwen-8B-fp8 still text encoder.
+
+    The Flux2-Klein 9B UNet (~9GB) + the Qwen-8B-fp8 text encoder (~8.1GB) =
+    ~17GB >> 12GB VRAM, forcing partial offload -> ~15 min/still (4 sampling
+    steps, ~3 min each). Setting music_video.mca.t2i_text_encoder to a smaller
+    encoder (e.g. "qwen_3_8b_fp4mixed.safetensors" 6.4GB, or
+    "qwen_3.5_2b_bf16.safetensors" 4.3GB) reduces the offload. Default "" =
+    unchanged. Only the qwen_3* still encoders are touched; the LTX video
+    workflow's gemma encoder is left alone.
+    """
+    name = _mca_cfg().get("t2i_text_encoder", "")
+    if not name:
+        return wf
+    for nd in wf.values():
+        if not isinstance(nd, dict) or nd.get("class_type") not in ("CLIPLoader", "DualCLIPLoader"):
+            continue
+        ins = nd.get("inputs") or {}
+        for key in ("clip_name", "clip_name1", "clip_name2"):
+            v = ins.get(key)
+            if isinstance(v, str) and v.lower().startswith("qwen_3"):
+                ins[key] = name
+    return wf
 
 
 # MSR: workflow a segment falls back to when the MSR graph cannot be fed
@@ -633,6 +661,7 @@ async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) ->
     await free_comfy()
     _t0 = time.monotonic()
     wf = load_workflow(workflow_name)
+    wf = _swap_text_encoder_if_configured(wf)  # perf: optional lighter encoder
     wf = inject_prompt(wf, prompt)
     if aspect_ratio:
         wf = inject_resolution(wf, aspect_ratio)
@@ -873,6 +902,7 @@ async def _resolve_duet_portrait(
             wf = json.load(f)
         wf = _strip_flux2_miedit_unused(wf)
         wf = _flux2_use_gguf(wf)  # Stage P: GGUF holds ethnicity; fp8mixed drifts
+        wf = _swap_text_encoder_if_configured(wf)  # perf: optional lighter encoder
 
         # Fix 24A: deterministic identity-neutral prompt — no LLM call. See
         # build_duet_portrait_prompt() docstring for the rationale.
@@ -974,6 +1004,7 @@ async def _run_flux2_segment_frame(
             wf = json.load(f)
         wf = _strip_flux2_miedit_unused(wf)
         wf = _flux2_use_gguf(wf)
+        wf = _swap_text_encoder_if_configured(wf)  # perf: optional lighter encoder
 
         guard = " Keep clothing and hairstyle. Keep the singer's face and skin tone."
         full_prompt = prompt.rstrip()
