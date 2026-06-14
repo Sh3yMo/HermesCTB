@@ -293,7 +293,11 @@ def inject_msr_images(workflow: dict, subject_images: list[str], background_imag
         if node_id is not None:
             workflow.pop(node_id, None)
 
-    licon["inputs"]["frame_count"] = msr_frame_count(len(subject_images) + 1)
+    # Volle MSR-Referenzvideo-Länge (Referenz-WF nutzt 41) — die "kleinste gültige"
+    # frame_count-Heuristik verkürzte das Guide-Video auf 17 und ließ die Identität
+    # nach den ersten Frames driften (nur Haare blieben). 41 deckt auch den max.
+    # 4-Subjekt+BG-Fall ab (8*5+1).
+    licon["inputs"]["frame_count"] = _MSR_FRAME_COUNTS[-1]
     return workflow
 
 

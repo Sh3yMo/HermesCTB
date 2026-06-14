@@ -54,7 +54,12 @@ def test_msr_workflow_wiring():
     assert wf["2008"]["inputs"]["image"] == ["2006", 0]
     assert wf["759:1052"]["inputs"]["positive"] == ["2008", 0]
     assert wf["759:1052"]["inputs"]["negative"] == ["2008", 1]
-    assert wf["759:1055"]["inputs"]["video_latent"] == ["2008", 2]
+    # Sheet guide-planting (#2009, LTXVAddGuideMulti) seeds the base latent with the
+    # reference sheet at frame 0 — without it the prompt dominates and identity drifts.
+    assert wf["2009"]["class_type"] == "LTXVAddGuideMulti"
+    assert wf["2009"]["inputs"]["num_guides.image_1"] == ["2001", 0]
+    assert wf["2009"]["inputs"]["num_guides.image_2"] == ["2005", 0]
+    assert wf["759:1055"]["inputs"]["video_latent"] == ["2009", 2]
     # crop guides strips the reference frames using the guide conditioning,
     # and the pass-2 upsampler consumes the CROPPED latent
     assert wf["759:1074"]["inputs"]["positive"] == ["2008", 0]
@@ -101,8 +106,9 @@ def test_inject_msr_images_single_subject_prunes_unused_slots():
     for slot, nid in (("2", "2002"), ("3", "2003"), ("4", "2004")):
         assert slot not in licon
         assert nid not in wf
-    # 1 subject + background = 2 images -> 17 frames
-    assert licon["frame_count"] == 17
+    # MSR-Guide deckt jetzt immer die volle Referenzvideo-Länge ab (41), damit die
+    # Identität über den ganzen Clip hält statt nach den ersten Frames zu driften.
+    assert licon["frame_count"] == 41
 
 
 def test_inject_msr_images_four_subjects_keeps_all_slots():
@@ -131,10 +137,16 @@ def test_inject_msr_images_noop_on_standard_workflow():
 
 
 def test_inject_input_image_skips_msr_slots():
+    # Stage Q: the MSR workflow is FRAMELESS — there is no non-MSR "First Frame"
+    # LoadImage, so inject_input_image is a no-op here and must never write the
+    # file into an MSR reference slot.
     wf = _load(_MSR_WF)
+    assert not any(
+        n.get("class_type") == "LoadImage"
+        and "[[P:MSR]]" not in n.get("_meta", {}).get("title", "")
+        for n in wf.values()
+    ), "frameless MSR workflow must have no start-frame LoadImage"
     wf = inject_input_image(wf, "first_frame.png")
-    # the IA2V first-frame node gets the file, MSR slots stay untouched
-    assert wf["149"]["inputs"]["image"] == "first_frame.png"
     for nid in ("2001", "2002", "2003", "2004", "2005"):
         assert wf[nid]["inputs"]["image"] != "first_frame.png"
 
@@ -149,10 +161,10 @@ def test_compose_character_sheet_grid(tmp_path):
         p = tmp_path / f"v{i}.png"
         Image.new("RGB", (300, 500), (i * 40, 100, 150)).save(p)
         views.append(str(p))
-    out = compose_character_sheet(views, str(tmp_path / "sheet.png"), cell_size=256, border=8)
+    out = compose_character_sheet(views, str(tmp_path / "sheet.png"), cell_w=256, cell_h=384)
     img = Image.open(out)
-    # 2x2 grid: 2*256 + 3*8 per axis
-    assert img.size == (2 * 256 + 3 * 8, 2 * 256 + 3 * 8)
+    # Stage Q: seamless 2x2, no border, 2:3 portrait cells
+    assert img.size == (2 * 256, 2 * 384)
     assert img.mode == "RGB"
 
 
@@ -276,24 +288,25 @@ def test_background_prompt_people_guard():
     assert not background_prompt_mentions_people("")
 
 
-def test_compose_character_sheet_five_views(tmp_path):
-    # Stage O3: full-body front (portrait) + 4 MCA views = 5 cells -> 3x2 grid
+def test_compose_character_sheet_four_views(tmp_path):
+    # Stage Q: portrait + back + side + face-front = 4 cells -> seamless 2x2
     from PIL import Image
 
     paths = []
-    for i in range(5):
+    for i in range(4):
         p = tmp_path / f"v{i}.png"
         Image.new("RGB", (200, 300), (i * 40, 10, 10)).save(p)
         paths.append(str(p))
     out = compose_character_sheet(paths, str(tmp_path / "sheet.png"),
-                                  cell_size=128, border=8)
+                                  cell_w=128, cell_h=192)
     with Image.open(out) as sheet:
-        assert sheet.size == (3 * 128 + 4 * 8, 2 * 128 + 3 * 8)
+        assert sheet.size == (2 * 128, 2 * 192)
 
 
 def test_msr_view_prompts_closed_mouth():
     # Stage M: every reference still must demand a closed mouth
-    assert len(MSR_VIEW_PROMPTS) == 4
+    # Stage Q: 3 MCA views (back, side, face-front); portrait is the 4th cell
+    assert len(MSR_VIEW_PROMPTS) == 3
     for p in MSR_VIEW_PROMPTS:
         assert "mouth closed" in p
 
