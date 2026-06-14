@@ -36,10 +36,17 @@ Docker-basierter Backend-Service für vollautomatische Musikvideo-Generierung. C
 - Frameless-Builder: `scripts/build_frameless_msr_wf.py`
 - Codegraph-Projektpfad: `I:\HermesCTB`.
 
-## Aktiver Workstream: MSR Grid-Konsistenz
+## Onboarding-Dokumente
+
+- **Komplette Suite (zuerst lesen): `docs/HERMESCTB_ONBOARDING.md`** — Architektur,
+  alle Module, MV-Flow, API, Workflows, Config, Resilienz, Tests, Gotchas.
+- **Aktiver Workstream MSR Grid-Konsistenz: `docs/MSR_GRID_ONBOARDING.md`** — Deep-Dive
+  + gerankte nächste Schritte zur grid-treuen Videogenerierung.
+
+## Aktiver Workstream: MSR Grid-Konsistenz (Kurzfassung)
 
 Onboarding + nächste Schritte zur Grid-treuen Videogenerierung (Identität,
-Wardrobe, Farbe): **`docs/MSR_GRID_ONBOARDING.md`** — self-contained, zuerst lesen.
+Wardrobe, Farbe): **`docs/MSR_GRID_ONBOARDING.md`**.
 Kurz: Frameless-MSR-WF wird via `build_frameless_msr_wf.py` aus TA2V + Delta
 generiert (alle Tweaks in `build()` post-delta, NICHT im JSON); Sheet-Planting
 (Node 2009) ankert die Identität; Test via `build_msr_sheet.py` (sauberes Gold-Grid)
