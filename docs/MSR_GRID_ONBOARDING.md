@@ -110,30 +110,50 @@ With the clean gold grid, identity/color/shoes match, but these still drift:
 - **"Plastic" look + somewhat unnatural body motion** (also present in the
   reference render → likely inherent to the LTX-2.3 distilled-LoRA / few-step / cfg=1 regime).
 
-Hypothesis (unproven): the **two-stage refine** (`759:1069_base`, denoise 0.45)
-regenerates fine detail post-upsample → invents accessories / restyles the top /
-smooths skin. The single-stage reference doesn't have this stage.
+Hypothesis (partially tested): the **two-stage refine** (`759:1069_base`) regenerates
+fine detail post-upsample → invents accessories / restyles the top.
+**Tested: refine denoise 0.45 → 0.2** — top cut improved, BUT the **face got mushy**
+(less refine = less sharpening), shoes still drifted, necklace still flickered.
+Net **not a win** → reverted to 0.45. Takeaway: the two-stage refine is a sharpness
+↔ invention tradeoff; you can't tune it to fix wardrobe without softening the face.
+This is why **Strategy B (single-stage) is now the lead option** — it removes the
+tradeoff entirely.
 
-## 6. Next planned steps (ranked, isolate ONE variable per ~12-min render)
+**cfg=1 caveat:** both CFGGuiders run `cfg=1` (distilled-LoRA requirement), so
+**negative prompts are ignored** (classifier-free guidance off). Don't try to fix
+invented accessories via a negative prompt — it has no effect. The only levers are
+the reference image, the positive prompt, and the sampler/architecture.
 
-1. **Negative guidance against accessories** (cheapest). Add explicit negatives
-   ("no jewelry, no bracelets, no necklace, no choker") to the negative prompt /
-   MSR reference block so the model stops inventing them. Entry points:
-   `build_msr_reference_block` ([msr_refs.py:259](../msr_refs.py)) and the
-   negative-conditioning path (`759:1067`/`759:1549`). Test on the verify render.
-2. **Soften the refine** — `759:1069_base` (`BasicScheduler`) `denoise 0.45 → 0.2`
-   in `build_frameless_msr_wf.py` `build()` (post-delta, like steps 3-5). Less
-   regeneration → fewer invented details, less plastic. Re-render, compare.
-3. **Inplace bypass** — set the 3× `LTXVImgToVideoInplace` (`759:1155/1163/1193`,
-   strength 0.8) `bypass:true` and re-render to test their contribution to drift.
-4. **Strategy B — single-stage rebase** (biggest, highest payoff). Re-base the
-   frameless+audio MSR workflow on the **reference single-stage backbone**
-   (`MSR LTX Sample WF distill-lora-API.json`) and graft audio + PromptRelay onto
-   IT, instead of grafting MSR onto the TA2V two-stage backbone. The reference
-   holds a 241-frame clip clean with one 8-step pass — this would address
-   wardrobe drift, plastic look, AND perf together. Audio integration is the risk.
-5. **Validate the production grid** — the bad test grid (recolor + 2× side view)
-   came from the verify script's old `glob[:4]` stitching, now fixed. Confirm the
+## 6. Next planned steps (ranked, isolate ONE variable per render)
+
+Already tested & rejected: **negative guidance** (ineffective — cfg=1) and
+**refine denoise 0.2** (top better but mushy face — net not a win, reverted).
+Those results point hard at the architecture, so:
+
+1. **Strategy B — single-stage rebase (LEAD).** Re-base the frameless+audio MSR
+   workflow on the **reference single-stage backbone**
+   (`Workflows/Preview/MSR LTX Sample WF distill-lora-API.json`) and graft audio +
+   PromptRelay onto IT, instead of grafting MSR onto the TA2V two-stage backbone.
+   The reference holds a 241-frame clip clean with ONE 8-step pass → no refine
+   sharpness/invention tradeoff, and roughly half the sampling work. Expected to
+   fix wardrobe drift, mushy/plastic face, AND perf together. **Risk:** wiring the
+   TA2V audio path (`LTXVConcatAVLatent`/`LTXVAudioVAEEncode`/mask) onto the
+   single-stage graph. Approach: start from the reference JSON, add the audio
+   encode + AV-concat into its single sampler's latent, add PromptRelay encode,
+   keep LiconMSR + AddGuideMulti + IC-LoRA as-is. Validate with the same
+   `verify_frameless_msr.py` + clean gold grid.
+2. **Inplace bypass** (cheap, while still on two-stage) — set the 3×
+   `LTXVImgToVideoInplace` (`759:1155/1163/1193`, strength 0.8) `bypass:true` and
+   re-render to test their contribution to drift/shoes.
+3. **PERF — VRAM/offload (systemic, biggest runtime win).** The GPU has only
+   **12 GB dedicated VRAM**; LTX-2.3 **22B** (even Q4_K_M GGUF) doesn't fit →
+   partial CPU offload (~5 GB offloaded) → base step time swings 32→206 s/it,
+   render 12→40 min. NOT caused by the MSR changes. Levers: smaller UNET quant
+   (Q3/Q2 GGUF in node `366`), `/free` after each render (a ~2 GB residual stays
+   resident), reduce concurrent VRAM users, or `--reserve-vram` tuning. Strategy B
+   also helps (one sampling stage instead of two).
+4. **Validate the production grid** — the bad test grid (recolor + 2× side view)
+   was the verify script's old `glob[:4]` stitching, now fixed. Confirm the
    PRODUCTION path (`api.py:1633-1664`: `build_view_prompts` appearance-pinning →
    `_run_mca_variants` → `compose_character_sheet`) yields an equally clean sheet
    for real songs (it should — it already pins appearance).
@@ -142,9 +162,11 @@ smooths skin. The single-stage reference doesn't have this stage.
 
 - **Rebuild after build-script edits** — the deployed JSON is regenerated; direct
   JSON edits are lost. Scoped MSR tweaks go in `build()` post-delta.
-- **Cumulative VRAM degradation** — back-to-back long renders slow ComfyUI
-  (a 64 s/it base stage degraded to 167 s/it across the day). **Restart ComfyUI**
-  (supervisor `/restart`) before timing comparisons.
+- **VRAM is the perf bottleneck** — 12 GB dedicated; the 22B model doesn't fit →
+  partial offload → base step time is offload-bound and **highly variable**
+  (32→206 s/it observed, same 8 steps). A fresh `/restart` does NOT guarantee a
+  fast load. ~2 GB stays resident after a render. Don't attribute render-time
+  swings to sampler-param changes — check `loaded partially ... offloaded` in the log.
 - **Planting cost** — the in-context reference frames make the base stage the
   dominant cost; keep base steps low (8) and watch sequence length if adding guides.
 - **Frame extraction past clip EOF** returns a misleading frame — always seek `< duration`.
@@ -152,6 +174,9 @@ smooths skin. The single-stage reference doesn't have this stage.
   `host_supervisor/comfy_supervisor.py`; AGENTS.md says edit the host copy. The
   running service on `:8787` answers `/restart` and `/status`.
 - **verify timeout** is 3600 s (planting renders can approach it under VRAM pressure).
+- **cfg=1 → negative prompts are dead** (distilled-LoRA needs cfg=1, so CFG is off).
+  Wardrobe/accessory drift cannot be fixed via the negative prompt — only via the
+  reference image, positive prompt, or architecture.
 
 ## 8. Key files
 
