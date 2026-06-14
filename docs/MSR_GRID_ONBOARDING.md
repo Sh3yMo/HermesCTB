@@ -157,6 +157,18 @@ Those results point hard at the architecture, so:
    PRODUCTION path (`api.py:1633-1664`: `build_view_prompts` appearance-pinning →
    `_run_mca_variants` → `compose_character_sheet`) yields an equally clean sheet
    for real songs (it should — it already pins appearance).
+5. **Isolate the reasoning_I2V LoRA + test with production prompts.** Build step
+   (3) enables `LTX2.3_reasoning_I2V_V3 @0.5` on node `211` only because the
+   reference WF runs it — its benefit in OUR setup is **unverified** (it was
+   bundled with planting + frame_count, which did the identity work). Time cost is
+   **minor**: it was already on in the 64 s/it / 18-min baseline (planting + VRAM
+   offload are the real time drivers, not this LoRA). Action: render reasoning
+   off vs on at the same seed + clean grid; if fidelity is unchanged, drop it
+   (one less LoRA = marginally less VRAM). **Caveat:** `verify_frameless_msr.py`
+   uses a single hardcoded, fairly generic prompt — production prompts come from
+   the director / `prompt_enhancer` (detailed per-segment, `segment.qwen_description`).
+   A "reasoning" LoRA is under-fed by the test prompt; judge it (and MSR adherence)
+   with a production-grade detailed prompt before deciding.
 
 ## 7. Gotchas
 
