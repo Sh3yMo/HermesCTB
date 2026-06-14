@@ -27,12 +27,11 @@ from comfyui import (  # noqa: E402
     wait_for_completion_async, download_output_to_local, has_msr_nodes,
     has_relay_smart_node,
 )
-from msr_refs import compose_character_sheet, build_msr_reference_block  # noqa: E402
+from msr_refs import build_msr_reference_block  # noqa: E402
 
 WF = "LTX2.3 - IA2V-PromptRelay-MSR"
 OUT = ROOT / "outputs" / "2026-06-13"
 SEG_VIDEOS = OUT / "seg_videos"
-MCA = OUT / "mca_frames"
 BG = OUT / "ComfyUI_temp_rvehm_00001_.png"
 SONG = OUT / "Nova Luxe - Chasing the Glow.mp4"
 AUDIO_START, DURATION = 14.44, 9.86
@@ -47,15 +46,16 @@ FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 async def main() -> int:
     SEG_VIDEOS.mkdir(parents=True, exist_ok=True)
 
-    # Block 4: fresh 2x2 seamless sheet from the run's MCA view frames.
-    views = sorted(str(p) for p in MCA.glob("frame_*.png"))[:4]
-    if len(views) < 4:
-        print(f"[verify] need 4 MCA view frames, found {len(views)} in {MCA}")
+    # Block 4: use the CLEAN gold sheet built by scripts/build_msr_sheet.py
+    # (front-gold + back + side + face, color-consistent). The old path stitched
+    # raw MCA batch variants via glob[:4] -> inconsistent grid (recolor + 2x side).
+    sheet = str(OUT / "msr_refs" / "sheet_gold_v2.png")
+    if not Path(sheet).exists():
+        print(f"[verify] clean sheet missing: {sheet} — run scripts/build_msr_sheet.py first")
         return 1
-    sheet = compose_character_sheet(views, str(OUT / "msr_refs" / "sheet_verify_2x2.png"))
     from PIL import Image
     with Image.open(sheet) as im:
-        print(f"[verify] new 2x2 sheet: {sheet}  size={im.size} (expect 1024x1536)")
+        print(f"[verify] gold sheet: {sheet}  size={im.size}")
 
     # Audio slice for segment 1.
     audio = OUT / "verify_seg1_audio.wav"
@@ -71,7 +71,8 @@ async def main() -> int:
           f"has_msr={has_msr_nodes(wf)} has_relay={has_relay_smart_node(wf)}")
 
     ref_block = build_msr_reference_block(
-        ["the female lead singer (character turnaround sheet)"],
+        ["the female lead singer in a metallic gold bikini (character turnaround "
+         "sheet: full body front, back and side views, face close-up front)"],
         "rooftop terrace overlooking the Miami skyline at sunset, no people",
     )
     inject_prompt(wf, PROMPT + " " + ref_block)

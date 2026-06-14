@@ -279,7 +279,7 @@
   },
   "759:1065": {
     "inputs": {
-      "steps": 12,
+      "steps": 8,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,

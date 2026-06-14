@@ -135,6 +135,18 @@ def build() -> dict:
     final["759:1055"]["inputs"]["video_latent"] = [PLANT_ID, 2]
     print(f"[build] sheet guide-planting node {PLANT_ID} (LTXVAddGuideMulti) -> base latent 759:1055")
 
+    # 5) Base-Sampler-Steps an das Referenz-Budget angleichen (Perf). Das Planting
+    #    hängt die Referenz-Frames als In-Context-Sequenz an die Base-Stufe → ~3x
+    #    teurere Attention pro Step (64→167 s/it gemessen). Der einstufige Referenz-WF
+    #    nutzt 8 Steps; unsere Base-Stufe lief auf 12. 12→8 schneidet ~33% der teuren
+    #    Base-Zeit. (Refine-Stufe = BasicScheduler, bleibt unberührt.)
+    stepped = []
+    for nid, node in final.items():
+        if node.get("class_type") == "LTXVScheduler" and "steps" in node.get("inputs", {}):
+            node["inputs"]["steps"] = 8
+            stepped.append(nid)
+    print(f"[build] base LTXVScheduler steps -> 8 on: {stepped or 'NONE (!)'}")
+
     return final
 
 
