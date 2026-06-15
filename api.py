@@ -65,8 +65,11 @@ from music_video_pipeline import (
     MVSession,
     MusicVideoPrompter,
     Segment,
+    apply_role_clothing_contracts_to_segments,
+    apply_scene_contracts_to_segments,
     assemble_video,
     build_duet_portrait_prompt,
+    build_role_clothing_contracts,
     clamp_song_duration,
     enforce_performer_role,
     extract_section_role,
@@ -75,6 +78,7 @@ from music_video_pipeline import (
     partition_anchors_by_role,
     plan_same_gender_portraits,
     same_gender_veto,
+    sanitize_role_prompt_text,
     segment_audio,
     strip_lyrics_from_image_prompt,
     to_ace_language,
@@ -749,6 +753,7 @@ async def _resolve_singer_portrait(
     style_descriptor: str = "",
     out_prompts: Optional[Dict[str, str]] = None,
     out_key: str = "",
+    clothing_contracts: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Generate a clean front-facing portrait for a specific performer role.
 
@@ -768,9 +773,15 @@ async def _resolve_singer_portrait(
         raise ValueError(f"_resolve_singer_portrait: unsupported role {role!r}")
     try:
         seed_body = (lyrics_text[:600] + "\n" + theme).strip() or theme
-        seed = prefix + seed_body
+        base_role = "male" if role.startswith("male") else "female"
+        contracts = clothing_contracts or {}
+        clothing_contract = contracts.get(base_role, "")
+        seed = prefix + sanitize_role_prompt_text(
+            seed_body, base_role, contracts,
+        )
         t2i = await MV_PROMPTER.generate_character_portrait_prompt(
             seed, genre, style_descriptor=style_descriptor,
+            role=base_role, clothing_contract=clothing_contract,
         )
         if out_prompts is not None:
             out_prompts[out_key or role] = t2i  # appearance anchor for the MSR views
@@ -1382,8 +1393,11 @@ async def _run_create_music_video(
         # mini-call (or genre default) for each.
         # Fix 32: pass duet_kind through ('ff'/'mm'/'mixed') so wardrobe
         # tags + system prompts use same-gender wording for ff/mm duets.
+        plan_theme = "\n".join(
+            p for p in (theme_eff, source_description.strip()) if p
+        )
         segments = await MV_PROMPTER.plan_segments(
-            lyrics_text, theme_eff, total_duration, genre=brief,
+            lyrics_text, plan_theme, total_duration, genre=brief,
             aligned_sections=aligned,
             time_of_day_arc=(time_of_day_arc or None),
             wardrobe_arc=(wardrobe_arc or None),
@@ -1399,6 +1413,13 @@ async def _run_create_music_video(
             clip = os.path.join(seg_dir, f"seg_{seg.index:03d}.wav")
             _extract_audio_clip(audio_path, seg.start_time, seg.end_time, clip)
             seg.audio_clip = clip
+
+        role_clothing_contracts = build_role_clothing_contracts(
+            f"{brief}\n{theme_eff}\n{source_description}", genre=brief,
+        )
+        apply_role_clothing_contracts_to_segments(segments, role_clothing_contracts)
+        apply_scene_contracts_to_segments(segments)
+        print(f"[RoleLock] clothing contracts: {role_clothing_contracts}")
 
         # 3. Source image(s) + per-segment MCA variant frames.
         # Role hints come from LLM-authored section labels like
@@ -1450,6 +1471,7 @@ async def _run_create_music_video(
             portraits[base] = await _resolve_singer_portrait(
                 base + "1", theme_eff, lyrics_text, brief, aspect_ratio,
                 style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=base,
+                clothing_contracts=role_clothing_contracts,
             )
             await free_comfy()
             # Partner = the SECOND same-gender singer; appears only in the duet
@@ -1459,6 +1481,7 @@ async def _run_create_music_video(
                 portraits[partner] = await _resolve_singer_portrait(
                     partner, theme_eff, lyrics_text, brief, aspect_ratio,
                     style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=partner,
+                    clothing_contracts=role_clothing_contracts,
                 )
                 await free_comfy()
                 if portraits.get(base) and portraits.get(partner):
@@ -1495,6 +1518,7 @@ async def _run_create_music_video(
                         portraits[role] = await _resolve_singer_portrait(
                             role, theme_eff, lyrics_text, brief, aspect_ratio,
                             style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=role,
+                            clothing_contracts=role_clothing_contracts,
                         )
                         await free_comfy()
                 # Fix 32: see all_roles_present rationale above.
@@ -1528,6 +1552,7 @@ async def _run_create_music_video(
                             portraits[role] = await _resolve_singer_portrait(
                                 role, theme_eff, lyrics_text, brief, aspect_ratio,
                                 style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=role,
+                                clothing_contracts=role_clothing_contracts,
                             )
                             await free_comfy()
                 if "duet" in all_roles_present:
@@ -1630,6 +1655,50 @@ async def _run_create_music_video(
                 "male2": "the second male singer", "female2": "the second female singer",
                 "lead": "the lead performer",
             }
+            def _compact_contract(text: str, limit: int = 320) -> str:
+                text = re.sub(r"\s+", " ", text or "").strip(" ,.;:")
+                parts = []
+                seen = set()
+                for chunk in re.split(r"(?<=[.!?;])\s+|(?=\b(?:Male|Female) role:)", text):
+                    c = chunk.strip(" ,.;:")
+                    key = c.lower()
+                    if not c or key in seen:
+                        continue
+                    parts.append(c)
+                    seen.add(key)
+                compact = "; ".join(parts) if parts else text
+                if len(compact) > limit:
+                    compact = compact[:limit].rsplit(" ", 1)[0]
+                return compact.strip(" ,.;:")
+
+            if role_clothing_contracts.get("male"):
+                male_contract = _compact_contract(role_clothing_contracts["male"])
+                _role_desc["male"] = (
+                    "the referenced male singer, use the exact same reference subject, "
+                    "face, hair, body and locked outfit: "
+                    f"{male_contract}; shirt and vest stay visible, "
+                    "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
+                    "ignore the plain studio background in the character sheet"
+                )
+                _role_desc["male2"] = (
+                    "the second referenced male singer, use the exact same reference subject, "
+                    "face, hair, body and locked outfit: "
+                    f"{male_contract}; shirt and vest stay visible, "
+                    "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
+                    "ignore the plain studio background in the character sheet"
+                )
+            if role_clothing_contracts.get("female"):
+                female_contract = _compact_contract(role_clothing_contracts["female"])
+                _role_desc["female"] = (
+                    "the referenced female singer, use the exact same reference subject, "
+                    "face, hair, body and locked outfit: "
+                    f"{female_contract}; ignore the plain studio background in the character sheet"
+                )
+                _role_desc["female2"] = (
+                    "the second referenced female singer, use the exact same reference subject, "
+                    "face, hair, body and locked outfit: "
+                    f"{female_contract}; ignore the plain studio background in the character sheet"
+                )
             for r, portrait in char_portraits.items():
                 views: list = []
                 try:
@@ -1660,7 +1729,7 @@ async def _run_create_music_video(
                     msr_char_refs[r] = [sheet]
                     msr_char_descs[r] = (
                         f"{desc} (character turnaround sheet: full body front, "
-                        f"back and side views, face close-up front and side)"
+                        f"back and side views, face close-up front)"
                     )
                 else:
                     msr_char_refs[r] = (([portrait] + views)[:4]
@@ -1709,7 +1778,14 @@ async def _run_create_music_video(
         # annotated neighbour's role so they share the same portrait instead
         # of triggering an extra MCA batch from the fallback `source`.
         frame_by_seg: dict[int, str] = {}
-        if source:
+        # Stage Q: the MSR video workflow is now FRAMELESS — the MSR guide +
+        # audio drive the clip (a start frame made the reference grid bleed into
+        # the first frames / caused character swaps). So when MSR is active we
+        # skip ALL per-segment start-frame generation (MCA variants + Stage P
+        # Flux2 background compositing) — shorter, faster pipeline. The block is
+        # left fully intact and re-activates automatically the moment a workflow
+        # WITHOUT MSR nodes is selected (msr_active=False).
+        if source and not msr_active:
             effective_role_groups: Dict[Optional[str], list[int]] = {
                 r: list(idxs) for r, idxs in role_groups.items()
             }
@@ -1877,6 +1953,22 @@ async def _run_create_music_video(
                     )
             return msr_upload_names[path]
 
+        def _explicit_story_role(seg: Segment) -> Optional[str]:
+            text = " ".join(filter(None, (
+                getattr(seg, "label", "") or "",
+                getattr(seg, "prompt", "") or "",
+                getattr(seg, "frame_variant_prompt", "") or "",
+            )))
+            if re.search(r"\b(?:male|man|male\s+singer|he\s+sings|his\s+voice)\b", text, re.I):
+                if not re.search(r"\b(?:female|woman|female\s+singer|she\s+sings|her\s+voice)\b", text, re.I):
+                    return "male"
+            if re.search(r"\b(?:female|woman|female\s+singer|she\s+sings|her\s+voice)\b", text, re.I):
+                if not re.search(r"\b(?:male|man|male\s+singer|he\s+sings|his\s+voice)\b", text, re.I):
+                    return "female"
+            if re.search(r"\b(?:duet|male and female|female and male)\b", text, re.I):
+                return "duet"
+            return None
+
         for i, seg in enumerate(segments):
             # RC11: free VRAM BEFORE queuing this segment (not after the prior
             # one) so the next queue command lands on a fresh state. Boundary
@@ -1890,10 +1982,13 @@ async def _run_create_music_video(
             msr_subjects: list = []
             msr_descs: list = []
             msr_bg = ""
+            msr_role = extract_section_role(seg.label)
+            if msr_role is None:
+                msr_role = _explicit_story_role(seg)
             if msr_active:
                 from msr_refs import allocate_msr_subjects, build_msr_reference_block
                 msr_subjects, msr_descs = allocate_msr_subjects(
-                    extract_section_role(seg.label),
+                    msr_role,
                     msr_char_refs, msr_char_descs, msr_prop_refs,
                 )
                 msr_bg = msr_bg_by_seg.get(i, "")
@@ -1901,6 +1996,9 @@ async def _run_create_music_video(
                 msr_subjects and msr_bg and os.path.exists(msr_bg)
                 and all(os.path.exists(p) for p in msr_subjects)
             )
+            seg.msr_subject_paths = list(msr_subjects) if use_msr else []
+            seg.msr_subject_descs = list(msr_descs) if use_msr else []
+            seg.msr_background_path = msr_bg if msr_bg else ""
             msr_ref_block = (
                 build_msr_reference_block(msr_descs, seg.background_prompt)
                 if use_msr else ""
@@ -1916,8 +2014,15 @@ async def _run_create_music_video(
             # RC9: vocal segments (have lyrics) get the lip-sync booster so the
             # character actually sings; story/instrumental segments do not.
             seg_prompt = seg.prompt
+            integration_hint = (
+                " The performer is naturally present in this real location, "
+                "matching the scene lighting with natural contact shadows; "
+                "not a green-screen cutout, not composited, not pasted over the background."
+            )
+            if msr_role in ("male", "female", "duet"):
+                seg_prompt = f"{seg_prompt}{integration_hint}"
             if (seg.lyrics or "").strip():
-                seg_prompt = f"{seg.prompt} {LIPSYNC_BOOSTER}"
+                seg_prompt = f"{seg_prompt} {LIPSYNC_BOOSTER}"
             # Stage 5: PromptRelay branch — used when the workflow contains a
             # PromptRelaySmartEncode node AND the LLM emitted a per-segment
             # multi-beat block. Falls back to the legacy single-prompt path
@@ -1926,6 +2031,8 @@ async def _run_create_music_video(
             relay = seg.video_prompt_relay
             if relay and has_relay_smart_node(wf):
                 beats = list(relay["beats"])
+                if msr_role in ("male", "female", "duet") and beats:
+                    beats[0] = f"{beats[0]}{integration_hint}"
                 if (seg.lyrics or "").strip() and beats:
                     # Append lipsync-booster to the LAST beat so it lands in
                     # the same latent region as the dialog beat per the
@@ -1946,7 +2053,10 @@ async def _run_create_music_video(
                     seg_prompt = f"{seg_prompt} {msr_ref_block}".strip()
                 wf = inject_prompt(wf, seg_prompt)
             frame = frame_by_seg.get(i, source or "")
-            if frame and os.path.exists(frame):
+            # Frameless MSR (Stage Q): no start-frame upload/injection. (The
+            # frameless workflow has no non-MSR LoadImage anyway, so this is also
+            # a no-op there — the guard just saves the upload.)
+            if frame and os.path.exists(frame) and not msr_active:
                 with open(frame, "rb") as fr:
                     up = await upload_file_to_comfy(fr.read(), os.path.basename(frame), "image")
                 wf = inject_input_image(wf, up)
@@ -1961,7 +2071,13 @@ async def _run_create_music_video(
             # Best-effort: ineffective on LTX2.3 (4.2) IA2V (latent length is a
             # wired compute chain that ignores a literal) — clips come out at the
             # workflow's fixed length there. Kept for workflows where it works.
-            wf = inject_segment_duration(wf, seg.duration)
+            render_duration = (
+                seg.duration + 1.75
+                if (msr_active or has_relay_smart_node(wf))
+                else seg.duration
+            )
+            seg.requested_render_duration = render_duration
+            wf = inject_segment_duration(wf, render_duration)
             prompt_id, info = await queue_and_wait_with_recovery(wf)
             seg.video_clip = await download_output_to_local(info, os.path.join(out_dir, "seg_videos"))
             seg.status = "completed"
@@ -2011,6 +2127,22 @@ async def _run_create_music_video(
                     "audio_gender": _gd[0],
                     "audio_gender_conf": _gd[1],
                     "video_path": getattr(s, "video_clip", "") or "",
+                    "prompt": getattr(s, "prompt", "") or "",
+                    "frame_variant_prompt": getattr(s, "frame_variant_prompt", "") or "",
+                    "background_prompt": getattr(s, "background_prompt", "") or "",
+                    "scene_contract": getattr(s, "scene_contract", "") or "",
+                    "background_source": getattr(s, "background_source", "") or "",
+                    "role_clothing_contract": getattr(s, "role_clothing_contract", "") or "",
+                    "male_clothing_contract": role_clothing_contracts.get("male", ""),
+                    "female_clothing_contract": role_clothing_contracts.get("female", ""),
+                    "video_prompt_relay": getattr(s, "video_prompt_relay", None),
+                    "msr_subject_paths": getattr(s, "msr_subject_paths", []),
+                    "msr_subject_descs": getattr(s, "msr_subject_descs", []),
+                    "msr_background_path": getattr(s, "msr_background_path", ""),
+                    "requested_render_duration": float(getattr(s, "requested_render_duration", 0.0) or 0.0),
+                    "planned_frames": int(getattr(s, "planned_frames", 0) or 0),
+                    "actual_frames": int(getattr(s, "actual_frames", 0) or 0),
+                    "fit_delta_frames": int(getattr(s, "fit_delta_frames", 0) or 0),
                     "prompt_snippet": (getattr(s, "prompt", "") or "")[:200],
                     "reuse_of": getattr(s, "reuse_of", None),
                     "status": getattr(s, "status", "completed"),

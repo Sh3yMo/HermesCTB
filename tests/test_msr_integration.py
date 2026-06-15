@@ -77,8 +77,8 @@ def test_standard_workflow_untouched_by_msr_nodes():
     std = _load(_STD_WF)
     for nid in ("2001", "2006", "2007", "2008"):
         assert nid not in std
-    # baseline wiring still original
-    assert std["759:1052"]["inputs"]["positive"] == ["759:1067", 0]
+    assert std["759:1052"]["inputs"]["positive"] == ["3002", 0]
+    assert std["3002"]["inputs"]["positive"] == ["759:1067", 0]
     assert std["1700"]["inputs"]["model"] == ["211", 0]
 
 
@@ -219,11 +219,22 @@ def test_allocate_duet_views_overflow_reduces_to_front():
     assert paths == ["m1", "f1"]
 
 
-def test_allocate_story_falls_back_to_first_character():
+def test_allocate_story_without_explicit_role_uses_no_character_refs():
     paths, _ = allocate_msr_subjects(
         None, _refs(lead=["sheet.png"]), {"lead": "the lead performer"},
     )
-    assert paths == ["sheet.png"]
+    assert paths == []
+
+
+def test_allocate_story_without_role_can_still_use_props():
+    paths, descs = allocate_msr_subjects(
+        None,
+        _refs(lead=["sheet.png"]),
+        {"lead": "the lead performer"},
+        prop_refs=[("prop.png", "a wooden guitar")],
+    )
+    assert paths == ["prop.png"]
+    assert descs == ["a wooden guitar"]
 
 
 def test_allocate_caps_at_four_subjects():
@@ -247,9 +258,12 @@ def test_build_msr_reference_block():
         "neon-lit alley at night",
     )
     assert block.startswith("References:")
+    assert "Use subject references only for identity" in block
+    assert "Do not swap clothing" in block
     assert "[1] the female singer" in block
     assert "[2] a silver pendant." in block
-    assert block.endswith("Background reference: neon-lit alley at night.")
+    assert "Background reference: neon-lit alley at night." in block
+    assert block.endswith("Use this as the location and scene environment.")
     assert build_msr_reference_block([], "x") == ""
 
 
@@ -364,4 +378,6 @@ def test_aligned_system_prompt_mentions_msr_fields():
     # Stage O1: background_prompt is REQUIRED (missing field caused the
     # character-bleed fallback in job ffd3b9a6); prop_prompt stays optional.
     assert "REQUIRED FIELD background_prompt" in src
+    assert "SCENE CONTRACT (graded)" in src
+    assert "fixed-duration blocks" in src
     assert "OPTIONAL FIELD prop_prompt" in src

@@ -304,6 +304,20 @@ class Segment:
     # character portrait + MSR reference grid render in the SAME look the segment
     # frames inherit — prevents the photoreal-grid vs stylized-segment style war.
     visual_style: str = ""
+    # Fixed per-role clothing contract applied after segment planning. This is
+    # separate from wardrobe arcs: even when wardrobe_enabled=False, every role
+    # needs an explicit outfit lock so mixed-gender runs do not borrow clothing
+    # from the other singer.
+    role_clothing_contract: str = ""
+    # Final people-free scene contract used by MSR background generation and
+    # prepended to video/frame/relay prompts so the LTX pass does not drift to
+    # a different location than the background reference.
+    scene_contract: str = ""
+    background_source: str = ""
+    requested_render_duration: float = 0.0
+    planned_frames: int = 0
+    actual_frames: int = 0
+    fit_delta_frames: int = 0
 
     @property
     def duration(self) -> float:
@@ -331,6 +345,13 @@ class Segment:
             "background_prompt": self.background_prompt,
             "prop_prompt": self.prop_prompt,
             "visual_style": self.visual_style,
+            "role_clothing_contract": self.role_clothing_contract,
+            "scene_contract": self.scene_contract,
+            "background_source": self.background_source,
+            "requested_render_duration": self.requested_render_duration,
+            "planned_frames": self.planned_frames,
+            "actual_frames": self.actual_frames,
+            "fit_delta_frames": self.fit_delta_frames,
         }
 
     @classmethod
@@ -676,6 +697,244 @@ def same_gender_veto(
     if classified <= 0:
         return False
     return (opp_dur / classified) >= min_fraction
+
+
+_MALE_CLOTHING_DEFAULT = (
+    "masculine reggae outfit: burgundy short-sleeve shirt under a closed brown "
+    "buttoned vest, tan trousers, sandals, rasta tam; shirt and vest stay on, "
+    "no bare torso, masculine flat chest, no breasts"
+)
+_FEMALE_CLOTHING_DEFAULT = (
+    "fitted feminine top, denim shorts or skirt, feminine footwear"
+)
+
+_MALE_MARKERS_RE = re.compile(
+    r"\b(male|man|men|he|his|jamaican|rastafari|rasta|dreadlocks?|mann|er|sein)\b",
+    re.IGNORECASE,
+)
+_FEMALE_MARKERS_RE = re.compile(
+    r"\b(female|woman|women|she|her|puerto[- ]?rican|frau|sie|ihr)\b",
+    re.IGNORECASE,
+)
+_CLOTHING_HINT_RE = re.compile(
+    r"\b(wears?|wearing|tr[aä]gt|outfit|clothing|shirt|tank\s*top|top|"
+    r"hotpants?|shorts?|jeans?|denim|pants?|trousers|dress|skirt|boots?|"
+    r"shoes?|sandals?|hat|tam|cap|beanie|hoodie|jacket|linen|leaf|"
+    r"marijuana|cannabis|rasta|beachwear)\b",
+    re.IGNORECASE,
+)
+_BODY_GARMENT_HINT_RE = re.compile(
+    r"\b(shirt|tank\s*top|top|hotpants?|shorts?|jeans?|denim|pants?|"
+    r"trousers|dress|skirt|boots?|shoes?|sandals?|hoodie|jacket|linen|"
+    r"beachwear)\b",
+    re.IGNORECASE,
+)
+
+_MALE_FORBIDDEN_RE = re.compile(
+    r"\b(female|woman|women|girl|lady|she|her|feminine|hourglass|"
+    r"bare\s+chest|bare\s+torso|topless|shirtless|crop\s*top|cleavage|"
+    r"marijuana\s+leaf|cannabis\s+leaf|hotpants?|high[- ]cut|"
+    r"female\s+tank\s*top|tank\s*top\s+with\s+(?:a\s+)?(?:stylized\s+)?"
+    r"(?:green\s+)?(?:marijuana|cannabis)\s+leaf)\b",
+    re.IGNORECASE,
+)
+_FEMALE_FORBIDDEN_RE = re.compile(
+    r"\b(male|man|men|boy|guy|gent|he|his|masculine|flat\s+chest|"
+    r"no\s+breasts|beard|goatee|full\s+beard|rasta\s+tam|rasta\s+hat|"
+    r"male\s+vest|buttoned\s+vest|dreadlocks?)\b",
+    re.IGNORECASE,
+)
+
+
+def _split_context_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?])\s+|[\r\n]+", text or "")
+    return [p.strip(" \t,.;:") for p in parts if p.strip()]
+
+
+def _extract_role_clothing(text: str, role: str) -> str:
+    marker = _MALE_MARKERS_RE if role == "male" else _FEMALE_MARKERS_RE
+    other_marker = _FEMALE_MARKERS_RE if role == "male" else _MALE_MARKERS_RE
+    hits: List[str] = []
+    for sentence in _split_context_sentences(text):
+        if not marker.search(sentence) or not _CLOTHING_HINT_RE.search(sentence):
+            continue
+        if other_marker.search(sentence) and len(sentence) > 180:
+            continue
+        hits.append(sentence)
+    if hits:
+        cleaned = " ".join(hits)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not _BODY_GARMENT_HINT_RE.search(cleaned):
+            default = _MALE_CLOTHING_DEFAULT if role == "male" else _FEMALE_CLOTHING_DEFAULT
+            cleaned = f"{cleaned}; {default}"
+        if len(cleaned) > 520:
+            cleaned = cleaned[:520].rsplit(" ", 1)[0]
+        return cleaned.rstrip(" ,.;:")
+    return _MALE_CLOTHING_DEFAULT if role == "male" else _FEMALE_CLOTHING_DEFAULT
+
+
+def build_role_clothing_contracts(theme: str, genre: str = "") -> Dict[str, str]:
+    """Build fixed clothing contracts for recurring male/female performers."""
+    context = f"{theme or ''}\n{genre or ''}"
+    return {
+        "male": _extract_role_clothing(context, "male"),
+        "female": _extract_role_clothing(context, "female"),
+    }
+
+
+def _base_role(role: Optional[str]) -> Optional[str]:
+    if role in ("male", "male1", "male2"):
+        return "male"
+    if role in ("female", "female1", "female2"):
+        return "female"
+    if role == "duet":
+        return "duet"
+    return None
+
+
+def sanitize_role_prompt_text(
+    text: str,
+    role: Optional[str],
+    clothing_contracts: Optional[Dict[str, str]] = None,
+) -> str:
+    """Remove obvious cross-role wardrobe/body leaks and append outfit locks."""
+    if not text:
+        return text
+    contracts = clothing_contracts or {}
+    base = _base_role(role)
+    out = text
+    if base == "male":
+        out = _MALE_FORBIDDEN_RE.sub("", out)
+        out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:")
+        outfit = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        out = (
+            "Clothing lock: the referenced male singer wears only this exact outfit: "
+            f"{outfit}. Shirt and vest stay visible; no bare chest, no topless "
+            "or shirtless look. Masculine adult male body, flat chest, no "
+            f"breasts. Never swap clothing with any female performer. {out}."
+        )
+    elif base == "female":
+        out = _FEMALE_FORBIDDEN_RE.sub("", out)
+        out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:")
+        outfit = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        out = (
+            "Clothing lock: the referenced female singer wears only this exact outfit: "
+            f"{outfit}. Never swap clothing with any male performer. {out}."
+        )
+    elif base == "duet":
+        male = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        female = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        out = (
+            f"Clothing lock: the man wears exactly: {male}. The woman wears "
+            f"exactly: {female}. Never swap or blend clothing between "
+            f"performers. {out}."
+        )
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
+def apply_role_clothing_contracts_to_segments(
+    segments: List["Segment"],
+    clothing_contracts: Dict[str, str],
+) -> None:
+    """Apply fixed role clothing contracts to segment prompts and relay beats."""
+    for seg in segments:
+        role = extract_section_role(seg.label)
+        head = (seg.label or "").lower().strip().split(" - ", 1)[0]
+        if head.startswith("intro") or head.startswith("outro"):
+            role = None
+        if role not in ("male", "female", "duet"):
+            seg.role_clothing_contract = ""
+            continue
+        base = _base_role(role)
+        if base == "duet":
+            seg.role_clothing_contract = (
+                f"male: {clothing_contracts.get('male', _MALE_CLOTHING_DEFAULT)}; "
+                f"female: {clothing_contracts.get('female', _FEMALE_CLOTHING_DEFAULT)}"
+            )
+        else:
+            seg.role_clothing_contract = clothing_contracts.get(base or "", "")
+        seg.prompt = sanitize_role_prompt_text(seg.prompt, role, clothing_contracts)
+        seg.frame_variant_prompt = sanitize_role_prompt_text(
+            seg.frame_variant_prompt, role, clothing_contracts,
+        )
+        if seg.video_prompt_relay:
+            relay = dict(seg.video_prompt_relay)
+            relay["beats"] = [
+                sanitize_role_prompt_text(str(b), role, clothing_contracts)
+                for b in relay.get("beats", [])
+            ]
+            seg.video_prompt_relay = relay
+
+
+_SCENE_LOCK_PREFIX = "Scene location must be exactly:"
+
+
+def _clean_scene_contract(scene: str) -> str:
+    scene = re.sub(r"\s+", " ", scene or "").strip(" ,.;:")
+    scene = re.sub(
+        r"^(?:empty location scene,\s*)?(?:no people,\s*)?"
+        r"(?:no characters,\s*)?(?:no faces,\s*)?(?:scenery only:\s*)",
+        "",
+        scene,
+        flags=re.IGNORECASE,
+    ).strip(" ,.;:")
+    return scene
+
+
+def scene_contract_mentions_people(scene: str) -> bool:
+    try:
+        from msr_refs import background_prompt_mentions_people
+        return background_prompt_mentions_people(scene)
+    except Exception:
+        return bool(re.search(
+            r"\b(?:person|people|man|woman|male|female|singer|performer|"
+            r"wearing|outfit|shirt|jeans|hair|beard)\b",
+            scene or "",
+            re.IGNORECASE,
+        ))
+
+
+def scene_lock_text(scene: str) -> str:
+    scene = _clean_scene_contract(scene)
+    return f"{_SCENE_LOCK_PREFIX} {scene}." if scene else ""
+
+
+def apply_scene_contract_to_text(text: str, scene: str) -> str:
+    if not text:
+        return text
+    lock = scene_lock_text(scene)
+    if not lock:
+        return text
+    if text.strip().lower().startswith(_SCENE_LOCK_PREFIX.lower()):
+        return text
+    return re.sub(r"\s{2,}", " ", f"{lock} {text}").strip()
+
+
+def apply_scene_contracts_to_segments(segments: List["Segment"]) -> None:
+    """Make each segment's people-free background prompt the hard scene anchor."""
+    for seg in segments:
+        scene = _clean_scene_contract(seg.background_prompt)
+        source = "llm"
+        if not scene or scene_contract_mentions_people(scene):
+            from msr_refs import derive_background_prompt
+            scene = _clean_scene_contract(
+                derive_background_prompt(seg.frame_variant_prompt or seg.prompt)
+            )
+            source = "fallback"
+        seg.background_prompt = scene
+        seg.scene_contract = scene
+        seg.background_source = source
+        seg.prompt = apply_scene_contract_to_text(seg.prompt, scene)
+        seg.frame_variant_prompt = apply_scene_contract_to_text(
+            seg.frame_variant_prompt, scene,
+        )
+        if seg.video_prompt_relay:
+            relay = dict(seg.video_prompt_relay)
+            relay["beats"] = [
+                apply_scene_contract_to_text(str(b), scene)
+                for b in relay.get("beats", [])
+            ]
+            seg.video_prompt_relay = relay
 
 
 # Clauses introducing the "opposite" performer that should be dropped from
@@ -2041,6 +2300,12 @@ def _fit_clip_to_frames(src: str, n_frames: int, dst: str) -> tuple[str, int]:
 
     if actual < n_frames:
         pad = n_frames - actual
+        if pad > 8:
+            print(
+                f"[assemble][WARN] large frame pad needed for {src}: "
+                f"actual={actual} target={n_frames} pad={pad}f. "
+                "This can cause a visible freeze."
+            )
         vf = ["-vf", f"tpad=stop_mode=clone:stop={pad}"]
     else:
         vf = []  # trim (or equal) handled by -frames:v below
@@ -2085,6 +2350,9 @@ def assemble_video(
             fitted = os.path.join(tmp_dir, f"fit_{seg.index:03d}.mp4")
             new_clip, actual = _fit_clip_to_frames(seg.video_clip, target_frames, fitted)
             delta = actual - target_frames
+            seg.planned_frames = target_frames
+            seg.actual_frames = actual
+            seg.fit_delta_frames = delta
             op = "pad" if delta < 0 else ("trim" if delta > 0 else "noop")
             print(
                 f"[assemble] seg {seg.index}: plan={seg.duration:.3f}s "
@@ -2563,10 +2831,9 @@ class MusicVideoPrompter:
         if not wardrobe_enabled:
             wardrobe_arc_key = "disabled"
             wardrobe_human = (
-                "wardrobe arcs DISABLED — one fixed outfit for the entire "
-                "video; NEVER describe, change or invent clothing in any "
-                "prompt: identity and clothing come from the character "
-                "reference images"
+                "wardrobe arcs DISABLED - one fixed role outfit contract for "
+                "the entire video. Do not create per-segment outfit changes; "
+                "describe only the fixed outfit for the active singer role"
             )
             print("[Stage O4] wardrobe arcs disabled — "
                   "fixed single outfit from the character reference.")
@@ -2817,6 +3084,13 @@ class MusicVideoPrompter:
                     "video_prompt + frame_variant_prompt per the VOCAL/STORY "
                     "rules above (VOCAL must quote its exact lyrics; STORY is "
                     "cinematic narrative, no singer/lyrics).\n\n"
+                    "SCENE CONTRACT (graded): derive each segment location from "
+                    "the explicit user theme/source text first, then from lyrics, "
+                    "genre, mood and section label. The background_prompt you "
+                    "emit is the binding scene contract for that row. The "
+                    "video_prompt, frame_variant_prompt and every relay beat "
+                    "MUST describe that same location and must not introduce a "
+                    "different place or contradictory time of day.\n\n"
                     "OPTIONAL FIELD video_prompt_relay (PromptRelay multi-beat — "
                     "improves motion adherence on segments ≥5s). When you "
                     "include it, structure must be: "
@@ -2851,7 +3125,9 @@ class MusicVideoPrompter:
                     "alley at night, shallow depth of field'. Under 25 words. "
                     "Consistent with the segment's lighting state. Sections "
                     "that share a location (e.g. repeated choruses) MUST use "
-                    "an IDENTICAL background_prompt.\n\n"
+                    "an IDENTICAL background_prompt. If the user specified "
+                    "locations, use those locations in song order without "
+                    "forcing fixed-duration blocks.\n\n"
                     "OPTIONAL FIELD prop_prompt: when the song concept "
                     "benefits from ONE signature object that stays visually "
                     "identical across the whole video (a pendant, a guitar, "
@@ -3382,7 +3658,12 @@ class MusicVideoPrompter:
         return response if response else theme
 
     async def generate_character_portrait_prompt(
-        self, seed: str, genre: str = "", style_descriptor: str = "",
+        self,
+        seed: str,
+        genre: str = "",
+        style_descriptor: str = "",
+        role: str = "",
+        clothing_contract: str = "",
     ) -> str:
         """RC7a: T2I prompt for a clean SINGER reference portrait (identity anchor).
 
@@ -3398,6 +3679,13 @@ class MusicVideoPrompter:
         context = f"Music / lyrics context: {seed}"
         if genre:
             context += f"\nGenre: {genre}"
+        if role:
+            context += f"\nPORTRAIT ROLE: {role}"
+        if clothing_contract:
+            context += (
+                "\nMANDATORY ROLE CLOTHING CONTRACT: "
+                f"{clothing_contract}. Use ONLY this clothing for this role."
+            )
         if style_descriptor:
             context += (
                 f"\nMANDATORY RENDER STYLE (the whole video uses this look — the "
@@ -3433,7 +3721,14 @@ class MusicVideoPrompter:
                         "wording makes them hallucinate. PRESERVE the user's exact garment "
                         "words from the context — if it says 'bikini' write 'bikini', never "
                         "generalize to 'outfit'; keep the named body shape (e.g. "
-                        "'hourglass'). Derive a fitting performer from the genre/lyrics mood. "
+                        "'hourglass') ONLY when it belongs to this exact PORTRAIT ROLE. "
+                        "Never copy clothing, body shape, hair, beard, hat or accessories "
+                        "from another singer role. If a MANDATORY ROLE CLOTHING CONTRACT is "
+                        "provided, it overrides every other clothing mention in the context. "
+                        "For a male role: masculine adult male body, flat chest, no breasts. "
+                        "For a female role: never inherit male beard, rasta tam or dreadlocks "
+                        "unless explicitly stated in the female clothing contract. "
+                        "Derive a fitting performer from the genre/lyrics mood. "
                         "LTX-Video will animate mouth opening for lip-sync when audio is "
                         "applied — the still MUST start from a closed-mouth resting state. "
                         "Under 90 words. Always write in English. Output ONLY the prompt."
@@ -3449,6 +3744,7 @@ class MusicVideoPrompter:
         return response or (
             "front-facing full body studio shot of a singer, standing, "
             "head to toe visible, neutral grey background"
+            + (f", wearing {clothing_contract}" if clothing_contract else "")
         )
 
     async def extract_scene_anchor(self, theme: str) -> str:

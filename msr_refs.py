@@ -16,7 +16,7 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 # ---------------------------------------------------------------------------
 # Multi-view prompts (run through the F2K9B MCA workflow, portrait as source)
@@ -30,26 +30,25 @@ _VIEW_COMMON = (
     "background, even soft studio lighting"
 )
 
-# Stage O3: the full-body FRONT view comes straight from the T2I portrait
-# (the portrait IS a full-body frontal now), so MCA only renders the four
-# missing views. The face appears front AND side for stronger identity
-# anchoring; the full-body side view keeps the 3D body-shape information
-# (build/silhouette) that front+back alone cannot convey.
+# Stage O3 / Stage Q: the full-body FRONT view comes straight from the T2I
+# portrait (the portrait IS a full-body frontal now), so MCA only renders the
+# three missing views. Portrait + back + side + face-front = 4 cells -> a
+# seamless 2x2 sheet. (The face-side close-up was dropped so all four cells are
+# equal-size portrait tiles that join into one rectangle.)
 MSR_VIEW_PROMPTS: List[str] = [
     f"full body shot, standing, seen from behind, back view showing the back of the head and outfit, {_VIEW_COMMON}",
     f"full body shot, standing, strict side profile view facing left, {_VIEW_COMMON}",
     f"close-up portrait of the face, head and shoulders, facing the camera, {_VIEW_COMMON}",
-    f"close-up portrait of the face in strict side profile view, head and shoulders, {_VIEW_COMMON}",
 ]
 
 # Labels align with the sheet/refs ordering: [portrait] + MCA views.
 MSR_VIEW_LABELS: List[str] = [
-    "full body front", "back", "side", "face front", "face side",
+    "full body front", "back", "side", "face front",
 ]
 
 
 def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") -> List[str]:
-    """The 4 MCA reference-view prompts, pinned to a concrete appearance + medium.
+    """The 3 MCA reference-view prompts, pinned to a concrete appearance + medium.
 
     The static MSR_VIEW_PROMPTS only say "identical hairstyle, identical outfit"
     — too vague, so the model invents per-angle details that disagree (phantom
@@ -74,7 +73,6 @@ def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") ->
         f"full body shot, standing, seen from behind, back view showing the back of the head and outfit, {common}",
         f"full body shot, standing, strict side profile view facing left, {common}",
         f"close-up portrait of the face, head and shoulders, facing the camera, {common}",
-        f"close-up portrait of the face in strict side profile view, head and shoulders, {common}",
     ]
 
 
@@ -85,33 +83,36 @@ def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") ->
 def compose_character_sheet(
     view_paths: List[str],
     out_path: str,
-    cell_size: int = 768,
-    border: int = 16,
+    cell_w: int = 512,
+    cell_h: int = 768,
+    **_legacy,
 ) -> str:
-    """Compose up to 6 view stills into one character-sheet grid.
+    """Compose up to 4 portrait view stills into one seamless 2x2 sheet.
 
-    1 view -> 1x1, 2-4 views -> 2 columns, 5-6 views -> 3 columns (Stage O3:
-    full-body front + back + side + face front + face side = 5 cells).
-    Views are letterboxed (aspect preserved) into square cells on a white
-    canvas with a white separating border — one single reference image that
-    occupies one MSR subject slot. Returns out_path.
+    Stage Q: the sheet is exactly 4 equal-size 2:3 portrait cells
+    (portrait + back + side + face-front) joined edge-to-edge into a single
+    2:3 rectangle — NO white border, NO letterbox. Each view is cover-cropped
+    to the cell (`ImageOps.fit`, aspect preserved, centred, edges trimmed) so a
+    landscape source (e.g. the legacy `lead` source frame) is forced to
+    portrait too — fixing the "first cell landscape, rest portrait" mismatch.
+
+    Fewer than 4 views still tile into a 2-column grid (trailing cells black).
+    `cell_w`/`cell_h` set the per-cell pixel size (default 512x768 = 2:3).
+    Legacy `cell_size`/`border` kwargs are accepted and ignored (back-compat).
+    Returns out_path.
     """
     if not view_paths:
         raise ValueError("compose_character_sheet needs at least one view image")
-    paths = view_paths[:6]
-    cols = 1 if len(paths) == 1 else (3 if len(paths) >= 5 else 2)
+    paths = view_paths[:4]
+    cols = 1 if len(paths) == 1 else 2
     rows = (len(paths) + cols - 1) // cols
-    width = cols * cell_size + (cols + 1) * border
-    height = rows * cell_size + (rows + 1) * border
-    sheet = Image.new("RGB", (width, height), "white")
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "black")
     for idx, p in enumerate(paths):
         img = Image.open(p).convert("RGB")
-        img.thumbnail((cell_size, cell_size), Image.LANCZOS)
+        img = ImageOps.fit(img, (cell_w, cell_h), Image.LANCZOS, centering=(0.5, 0.5))
         col = idx % cols
         row = idx // cols
-        x = border + col * (cell_size + border) + (cell_size - img.width) // 2
-        y = border + row * (cell_size + border) + (cell_size - img.height) // 2
-        sheet.paste(img, (x, y))
+        sheet.paste(img, (col * cell_w, row * cell_h))
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     sheet.save(out_path, "PNG")
     return out_path
@@ -136,7 +137,9 @@ _BG_HINTS: List[Tuple[str, str]] = [
     (r"sunset|golden hour|dusk", "warm golden-hour sky"),
     (r"sunrise|dawn", "soft dawn light on the horizon"),
     (r"desert", "open desert landscape"),
+    (r"beach bar|tiki bar|shore bar", "empty beach bar with warm practical lights"),
     (r"beach|ocean|shore|sea", "empty shoreline with distant waves"),
+    (r"jungle|rainforest|tropical forest", "dense tropical jungle vegetation"),
     (r"rooftop", "empty rooftop overlooking the city"),
     (r"warehouse|industrial", "empty industrial warehouse interior"),
     (r"stage|concert|club", "empty concert stage with haze and rig lights"),
@@ -240,11 +243,10 @@ def allocate_msr_subjects(
             _add(imgs, char_descs.get(m, "the performer"))
     elif role in char_refs:
         _add(char_refs[role], char_descs.get(role, "the performer"))
-    elif char_refs:
-        # Story/unknown role: anchor to the first available character so the
-        # recurring performer stays consistent in narrative segments too.
-        first = next(iter(char_refs))
-        _add(char_refs[first], char_descs.get(first, "the performer"))
+    elif role:
+        if char_refs:
+            first = next(iter(char_refs))
+            _add(char_refs[first], char_descs.get(first, "the performer"))
 
     for img, desc in (prop_refs or []):
         if len(paths) >= max_subjects:
@@ -263,9 +265,17 @@ def build_msr_reference_block(subject_descs: List[str], background_desc: str) ->
     """
     if not subject_descs:
         return ""
-    lines = ["References:"]
+    lines = [
+        "References:",
+        "Use subject references only for identity, body, face, hair and locked clothing; "
+        "do not use their plain studio backgrounds as the scene.",
+        "Do not swap clothing or body shape between subject references.",
+    ]
     for i, d in enumerate(subject_descs, start=1):
         lines.append(f"[{i}] {d}.")
     if background_desc:
-        lines.append(f"Background reference: {background_desc.rstrip('.')}.")
+        lines.append(
+            f"Background reference: {background_desc.rstrip('.')}. Use this as the "
+            "location and scene environment."
+        )
     return " ".join(lines)

@@ -10,7 +10,10 @@ import music_video_pipeline as mvp  # noqa: E402
 from music_video_pipeline import (  # noqa: E402
     ACE_STEP_LANGS,
     Segment,
+    apply_role_clothing_contracts_to_segments,
+    apply_scene_contracts_to_segments,
     build_aligned_timeline,
+    build_role_clothing_contracts,
     build_segment_timeline,
     chunk_list,
     clamp_song_duration,
@@ -20,6 +23,7 @@ from music_video_pipeline import (  # noqa: E402
     partition_anchors_by_role,
     plan_same_gender_portraits,
     same_gender_veto,
+    sanitize_role_prompt_text,
     to_ace_language,
     _segment_video_prompt,
 )
@@ -518,6 +522,147 @@ def test_same_gender_veto_detected_duet_means_opposite_present():
 
 
 # ---------------------------------------------------------------------------
+# Role clothing contracts
+# ---------------------------------------------------------------------------
+
+def test_role_clothing_contracts_do_not_copy_female_outfit_to_missing_male():
+    text = (
+        "Male Jamaican singer with dreadlocks and rasta tam. "
+        "Female Puerto-Rican singer wears a white tank top with a green "
+        "marijuana leaf and high-cut blue denim hotpants."
+    )
+    contracts = build_role_clothing_contracts(text, "reggae")
+    assert "hotpants" not in contracts["male"].lower()
+    assert "marijuana leaf" not in contracts["male"].lower()
+    assert "closed brown buttoned vest" in contracts["male"]
+    assert "no bare torso" in contracts["male"]
+    assert "hotpants" in contracts["female"].lower()
+
+
+def test_sanitize_male_prompt_removes_female_body_and_clothing_terms():
+    contracts = {
+        "male": "loose linen shirt, denim shorts, sandals",
+        "female": "white tank top with marijuana leaf and hotpants",
+    }
+    prompt = (
+        "A male singer with hourglass build wears a white tank top with "
+        "marijuana leaf and hotpants."
+    )
+    out = sanitize_role_prompt_text(prompt, "male", contracts).lower()
+    assert "hourglass" not in out
+    assert "hotpants" not in out
+    assert "marijuana leaf" not in out
+    assert "loose linen shirt" in out
+    assert "flat chest" in out
+
+
+def test_apply_role_clothing_contracts_sanitizes_segment_and_relay():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=10,
+        label="Verse - male",
+        prompt="Male singer in a feminine hourglass pose.",
+        frame_variant_prompt="Male singer wearing hotpants.",
+        video_prompt_relay={
+            "global": "studio lighting",
+            "beats": ["The male performer wears a marijuana leaf tank top."],
+        },
+    )
+    contracts = {
+        "male": "rasta tam, loose linen shirt, denim shorts",
+        "female": "white tank top with marijuana leaf and hotpants",
+    }
+    apply_role_clothing_contracts_to_segments([seg], contracts)
+    combined = " ".join([
+        seg.prompt, seg.frame_variant_prompt, seg.video_prompt_relay["beats"][0],
+    ]).lower()
+    assert "hourglass" not in combined
+    assert "hotpants" not in combined
+    assert "marijuana leaf" not in combined
+    assert "rasta tam" in combined
+    assert seg.role_clothing_contract == contracts["male"]
+
+
+def test_duet_clothing_contract_names_both_roles_without_swapping():
+    contracts = {"male": "linen shirt", "female": "leaf tank top"}
+    out = sanitize_role_prompt_text("Two singers perform together", "duet", contracts)
+    assert "the man wears exactly: linen shirt" in out
+    assert "The woman wears exactly: leaf tank top" in out
+    assert "Never swap" in out
+
+
+def test_fit_clip_to_frames_trims_overrender_without_padding(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mvp, "_probe_frame_count", lambda _src: 120)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mvp.subprocess, "run", fake_run)
+    dst, actual = mvp._fit_clip_to_frames("src.mp4", 100, "dst.mp4")
+    assert dst == "dst.mp4"
+    assert actual == 120
+    cmd = calls[0]
+    assert "tpad=stop_mode=clone" not in " ".join(cmd)
+    assert cmd[cmd.index("-frames:v") + 1] == "100"
+
+
+def test_fit_clip_to_frames_warns_on_large_padding(monkeypatch, capsys):
+    monkeypatch.setattr(mvp, "_probe_frame_count", lambda _src: 60)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mvp.subprocess, "run", fake_run)
+    mvp._fit_clip_to_frames("src.mp4", 100, "dst.mp4")
+    assert "large frame pad" in capsys.readouterr().out
+
+
+def test_apply_scene_contracts_prefixes_prompts_without_changing_timing():
+    seg = Segment(
+        index=0,
+        start_time=3.5,
+        end_time=17.6,
+        label="Verse - duet",
+        prompt="Two singers perform on a beach.",
+        frame_variant_prompt="Two singers stand together.",
+        background_prompt="sunset beach with orange sky",
+        video_prompt_relay={"global": "warm camera grade", "beats": ["They sing."]},
+    )
+    apply_scene_contracts_to_segments([seg])
+    assert (seg.start_time, seg.end_time) == (3.5, 17.6)
+    assert seg.scene_contract == "sunset beach with orange sky"
+    assert seg.background_source == "llm"
+    assert seg.prompt.startswith("Scene location must be exactly: sunset beach")
+    assert seg.video_prompt_relay["beats"][0].startswith(
+        "Scene location must be exactly: sunset beach"
+    )
+
+
+def test_apply_scene_contracts_falls_back_when_background_mentions_people():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=8,
+        label="Intro",
+        prompt="Empty jungle at night with moonlight.",
+        frame_variant_prompt="Empty jungle at night.",
+        background_prompt="female singer wearing jeans in a jungle",
+    )
+    apply_scene_contracts_to_segments([seg])
+    assert seg.background_source == "fallback"
+    assert "female singer" not in seg.background_prompt.lower()
+    assert "jeans" not in seg.background_prompt.lower()
+    assert "jungle" in seg.prompt.lower()
+
+
+# ---------------------------------------------------------------------------
 # Fix 23: LLM-failure hardening (portrait fallback + _call_openrouter retry)
 # ---------------------------------------------------------------------------
 
@@ -804,4 +949,3 @@ def test_duet_prompt_embeds_theme_when_given_and_omits_when_empty():
     assert "Theme context: rainy neon street." in with_theme
     no_theme = mvp.build_duet_portrait_prompt("")
     assert "Theme context:" not in no_theme
-

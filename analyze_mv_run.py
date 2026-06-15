@@ -64,21 +64,28 @@ def _find_sidecar(mp4_path: str) -> Dict[str, Optional[str]]:
     """Locate audio, lyrics, segments.json, seg_videos dir next to the MP4."""
     d = os.path.dirname(os.path.abspath(mp4_path))
     base = os.path.basename(mp4_path)
+    stem = os.path.splitext(base)[0]
     # Job id from filename: music_video_<job8>.mp4
     job_match = re.match(r'music_video_([0-9a-f]+)\.mp4$', base)
     job_id = job_match.group(1) if job_match else None
 
-    # Find newest mp3 + matching _lyrics.txt
-    mp3s = sorted(
-        (f for f in os.listdir(d) if f.startswith("ComfyUI_") and f.endswith(".mp3")),
-        key=lambda f: os.path.getmtime(os.path.join(d, f)),
-        reverse=True,
-    )
-    audio = os.path.join(d, mp3s[0]) if mp3s else None
+    # New create/music-video runs are named "<artist> - <title>.mp4" and keep
+    # matching audio/lyrics sidecars under the same stem. Legacy runs used
+    # ComfyUI_*.mp3 next to music_video_<job8>.mp4.
+    exact_audio = os.path.join(d, f"{stem}.mp3")
+    if os.path.exists(exact_audio):
+        audio = exact_audio
+    else:
+        mp4_mtime = os.path.getmtime(mp4_path)
+        mp3s = sorted(
+            (f for f in os.listdir(d) if f.endswith(".mp3")),
+            key=lambda f: abs(os.path.getmtime(os.path.join(d, f)) - mp4_mtime),
+        )
+        audio = os.path.join(d, mp3s[0]) if mp3s else None
     lyrics = None
     if audio:
-        stem = os.path.splitext(os.path.basename(audio))[0]
-        candidate = os.path.join(d, f"{stem}_lyrics.txt")
+        audio_stem = os.path.splitext(os.path.basename(audio))[0]
+        candidate = os.path.join(d, f"{audio_stem}_lyrics.txt")
         if os.path.exists(candidate):
             lyrics = candidate
 
@@ -87,6 +94,18 @@ def _find_sidecar(mp4_path: str) -> Dict[str, Optional[str]]:
         candidate = os.path.join(d, f"segments_{job_id}.json")
         if os.path.exists(candidate):
             segments_json = candidate
+    if segments_json is None:
+        mp4_mtime = os.path.getmtime(mp4_path)
+        candidates = [
+            os.path.join(d, f)
+            for f in os.listdir(d)
+            if re.match(r"segments_[0-9a-f]{8}\.json$", f)
+        ]
+        if candidates:
+            candidates.sort(key=lambda p: abs(os.path.getmtime(p) - mp4_mtime))
+            nearest = candidates[0]
+            if abs(os.path.getmtime(nearest) - mp4_mtime) <= 600:
+                segments_json = nearest
 
     seg_videos_dir = os.path.join(d, "seg_videos")
     if not os.path.isdir(seg_videos_dir):
@@ -209,7 +228,7 @@ def analyze_mv_run(mp4_path: str) -> Tuple[List[AnalysisRow], Dict[str, Optional
     sidecar = _find_sidecar(mp4_path)
     audio = sidecar["audio"]
     if not audio:
-        raise FileNotFoundError(f"No ComfyUI_*.mp3 sidecar next to {mp4_path}")
+        raise FileNotFoundError(f"No audio sidecar (.mp3) next to {mp4_path}")
 
     audio_dur = _audio_duration_via_ffprobe(audio)
     segments_plan = load_planned_segments(

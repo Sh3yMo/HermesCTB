@@ -10,6 +10,7 @@ from analyze_mv_run import (  # noqa: E402
     AnalysisRow,
     PlannedSegment,
     _classify_status,
+    _find_sidecar,
     _portrait_role_from_label,
     analyze_mv_run,
     load_planned_segments,
@@ -107,6 +108,41 @@ def test_load_planned_segments_fallback_from_lyrics(tmp_path):
 
 def test_load_planned_segments_empty_when_no_sources(tmp_path):
     assert load_planned_segments(None, 30.0, None, None) == []
+
+
+def test_find_sidecar_supports_artist_title_filenames(tmp_path):
+    mp4 = tmp_path / "Zion Breeze - Island Romance.mp4"
+    mp4.write_bytes(b"mp4")
+    audio = tmp_path / "Zion Breeze - Island Romance.mp3"
+    audio.write_bytes(b"mp3")
+    lyrics = tmp_path / "Zion Breeze - Island Romance_lyrics.txt"
+    lyrics.write_text("[Verse - male]\nline")
+    seg = tmp_path / "segments_dec78c72.json"
+    seg.write_text("[]")
+    os.utime(seg, (mp4.stat().st_mtime, mp4.stat().st_mtime))
+
+    sidecar = _find_sidecar(str(mp4))
+
+    assert sidecar["audio"] == str(audio)
+    assert sidecar["lyrics"] == str(lyrics)
+    assert sidecar["segments_json"] == str(seg)
+
+
+def test_find_sidecar_chooses_segments_json_nearest_to_title_mp4(tmp_path):
+    mp4 = tmp_path / "Artist - Title.mp4"
+    mp4.write_bytes(b"mp4")
+    audio = tmp_path / "Artist - Title.mp3"
+    audio.write_bytes(b"mp3")
+    old = tmp_path / "segments_aaaaaaaa.json"
+    new = tmp_path / "segments_bbbbbbbb.json"
+    old.write_text("[]")
+    new.write_text("[]")
+    os.utime(old, (mp4.stat().st_mtime - 5000, mp4.stat().st_mtime - 5000))
+    os.utime(new, (mp4.stat().st_mtime + 5, mp4.stat().st_mtime + 5))
+
+    sidecar = _find_sidecar(str(mp4))
+
+    assert sidecar["segments_json"] == str(new)
 
 
 # ─── analyze_mv_run integration ──────────────────────────────────────────────
