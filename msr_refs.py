@@ -265,17 +265,18 @@ def build_msr_reference_block(subject_descs: List[str], background_desc: str) ->
     """
     if not subject_descs:
         return ""
+    ordinals = ["first", "second", "third", "fourth"]
     lines = [
-        "References:",
-        "Use subject references only for identity, body, face, hair and locked clothing; "
-        "do not use their plain studio backgrounds as the scene.",
-        "Do not swap clothing or body shape between subject references.",
+        "Use the subject references only for identity, body, face, hair and locked clothing; "
+        "do not use their plain studio backgrounds as the scene."
     ]
     for i, d in enumerate(subject_descs, start=1):
-        lines.append(f"[{i}] {d}.")
+        label = ordinals[i - 1] if i <= len(ordinals) else f"subject {i}"
+        lines.append(f"Use the {label} subject reference as {d.rstrip('.')}.")
     if background_desc:
         lines.append(
-            f"Background reference: {background_desc.rstrip('.')}. Use this as the "
-            "location and scene environment."
+            f"Use the background reference as the real location: {background_desc.rstrip('.')}. "
+            "The performer should look physically present there, with natural contact "
+            "shadows and matching light."
         )
     return " ".join(lines)

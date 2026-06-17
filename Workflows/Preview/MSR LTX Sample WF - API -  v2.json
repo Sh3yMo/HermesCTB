@@ -1,0 +1,537 @@
+{
+  "5": {
+    "inputs": {
+      "text": "Warm afternoon sun, white rooftop, shallow depth of field, saturated colors, fisheye lens distortion. References: [1] the lead performer (character turnaround sheet: full body front, back and side views, face close-up front and side).Background reference: Miami rooftop patio, white concrete, blurred city buildings, warm afternoon sun, amber daylight tones.\n\nThe female stands center frame. She performs a low-knee bounce and points forcefully at the camera. She leans forward aggressively and says \"I am the hottest Chica on the earth, nobody can reach me\"",
+      "clip": [
+        "110",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "text": "worst quality, blurry, jittery, distorted, inconsistent appearance",
+      "clip": [
+        "110",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "7": {
+    "inputs": {
+      "frame_rate": [
+        "101",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXVConditioning"
+    }
+  },
+  "8": {
+    "inputs": {
+      "width": [
+        "43",
+        0
+      ],
+      "height": [
+        "44",
+        0
+      ],
+      "length": [
+        "104",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "EmptyLTXVLatentVideo"
+    }
+  },
+  "9": {
+    "inputs": {
+      "frame_idx": 0,
+      "strength": 1,
+      "latent_downscale_factor": 1,
+      "crop": "center",
+      "use_tiled_encode": false,
+      "tile_size": 256,
+      "tile_overlap": 64,
+      "positive": [
+        "7",
+        0
+      ],
+      "negative": [
+        "7",
+        1
+      ],
+      "vae": [
+        "112",
+        0
+      ],
+      "latent": [
+        "8",
+        0
+      ],
+      "image": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "LTXAddVideoICLoRAGuide",
+    "_meta": {
+      "title": "🅛🅣🅧 Add Video IC-LoRA Guide"
+    }
+  },
+  "10": {
+    "inputs": {
+      "lora_name": "LTX-2.3-Licon-MSR-V1.safetensors",
+      "strength_model": 1,
+      "model": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "LTXICLoRALoaderModelOnly",
+    "_meta": {
+      "title": "🅛🅣🅧 IC-LoRA Loader Model Only"
+    }
+  },
+  "13": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "15": {
+    "inputs": {
+      "noise_seed": 86532719322738
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "16": {
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "37",
+        0
+      ],
+      "sampler": [
+        "13",
+        0
+      ],
+      "sigmas": [
+        "27",
+        0
+      ],
+      "latent_image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "17": {
+    "inputs": {
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ],
+      "latent": [
+        "24",
+        0
+      ]
+    },
+    "class_type": "LTXVCropGuides",
+    "_meta": {
+      "title": "LTXVCropGuides"
+    }
+  },
+  "22": {
+    "inputs": {
+      "frames_number": [
+        "104",
+        0
+      ],
+      "frame_rate": [
+        "97",
+        0
+      ],
+      "batch_size": 1,
+      "audio_vae": [
+        "111",
+        0
+      ]
+    },
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": {
+      "title": "LTXV Empty Latent Audio"
+    }
+  },
+  "23": {
+    "inputs": {
+      "video_latent": [
+        "85",
+        2
+      ],
+      "audio_latent": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "LTXVConcatAVLatent"
+    }
+  },
+  "24": {
+    "inputs": {
+      "av_latent": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "LTXVSeparateAVLatent"
+    }
+  },
+  "25": {
+    "inputs": {
+      "samples": [
+        "24",
+        1
+      ],
+      "audio_vae": [
+        "111",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "27": {
+    "inputs": {
+      "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  },
+  "28": {
+    "inputs": {
+      "1": [
+        "33",
+        0
+      ],
+      "width": [
+        "43",
+        0
+      ],
+      "height": [
+        "44",
+        0
+      ],
+      "frame_count": 41,
+      "background": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "LiconMSR",
+    "_meta": {
+      "title": "Licon MSR"
+    }
+  },
+  "30": {
+    "inputs": {
+      "image": "ComfyUI_temp_rvehm_00001_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "bg"
+    }
+  },
+  "33": {
+    "inputs": {
+      "image": "sheet_lead_e0cf82c8.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "img1"
+    }
+  },
+  "37": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "10",
+        0
+      ],
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "38": {
+    "inputs": {
+      "samples": [
+        "17",
+        2
+      ],
+      "vae": [
+        "112",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "43": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "width"
+    }
+  },
+  "44": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "height"
+    }
+  },
+  "66": {
+    "inputs": {
+      "frame_rate": 8,
+      "loop_count": 0,
+      "filename_prefix": "AnimateDiff",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "85": {
+    "inputs": {
+      "num_guides": 5,
+      "num_guides.frame_idx_1": 1,
+      "num_guides.strength_1": 0,
+      "num_guides.frame_idx_2": 1,
+      "num_guides.strength_2": 0,
+      "num_guides.frame_idx_3": 1,
+      "num_guides.strength_3": 0,
+      "num_guides.frame_idx_4": 1,
+      "num_guides.strength_4": 0,
+      "num_guides.frame_idx_5": 1,
+      "num_guides.strength_5": 1,
+      "positive": [
+        "7",
+        0
+      ],
+      "negative": [
+        "7",
+        1
+      ],
+      "vae": [
+        "112",
+        0
+      ],
+      "latent": [
+        "8",
+        0
+      ],
+      "image_1": [
+        "33",
+        0
+      ],
+      "image_5": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "LTXVAddGuideMulti",
+    "_meta": {
+      "title": "LTXVAddGuideMulti"
+    }
+  },
+  "96": {
+    "inputs": {
+      "frame_rate": [
+        "103",
+        0
+      ],
+      "loop_count": 0,
+      "filename_prefix": "Msr",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "38",
+        0
+      ],
+      "audio": [
+        "25",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "97": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "fps"
+    }
+  },
+  "101": {
+    "inputs": {
+      "expression": "a",
+      "values.a": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression"
+    }
+  },
+  "103": {
+    "inputs": {
+      "expression": "a",
+      "values.a": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Math Expression"
+    }
+  },
+  "104": {
+    "inputs": {
+      "value": 241
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "frames"
+    }
+  },
+  "108": {
+    "inputs": {
+      "unet_name": "ltx-2.3-22b-dev-UD-Q4_K_M.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  },
+  "110": {
+    "inputs": {
+      "clip_name1": "gemma_3_12B_it_fp4_mixed.safetensors",
+      "clip_name2": "ltx-2.3_text_projection_bf16.safetensors",
+      "type": "ltxv",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {
+      "title": "DualCLIPLoader"
+    }
+  },
+  "111": {
+    "inputs": {
+      "vae_name": "LTX23_audio_vae_bf16.safetensors",
+      "device": "main_device",
+      "weight_dtype": "bf16"
+    },
+    "class_type": "VAELoaderKJ",
+    "_meta": {
+      "title": "VAELoader KJ"
+    }
+  },
+  "112": {
+    "inputs": {
+      "vae_name": "LTX23_video_vae_bf16.safetensors",
+      "device": "main_device",
+      "weight_dtype": "bf16"
+    },
+    "class_type": "VAELoaderKJ",
+    "_meta": {
+      "title": "VAELoader KJ"
+    }
+  }
+}

@@ -34,8 +34,27 @@ def test_cole_bennett_descriptor_is_cel_shaded() -> None:
     desc = d.visual_style_descriptor(_profile_by_id("cole_bennett")).lower()
     assert "cel-shaded" in desc or "cartoon" in desc
     assert "photorealistic" not in desc
-    # palette + grain tail still present
-    assert "color palette" in desc
+    assert "color palette" not in desc
+
+
+def test_video_style_descriptor_uses_palette_only_as_overall_grade() -> None:
+    d = MVDirector()
+    fake = {
+        "ethos_oneliner": "Gritty handheld realism, naturalistic available light.",
+        "signature_shots": ["handheld_MS"],
+        "color_palette": ["crimson red velvet", "cool silver blue"],
+        "film_grain": True,
+    }
+
+    desc = d.video_style_descriptor(fake).lower()
+
+    assert "overall video color grade" in desc
+    assert "cinematography" in desc
+    assert "crimson red velvet" in desc
+    assert "cool silver blue" in desc
+    assert "do not recolor performer clothing" in desc
+    assert "hair" in desc
+    assert "skin" in desc
 
 
 def test_non_stylized_profile_defaults_photoreal() -> None:
@@ -76,11 +95,12 @@ def test_injects_appearance_and_style_into_every_view() -> None:
     style = "bold cel-shaded 2D cartoon illustration style"
     appearance = "dark-skinned woman, long straight black hair, gold two-piece bikini, white heels"
     views = build_view_prompts(style_descriptor=style, appearance_desc=appearance)
-    assert len(views) == len(MSR_VIEW_PROMPTS) == 4
+    assert len(views) == len(MSR_VIEW_PROMPTS) == 3
     for v in views:
         assert "gold two-piece bikini" in v   # garment carried into every angle
         assert "cel-shaded" in v               # producer medium carried too
-    # The 4 distinct view framings are preserved.
+    # The 3 generated MCA framings are preserved; the front body cell is the
+    # original portrait in the production sheet.
     assert "seen from behind" in views[0]
     assert "strict side profile" in views[1]
     assert "facing the camera" in views[2]

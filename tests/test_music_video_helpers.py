@@ -13,6 +13,7 @@ from music_video_pipeline import (  # noqa: E402
     apply_role_clothing_contracts_to_segments,
     apply_scene_contracts_to_segments,
     build_aligned_timeline,
+    build_role_age_contracts,
     build_role_clothing_contracts,
     build_segment_timeline,
     chunk_list,
@@ -22,8 +23,10 @@ from music_video_pipeline import (  # noqa: E402
     parse_segment_plan,
     partition_anchors_by_role,
     plan_same_gender_portraits,
+    filter_role_contracts_for_present_roles,
     same_gender_veto,
     sanitize_role_prompt_text,
+    ensure_relay_specs_for_segments,
     to_ace_language,
     _segment_video_prompt,
 )
@@ -539,6 +542,69 @@ def test_role_clothing_contracts_do_not_copy_female_outfit_to_missing_male():
     assert "hotpants" in contracts["female"].lower()
 
 
+def test_role_clothing_contract_extracts_outfit_from_scene_heavy_theme():
+    theme = (
+        "realistic indie pop rooftop performance, blue hour city skyline, "
+        "two pole lights, solo female singer, consistent white tank top "
+        "blue denim shorts black sandals"
+    )
+
+    contracts = build_role_clothing_contracts(theme, "indie pop")
+
+    female = contracts["female"].lower()
+    assert "white tank top" in female
+    assert "blue denim shorts" in female
+    assert "black sandals" in female
+    assert "rooftop" not in female
+    assert "city skyline" not in female
+    assert "pole lights" not in female
+
+
+def test_role_contracts_extract_female_only_outfit_and_age_without_male_contract():
+    theme = (
+        "Solo female singer around 29 years old wearing a silver cropped jacket "
+        "and black high-waist pants in a neon alley. No male vocalist."
+    )
+
+    clothing = build_role_clothing_contracts(theme, "dark pop")
+    ages = build_role_age_contracts(theme, "dark pop")
+
+    assert clothing["male"] == ""
+    assert "silver cropped jacket" in clothing["female"].lower()
+    assert "black high-waist pants" in clothing["female"].lower()
+    assert ages["male"] == ""
+    assert ages["female"].lower() == "around 29 years old"
+
+
+def test_filter_role_contracts_removes_unused_male_for_female_only_segments():
+    segments = [
+        Segment(
+            index=0,
+            start_time=0,
+            end_time=10,
+            label="Verse - female",
+            prompt="Female singer performs.",
+        )
+    ]
+    clothing = {
+        "male": "burgundy shirt, tan trousers",
+        "female": "silver cropped jacket, black high-waist pants",
+    }
+    ages = {
+        "male": "adult male performer around 30 years old",
+        "female": "adult female performer around 30 years old",
+    }
+
+    filtered_clothing, filtered_ages = filter_role_contracts_for_present_roles(
+        segments, clothing, ages, duet=""
+    )
+
+    assert filtered_clothing["male"] == ""
+    assert filtered_ages["male"] == ""
+    assert filtered_clothing["female"] == clothing["female"]
+    assert filtered_ages["female"] == ages["female"]
+
+
 def test_sanitize_male_prompt_removes_female_body_and_clothing_terms():
     contracts = {
         "male": "loose linen shirt, denim shorts, sandals",
@@ -584,11 +650,83 @@ def test_apply_role_clothing_contracts_sanitizes_segment_and_relay():
     assert seg.role_clothing_contract == contracts["male"]
 
 
+def test_wardrobe_slot_overrides_theme_clothing_contracts():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=10,
+        label="Chorus - female",
+        prompt="Female singer performs on rooftop, wearing black sequined halter bodysuit.",
+        frame_variant_prompt="Female singer stands on rooftop.",
+        wardrobe_slot="performance_stage",
+        video_prompt_relay={
+            "global": "rooftop camera anchor",
+            "beats": ["The singer stands under stage lights."],
+        },
+    )
+    contracts = {
+        "male": "burgundy shirt and tan trousers",
+        "female": "fitted feminine top, denim shorts or skirt",
+    }
+
+    apply_role_clothing_contracts_to_segments([seg], contracts)
+
+    combined = " ".join([
+        seg.role_clothing_contract,
+        seg.prompt,
+        seg.frame_variant_prompt,
+        seg.video_prompt_relay["global"],
+        seg.video_prompt_relay["beats"][0],
+    ]).lower()
+    assert "black sequined halter bodysuit" in combined
+    assert "fitted feminine top" not in combined
+    assert "denim shorts or skirt" not in combined
+
+
+def test_wardrobe_slot_removes_conflicting_existing_outfit_phrases():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=10,
+        label="Verse - male",
+        prompt=(
+            "Male singer wearing burgundy shirt under a brown buttoned vest "
+            "stands on a rooftop."
+        ),
+        frame_variant_prompt="He wears a brown buttoned vest and tan trousers.",
+        wardrobe_slot="rocker_edgy",
+        video_prompt_relay={
+            "global": "rooftop camera anchor",
+            "beats": [
+                "The male singer wears tan trousers and a brown vest under stage lights."
+            ],
+        },
+    )
+    contracts = {
+        "male": "burgundy shirt under a brown buttoned vest, tan trousers",
+        "female": "black dress",
+    }
+
+    apply_role_clothing_contracts_to_segments([seg], contracts)
+
+    combined = " ".join([
+        seg.role_clothing_contract,
+        seg.prompt,
+        seg.frame_variant_prompt,
+        seg.video_prompt_relay["global"],
+        seg.video_prompt_relay["beats"][0],
+    ]).lower()
+    assert "black leather biker jacket" in combined
+    assert "brown buttoned vest" not in combined
+    assert "tan trousers" not in combined
+
+
 def test_duet_clothing_contract_names_both_roles_without_swapping():
     contracts = {"male": "linen shirt", "female": "leaf tank top"}
     out = sanitize_role_prompt_text("Two singers perform together", "duet", contracts)
-    assert "the man wears exactly: linen shirt" in out
-    assert "The woman wears exactly: leaf tank top" in out
+    out_lower = out.lower()
+    assert "the man wears exactly linen shirt" in out_lower
+    assert "the woman wears exactly leaf tank top" in out_lower
     assert "Never swap" in out
 
 
@@ -640,9 +778,147 @@ def test_apply_scene_contracts_prefixes_prompts_without_changing_timing():
     assert seg.scene_contract == "sunset beach with orange sky"
     assert seg.background_source == "llm"
     assert seg.prompt.startswith("Scene location must be exactly: sunset beach")
-    assert seg.video_prompt_relay["beats"][0].startswith(
-        "Scene location must be exactly: sunset beach"
+    assert seg.video_prompt_relay["beats"][0] == "They sing."
+    assert "Use the scene reference as the real location. Location is sunset beach" in (
+        seg.video_prompt_relay["global"]
     )
+
+
+def test_scene_contract_relay_keeps_beats_promptrelay_clean():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=12,
+        label="Verse - female",
+        prompt="Female singer performs on a rooftop.",
+        frame_variant_prompt="Female singer stands on a rooftop.",
+        background_prompt="empty rooftop at blue hour with two pole lights",
+        video_prompt_relay={
+            "global": "slow dolly, realistic grade",
+            "beats": [
+                "The performer stands still on the rooftop.",
+                "The camera slowly pulls back.",
+            ],
+        },
+    )
+
+    apply_scene_contracts_to_segments([seg])
+
+    assert "Use the scene reference as the real location" in seg.video_prompt_relay["global"]
+    assert seg.video_prompt_relay["beats"] == [
+        "The performer stands still on the rooftop.",
+        "The camera slowly pulls back.",
+    ]
+    assert not seg.video_prompt_relay["beats"][0].startswith("Scene location must be exactly")
+
+
+def test_role_clothing_contracts_lock_relay_global_and_scene_integration():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=10,
+        label="Verse - female",
+        prompt="Female singer performs in a neon alley.",
+        frame_variant_prompt="Female singer stands on wet pavement.",
+        video_prompt_relay={
+            "global": "handheld camera, neon rim light",
+            "beats": ["She turns toward the camera."],
+        },
+    )
+    contracts = {
+        "male": "black silk shirt",
+        "female": "black sequined halter bodysuit and matching shorts",
+    }
+
+    apply_role_clothing_contracts_to_segments([seg], contracts)
+
+    global_prompt = seg.video_prompt_relay["global"].lower()
+    beat_prompt = seg.video_prompt_relay["beats"][0].lower()
+    assert "black sequined halter bodysuit" in global_prompt
+    assert "black sequined halter bodysuit" in beat_prompt
+    assert "natural contact shadows" in global_prompt
+    assert "matching scene light" in global_prompt
+
+
+def test_role_clothing_contract_relay_global_only_after_first_static_beat():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=12,
+        label="Verse - female",
+        prompt="Female singer performs in a neon alley.",
+        frame_variant_prompt="Female singer stands on wet pavement.",
+        video_prompt_relay={
+            "global": "handheld camera, neon rim light",
+            "beats": [
+                "The performer stands still in the alley.",
+                "She turns toward the camera.",
+            ],
+        },
+    )
+    contracts = {
+        "female": "white tank top, blue denim shorts and black sandals",
+    }
+
+    apply_role_clothing_contracts_to_segments([seg], contracts)
+
+    assert "Use the female performer reference as the locked source" in seg.video_prompt_relay["global"]
+    assert "white tank top" in seg.video_prompt_relay["beats"][0]
+    assert "white tank top" not in seg.video_prompt_relay["beats"][1]
+
+
+def test_ensure_relay_specs_synthesizes_missing_relay_without_legacy_prompt_blob():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=8,
+        label="Chorus - female",
+        prompt=(
+            "Scene location must be exactly: empty rooftop at blue hour. "
+            "Clothing lock: the referenced female singer wears only this exact outfit: "
+            "white tank top, blue denim shorts, black sandals. Close-up of singer. "
+            "Text appears in the city background reading 'STAY IN THIS MOMENT NOW'."
+        ),
+        frame_variant_prompt="Female singer stands on a rooftop.",
+        background_prompt="empty rooftop at blue hour",
+        scene_contract="empty rooftop at blue hour",
+        role_clothing_contract="white tank top, blue denim shorts, black sandals",
+    )
+
+    ensure_relay_specs_for_segments([seg])
+
+    assert seg.video_prompt_relay is not None
+    assert "Use the scene reference as the real location" in seg.video_prompt_relay["global"]
+    assert len(seg.video_prompt_relay["beats"]) == 2
+    assert "Text appears" not in " ".join(seg.video_prompt_relay["beats"])
+    assert "Scene location must be exactly" not in " ".join(seg.video_prompt_relay["beats"])
+    assert "white tank top" in seg.video_prompt_relay["beats"][0]
+
+
+def test_ensure_relay_specs_includes_age_and_avoids_generic_story_placeholder():
+    seg = Segment(
+        index=0,
+        start_time=0,
+        end_time=8,
+        label="Chorus - female",
+        prompt="Female singer leans toward a rain-streaked window.",
+        frame_variant_prompt="Close-up of the female singer beside a rain-streaked window.",
+        background_prompt="rainy neon alley window",
+        scene_contract="rainy neon alley window",
+        role_clothing_contract="silver cropped jacket, black high-waist pants",
+        role_age_contract="adult female performer around 30 years old",
+    )
+
+    ensure_relay_specs_for_segments([seg])
+
+    combined = " ".join([
+        seg.video_prompt_relay["global"],
+        *seg.video_prompt_relay["beats"],
+    ]).lower()
+    assert "rain-streaked window" in combined
+    assert "silver cropped jacket" in combined
+    assert "adult female performer around 30 years old" in combined
+    assert "the performer holds the pose" not in combined
 
 
 def test_apply_scene_contracts_falls_back_when_background_mentions_people():
@@ -691,6 +967,40 @@ def test_portrait_uses_llm_response_when_present():
     prompter._call_openrouter = _resp
     out = asyncio.run(prompter.generate_character_portrait_prompt("lyrics", ""))
     assert out == "a woman with red hair, plain studio portrait"
+
+
+def test_female_portrait_strips_male_body_leak_from_llm_response():
+    prompter = mvp.MusicVideoPrompter({})
+
+    async def _resp(*a, **k):
+        return (
+            "front-facing full-body standing solo female indie pop singer, "
+            "hourglass build, flat chest, blonde bob hair, white tank top"
+        )
+    prompter._call_openrouter = _resp
+
+    out = asyncio.run(prompter.generate_character_portrait_prompt(
+        "theme",
+        "indie pop",
+        role="female",
+        clothing_contract="white tank top, blue denim shorts, black sandals",
+    ))
+
+    assert "flat chest" not in out.lower()
+    assert "female indie pop singer" in out
+
+
+def test_generic_female_portrait_strips_male_body_leak_from_llm_response():
+    prompter = mvp.MusicVideoPrompter({})
+
+    async def _resp(*a, **k):
+        return "front-facing full-body female singer, hourglass build, flat chest, brown hair"
+    prompter._call_openrouter = _resp
+
+    out = asyncio.run(prompter.generate_character_portrait_prompt("theme", "indie pop"))
+
+    assert "flat chest" not in out.lower()
+    assert "female singer" in out
 
 
 class _FakeResp:

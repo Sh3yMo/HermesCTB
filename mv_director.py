@@ -309,7 +309,13 @@ class MVDirector:
         lines: list[str] = []
         lines.append(f"Producer style reference: **{profile.get('name')}** — {profile.get('ethos_oneliner','')}")
         lines.append(f"Edit tempo: {profile.get('edit_tempo')}  |  Film grain: {profile.get('film_grain')}")
-        lines.append(f"Color palette: {', '.join(profile.get('color_palette', [])[:6])}")
+        palette = ", ".join(profile.get("color_palette", [])[:6])
+        if palette:
+            lines.append(
+                "Overall video color grade palette applies only to lighting, "
+                "grading and cinematography. Do not recolor clothing, hair, "
+                f"skin, identity or props. Palette terms are {palette}."
+            )
         lines.append(f"Lighting recipes: {', '.join(profile.get('lighting_recipes', [])[:5])}")
         if profile.get("_forced_settings"):
             lines.append(f"Required settings: {', '.join(profile['_forced_settings'])}")
@@ -384,15 +390,24 @@ class MVDirector:
                 )
             else:
                 medium = "photorealistic cinematic still"
+        grain = "subtle film grain" if profile.get("film_grain") else "clean digital finish"
+        parts = [medium]
+        parts.append(grain)
+        return "; ".join(parts)
+
+    def video_style_descriptor(self, profile: dict) -> str:
+        """Render-ready LTX video look string; palette applies only to grade."""
+        base = self.visual_style_descriptor(profile)
         palette = ", ".join(
             p.replace("_", " ") for p in (profile.get("color_palette") or [])[:4]
         )
-        grain = "subtle film grain" if profile.get("film_grain") else "clean digital finish"
-        parts = [medium]
-        if palette:
-            parts.append(f"color palette: {palette}")
-        parts.append(grain)
-        return "; ".join(parts)
+        if not palette:
+            return base
+        return (
+            f"{base}. The overall video color grade and cinematography use "
+            f"palette tones {palette}. Do not recolor performer clothing, "
+            "hair, skin, identity, props or reference garments."
+        )
 
     # ── Helpers ─────────────────────────────────────────────────────
 

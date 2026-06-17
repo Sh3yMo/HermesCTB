@@ -30,6 +30,7 @@ _COMFY_EXE_CANDIDATES = [
     os.path.join(_LOCALAPPDATA, r"Programs\@comfyorgcomfyui-electron\ComfyUI.exe"),
     os.path.join(_LOCALAPPDATA, r"Programs\ComfyUI\ComfyUI.exe"),
     os.path.join(_LOCALAPPDATA, r"Programs\comfyui-electron\ComfyUI.exe"),
+    os.path.join(_LOCALAPPDATA, r"Programs\comfyui\Comfy Desktop\Comfy Desktop.exe"),
 ]
 
 
@@ -58,11 +59,94 @@ HEALTHCHECK_TIMEOUT = int(os.environ.get("HEALTHCHECK_TIMEOUT", "120"))
 KILL_TIMEOUT = int(os.environ.get("KILL_TIMEOUT", "10"))
 
 
+def _comfy_port() -> int:
+    try:
+        return int(COMFY_URL.rsplit(":", 1)[1].split("/")[0])
+    except (IndexError, ValueError):
+        return 8188
+
+
+COMFY_PORT = _comfy_port()
+
+# --- Direct headless server launch -----------------------------------------
+# Comfy Desktop 0.4.x shows a cloud/local picker on GUI start, so relaunching
+# the Electron exe no longer brings the server online unattended (it sits on
+# the picker; the port never binds). We instead relaunch the ComfyUI *server*
+# process directly — the exact command the desktop app spawns — which binds the
+# port with no picker. All paths are env-overridable; defaults match the live
+# install (uv-managed CPython under AppData\Roaming\uv\python).
+import glob as _glob
+
+
+def _resolve_server_python() -> str:
+    explicit = os.environ.get("COMFY_SERVER_PYTHON", "").strip()
+    if explicit:
+        return explicit
+    base = os.path.join(os.path.expanduser(r"~\AppData\Roaming\uv\python"))
+    hits = sorted(_glob.glob(os.path.join(base, "cpython-*", "python.exe")))
+    if not hits:
+        return ""
+    # Comfy Desktop's managed runtime is CPython 3.12 — that env (not a newer
+    # uv python) is the one with ComfyUI's dependencies installed. Prefer the
+    # newest 3.12.x; only fall back to the newest overall if no 3.12 exists.
+    pref = os.environ.get("COMFY_SERVER_PY_VERSION", "cpython-3.12")
+    matching = [h for h in hits if os.path.basename(os.path.dirname(h)).startswith(pref)]
+    return (matching or hits)[-1]
+
+
+COMFY_SERVER_PYTHON = _resolve_server_python()
+COMFY_SERVER_CWD = os.environ.get(
+    "COMFY_SERVER_CWD", os.path.expanduser(r"~\ComfyUI-Installs\ComfyUI"),
+)
+COMFY_BASE_DIR = os.environ.get("COMFY_BASE_DIR", r"I:\ComfyUI")
+_SHARED_MODEL_PATHS = os.environ.get(
+    "COMFY_EXTRA_MODEL_PATHS",
+    os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser(r"~\AppData\Roaming")),
+        r"Comfy Desktop\shared_model_paths.yaml",
+    ),
+)
+# main.py is relative to COMFY_SERVER_CWD, matching the desktop launch.
+COMFY_SERVER_ARGS = [
+    "-s", r"ComfyUI\main.py",
+    "--feature-flag", "show_signin_button=true",
+    "--base-directory", COMFY_BASE_DIR,
+    "--user-directory", os.path.join(COMFY_BASE_DIR, "user"),
+    "--database-url", f"sqlite:///{os.path.join(COMFY_BASE_DIR, 'user', 'comfyui.db')}",
+    "--enable-manager", "--fast-disk",
+    "--extra-model-paths-config", _SHARED_MODEL_PATHS,
+    "--input-directory", os.path.join(COMFY_BASE_DIR, "input"),
+    "--output-directory", os.path.join(COMFY_BASE_DIR, "output"),
+]
+
+
+def _launch_available() -> bool:
+    """True when either the direct server launch or the GUI exe is runnable."""
+    if (COMFY_SERVER_PYTHON and os.path.exists(COMFY_SERVER_PYTHON)
+            and os.path.isdir(COMFY_SERVER_CWD)):
+        return True
+    return os.path.exists(COMFY_EXE_PATH)
+
+
+def _launch_detail() -> str:
+    return (
+        f"no launchable ComfyUI found (server_python={COMFY_SERVER_PYTHON!r}, "
+        f"cwd={COMFY_SERVER_CWD!r}, exe={COMFY_EXE_PATH!r})"
+    )
+
+
+# Process image names to match when killing. The Electron desktop build runs
+# as "Comfy Desktop.exe" (no "comfyui" substring), the portable/electron build
+# as "ComfyUI.exe" -- match both so /restart actually finds the running app.
+_COMFY_PROC_NEEDLES = ("comfyui", "comfy desktop")
+
+
 def _comfy_processes():
     procs = []
     for p in psutil.process_iter(["pid", "name"]):
         try:
-            if "comfyui" in p.info["name"].lower():
+            name = (p.info["name"] or "").lower()
+            if any(needle in name for needle in _COMFY_PROC_NEEDLES):
                 procs.append(p)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -77,8 +161,42 @@ def _is_comfy_online():
         return False
 
 
+def _server_listener_pids(port: int):
+    """PIDs LISTENing on the ComfyUI port. The real server is a plain
+    'python.exe' (uv-managed) that the name-based scan above never matches —
+    so the only reliable handle on it is the socket it binds."""
+    pids = set()
+    try:
+        for c in psutil.net_connections(kind="inet"):
+            if (c.laddr and c.laddr.port == port
+                    and c.status == psutil.CONN_LISTEN and c.pid):
+                pids.add(c.pid)
+    except (psutil.AccessDenied, RuntimeError):
+        pass
+    return pids
+
+
+def _kill_targets():
+    """Electron 'Comfy Desktop' processes + the process bound to the ComfyUI
+    port and its whole tree. Never the supervisor itself (kill by socket/tree,
+    never by a bare 'python' name match, so unrelated pythons survive)."""
+    self_pid = os.getpid()
+    targets: dict[int, "psutil.Process"] = {}
+    for p in _comfy_processes():
+        targets[p.pid] = p
+    for pid in _server_listener_pids(COMFY_PORT):
+        try:
+            proc = psutil.Process(pid)
+            for member in [proc] + proc.children(recursive=True):
+                targets[member.pid] = member
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    targets.pop(self_pid, None)
+    return list(targets.values())
+
+
 def _kill_comfy():
-    procs = _comfy_processes()
+    procs = _kill_targets()
     for p in procs:
         try:
             p.terminate()
@@ -93,10 +211,20 @@ def _kill_comfy():
 
 
 def _launch_comfy():
-    subprocess.Popen(
-        [COMFY_EXE_PATH],
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
-    )
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    # Prefer the direct headless server launch (no Electron cloud/local picker).
+    if (COMFY_SERVER_PYTHON and os.path.exists(COMFY_SERVER_PYTHON)
+            and os.path.isdir(COMFY_SERVER_CWD)):
+        print(f"[supervisor] launching server: {COMFY_SERVER_PYTHON} "
+              f"(cwd={COMFY_SERVER_CWD})", flush=True)
+        subprocess.Popen(
+            [COMFY_SERVER_PYTHON, *COMFY_SERVER_ARGS],
+            cwd=COMFY_SERVER_CWD, creationflags=flags,
+        )
+        return
+    # Fallback: the Electron desktop exe (may require a manual picker click).
+    print(f"[supervisor] launching desktop exe (fallback): {COMFY_EXE_PATH}", flush=True)
+    subprocess.Popen([COMFY_EXE_PATH], creationflags=flags)
 
 
 def _wait_for_online():
@@ -138,12 +266,12 @@ class Handler(BaseHTTPRequestHandler):
             print("[supervisor] /restart received -- killing ComfyUI...", flush=True)
             _kill_comfy()
             time.sleep(1)
-            if not os.path.exists(COMFY_EXE_PATH):
-                print(f"[supervisor] EXE not found: {COMFY_EXE_PATH}", flush=True)
+            if not _launch_available():
+                print(f"[supervisor] {_launch_detail()}", flush=True)
                 self._send_json(503, {
                     "ok": False,
                     "error": "exe_not_found",
-                    "detail": f"ComfyUI.exe not found at: {COMFY_EXE_PATH}",
+                    "detail": _launch_detail(),
                 })
                 return
             print("[supervisor] Launching ComfyUI...", flush=True)
@@ -164,12 +292,12 @@ class Handler(BaseHTTPRequestHandler):
                 print("[supervisor] /start: ComfyUI already online, no-op.", flush=True)
                 self._send_json(200, {"status": "already_online", "online": True})
                 return
-            if not os.path.exists(COMFY_EXE_PATH):
-                print(f"[supervisor] /start: EXE not found: {COMFY_EXE_PATH}", flush=True)
+            if not _launch_available():
+                print(f"[supervisor] /start: {_launch_detail()}", flush=True)
                 self._send_json(503, {
                     "ok": False,
                     "error": "exe_not_found",
-                    "detail": f"ComfyUI.exe not found at: {COMFY_EXE_PATH}",
+                    "detail": _launch_detail(),
                 })
                 return
             print("[supervisor] /start: launching ComfyUI...", flush=True)

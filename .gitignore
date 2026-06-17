@@ -4,6 +4,12 @@ __pycache__/
 *.pyo
 .env
 *.log
+.codegraph/
+.codex-remote-attachments/
+pytest-of-*/
+tmp_*/
+nul
+*.hm
 
 # Runtime config holds the real OpenRouter key — never track it.
 # Use config.example.json as the template (copy -> config.json).

@@ -257,13 +257,13 @@ def test_build_msr_reference_block():
          "a silver pendant"],
         "neon-lit alley at night",
     )
-    assert block.startswith("References:")
-    assert "Use subject references only for identity" in block
-    assert "Do not swap clothing" in block
-    assert "[1] the female singer" in block
-    assert "[2] a silver pendant." in block
-    assert "Background reference: neon-lit alley at night." in block
-    assert block.endswith("Use this as the location and scene environment.")
+    assert not block.startswith("References:")
+    assert "Use the first subject reference as" in block
+    assert "Use the second subject reference as" in block
+    assert "Use the background reference as the real location" in block
+    assert "[1]" not in block
+    assert "Background reference:" not in block
+    assert block.endswith("natural contact shadows and matching light.")
     assert build_msr_reference_block([], "x") == ""
 
 
