@@ -82,11 +82,30 @@ async def test_success_first_try_skips_recovery():
 @pytest.mark.asyncio
 async def test_tier1_free_then_retry_success():
     """First wait fails with conn error → /free → second wait succeeds. No restart."""
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _FakeResp()
+
     wait = AsyncMock(side_effect=[_conn_error(), {"filename": "x.png"}])
     with patch("comfyui.queue_prompt_async", new=AsyncMock(return_value="pid-2")), \
          patch("comfyui.wait_for_completion_async", new=wait), \
          patch("comfyui.free_comfy", new=AsyncMock(return_value=True)) as free_mock, \
-         patch("comfyui._restart_comfy_process_and_wait", new=AsyncMock()) as restart_mock:
+         patch("comfyui._restart_comfy_process_and_wait", new=AsyncMock()) as restart_mock, \
+         patch("comfyui.httpx.AsyncClient", new=_FakeClient), \
+         patch("comfyui.asyncio.sleep", new=_yield_sleep):
         pid, info = await queue_and_wait_with_recovery({})
     assert pid == "pid-2"
     assert info == {"filename": "x.png"}

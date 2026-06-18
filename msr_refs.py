@@ -80,23 +80,41 @@ def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") ->
 # Character sheet composition (msr_ref_mode="sheet")
 # ---------------------------------------------------------------------------
 
+NEUTRAL_BG_RGB = (128, 128, 128)
+
+
+def _round_up_to_multiple(n: int, base: int = 32) -> int:
+    return ((int(n) + base - 1) // base) * base
+
+
 def compose_character_sheet(
     view_paths: List[str],
     out_path: str,
     cell_w: int = 512,
     cell_h: int = 768,
+    target_aspect: Optional[tuple] = (16, 9),
+    bg_color: tuple = NEUTRAL_BG_RGB,
     **_legacy,
 ) -> str:
-    """Compose up to 4 portrait view stills into one seamless 2x2 sheet.
+    """Compose up to 4 portrait view stills into one seamless sheet padded to
+    the output video's aspect ratio.
 
-    Stage Q: the sheet is exactly 4 equal-size 2:3 portrait cells
-    (portrait + back + side + face-front) joined edge-to-edge into a single
-    2:3 rectangle — NO white border, NO letterbox. Each view is cover-cropped
-    to the cell (`ImageOps.fit`, aspect preserved, centred, edges trimmed) so a
-    landscape source (e.g. the legacy `lead` source frame) is forced to
-    portrait too — fixing the "first cell landscape, rest portrait" mismatch.
+    Stage MSR-2026-06: LiconMSR builds a pseudo-reference-video at the OUTPUT
+    video aspect ratio (16:9 for 1024x576). The character sheet is 2:3
+    portrait by design (face fidelity in full-body cells). If the sheet is
+    handed to LiconMSR as-is the node stretches it to 16:9 and the face is
+    distorted vertically, breaking identity. We avoid that by padding the
+    portrait grid horizontally with neutral mid-grey (#808080) so the sheet
+    already matches the output aspect; LiconMSR then only down-scales without
+    stretching. The same neutral grey is used by `generate_character_portrait_prompt`
+    as the requested background, so padding edges are seamless with the cell
+    interiors.
 
-    Fewer than 4 views still tile into a 2-column grid (trailing cells black).
+    Output dimensions are rounded up to a multiple of 32 (LTX-2.3 requirement).
+    Pass ``target_aspect=None`` to disable padding (legacy behaviour, used by
+    tests).
+
+    Fewer than 4 views still tile into a 2-column grid (trailing cells grey).
     `cell_w`/`cell_h` set the per-cell pixel size (default 512x768 = 2:3).
     Legacy `cell_size`/`border` kwargs are accepted and ignored (back-compat).
     Returns out_path.
@@ -106,13 +124,32 @@ def compose_character_sheet(
     paths = view_paths[:4]
     cols = 1 if len(paths) == 1 else 2
     rows = (len(paths) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "black")
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), bg_color)
     for idx, p in enumerate(paths):
         img = Image.open(p).convert("RGB")
         img = ImageOps.fit(img, (cell_w, cell_h), Image.LANCZOS, centering=(0.5, 0.5))
         col = idx % cols
         row = idx // cols
         sheet.paste(img, (col * cell_w, row * cell_h))
+    if target_aspect:
+        tw_a, th_a = target_aspect
+        sheet_w, sheet_h = sheet.size
+        sheet_ratio = sheet_w / sheet_h
+        target_ratio = tw_a / th_a
+        if sheet_ratio < target_ratio:
+            # Sheet is too tall for target ratio — pad width.
+            new_h = sheet_h
+            new_w = int(round(sheet_h * target_ratio))
+        else:
+            new_w = sheet_w
+            new_h = int(round(sheet_w / target_ratio))
+        new_w = _round_up_to_multiple(new_w, 32)
+        new_h = _round_up_to_multiple(new_h, 32)
+        canvas = Image.new("RGB", (new_w, new_h), bg_color)
+        x_off = (new_w - sheet_w) // 2
+        y_off = (new_h - sheet_h) // 2
+        canvas.paste(sheet, (x_off, y_off))
+        sheet = canvas
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     sheet.save(out_path, "PNG")
     return out_path

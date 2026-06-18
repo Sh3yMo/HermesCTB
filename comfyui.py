@@ -339,18 +339,58 @@ _RESOLUTION_LATENT_TYPES = (
 )
 
 
+def _parse_aspect_ratio(aspect_ratio: str) -> tuple[int, int] | None:
+    ratio = _ASPECT_RATIOS.get(aspect_ratio)
+    if ratio is not None:
+        return ratio
+    parts = (aspect_ratio or "").split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        w_r = int(parts[0])
+        h_r = int(parts[1])
+    except ValueError:
+        return None
+    if w_r <= 0 or h_r <= 0:
+        return None
+    return w_r, h_r
+
+
+def _link_ref(value) -> str | None:
+    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+        return value[0]
+    return None
+
+
+def has_flux_resolution_node(workflow: dict) -> bool:
+    return any(
+        isinstance(node, dict) and node.get("class_type") == "FluxResolutionNode"
+        for node in workflow.values()
+    )
+
+
+def _inject_flux_resolution(workflow: dict, aspect_ratio: str, megapixels: float) -> dict:
+    ratio = _parse_aspect_ratio(aspect_ratio)
+    if ratio is None:
+        return workflow
+    custom_ratio = f"{ratio[0]}:{ratio[1]}"
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "FluxResolutionNode":
+            continue
+        inputs = node.setdefault("inputs", {})
+        inputs["megapixel"] = str(megapixels)
+        inputs["custom_ratio"] = True
+        inputs["custom_aspect_ratio"] = custom_ratio
+    return workflow
+
+
 def inject_resolution(workflow: dict, aspect_ratio: str, megapixels: float = 0.59) -> dict:
     import math
-    ratio = _ASPECT_RATIOS.get(aspect_ratio)
+    if has_flux_resolution_node(workflow):
+        return _inject_flux_resolution(workflow, aspect_ratio, megapixels)
+    ratio = _parse_aspect_ratio(aspect_ratio)
     if ratio is None:
-        parts = aspect_ratio.split(":")
-        if len(parts) == 2:
-            try:
-                ratio = (int(parts[0]), int(parts[1]))
-            except ValueError:
-                return workflow
-        else:
-            return workflow
+        return workflow
     w_r, h_r = ratio
     total = int(megapixels * 1_000_000)
     height = int(math.sqrt(total * h_r / w_r) / 64) * 64
@@ -360,7 +400,68 @@ def inject_resolution(workflow: dict, aspect_ratio: str, megapixels: float = 0.5
             node.setdefault("inputs", {})
             node["inputs"]["width"] = width
             node["inputs"]["height"] = height
+    # Stage MSR-2026-06: LiconMSR builds an internal "pseudo reference video"
+    # whose dimensions must match the output video, otherwise the character
+    # sheet (2:3 portrait) is stretched to 16:9 internally and the face is
+    # vertically squashed — destroying identity. Override the math-expression
+    # references with scalars so the MSR latent matches the EmptyLTXVLatentVideo.
+    inject_msr_resolution(workflow, width, height)
     return workflow
+
+
+def inject_msr_resolution(workflow: dict, width: int, height: int) -> dict:
+    """Set LiconMSR `width`/`height` to scalar pixel dimensions.
+
+    Returns the workflow unchanged when no LiconMSR node is present. Safe to
+    call on standard (non-MSR) workflows.
+    """
+    for node in workflow.values():
+        if isinstance(node, dict) and node.get("class_type") == "LiconMSR":
+            inputs = node.setdefault("inputs", {})
+            inputs["width"] = int(width)
+            inputs["height"] = int(height)
+    return workflow
+
+
+def summarize_resolution_state(workflow: dict) -> str:
+    flux_nodes = [
+        (node_id, node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "FluxResolutionNode"
+    ]
+    latent_nodes = [
+        (node_id, node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "EmptyFlux2LatentImage"
+    ]
+    scheduler_nodes = [
+        (node_id, node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "Flux2Scheduler"
+    ]
+    parts = []
+    for node_id, node in flux_nodes:
+        inputs = node.get("inputs", {})
+        parts.append(
+            f"FluxResolutionNode[{node_id}] mp={inputs.get('megapixel')!r} "
+            f"custom_ratio={inputs.get('custom_ratio')!r} "
+            f"custom_aspect={inputs.get('custom_aspect_ratio')!r}"
+        )
+    for node_id, node in latent_nodes:
+        inputs = node.get("inputs", {})
+        w = inputs.get("width")
+        h = inputs.get("height")
+        linked = bool(_link_ref(w) and _link_ref(h))
+        parts.append(f"EmptyFlux2LatentImage[{node_id}] linked={linked} size={w!r}x{h!r}")
+        if flux_nodes and not linked:
+            parts.append(f"WARNING EmptyFlux2LatentImage[{node_id}] has literal size with FluxResolutionNode present")
+    for node_id, node in scheduler_nodes:
+        inputs = node.get("inputs", {})
+        w = inputs.get("width")
+        h = inputs.get("height")
+        linked = bool(_link_ref(w) and _link_ref(h))
+        parts.append(f"Flux2Scheduler[{node_id}] linked={linked} size={w!r}x{h!r}")
+    return "; ".join(parts) if parts else "no resolution nodes"
 
 
 def randomize_seeds(workflow: dict) -> dict:

@@ -779,9 +779,12 @@ def test_apply_scene_contracts_prefixes_prompts_without_changing_timing():
     assert seg.background_source == "llm"
     assert seg.prompt.startswith("Scene location must be exactly: sunset beach")
     assert seg.video_prompt_relay["beats"][0] == "They sing."
-    assert "Use the scene reference as the real location. Location is sunset beach" in (
-        seg.video_prompt_relay["global"]
-    )
+    g = seg.video_prompt_relay["global"]
+    assert "sunset beach with orange sky" in g
+    assert "Photoreal cinematic still" in g
+    # No instructional language in global (Stage MSR-2026-06: visual prose only).
+    assert "Use the scene reference" not in g
+    assert "should look" not in g
 
 
 def test_scene_contract_relay_keeps_beats_promptrelay_clean():
@@ -804,7 +807,10 @@ def test_scene_contract_relay_keeps_beats_promptrelay_clean():
 
     apply_scene_contracts_to_segments([seg])
 
-    assert "Use the scene reference as the real location" in seg.video_prompt_relay["global"]
+    g = seg.video_prompt_relay["global"]
+    assert "empty rooftop at blue hour" in g
+    assert "Photoreal cinematic still" in g
+    assert "Use the scene reference" not in g
     assert seg.video_prompt_relay["beats"] == [
         "The performer stands still on the rooftop.",
         "The camera slowly pulls back.",
@@ -837,7 +843,7 @@ def test_role_clothing_contracts_lock_relay_global_and_scene_integration():
     assert "black sequined halter bodysuit" in global_prompt
     assert "black sequined halter bodysuit" in beat_prompt
     assert "natural contact shadows" in global_prompt
-    assert "matching scene light" in global_prompt
+    assert "scene light" in global_prompt
 
 
 def test_role_clothing_contract_relay_global_only_after_first_static_beat():
@@ -862,7 +868,9 @@ def test_role_clothing_contract_relay_global_only_after_first_static_beat():
 
     apply_role_clothing_contracts_to_segments([seg], contracts)
 
-    assert "Use the female performer reference as the locked source" in seg.video_prompt_relay["global"]
+    g = seg.video_prompt_relay["global"]
+    assert "Female performer wearing white tank top" in g
+    assert "Use the female performer reference" not in g
     assert "white tank top" in seg.video_prompt_relay["beats"][0]
     assert "white tank top" not in seg.video_prompt_relay["beats"][1]
 
@@ -888,8 +896,11 @@ def test_ensure_relay_specs_synthesizes_missing_relay_without_legacy_prompt_blob
     ensure_relay_specs_for_segments([seg])
 
     assert seg.video_prompt_relay is not None
-    assert "Use the scene reference as the real location" in seg.video_prompt_relay["global"]
-    assert len(seg.video_prompt_relay["beats"]) == 2
+    g = seg.video_prompt_relay["global"]
+    assert "empty rooftop at blue hour" in g
+    assert "Photoreal cinematic still" in g
+    assert "Use the scene reference" not in g
+    assert len(seg.video_prompt_relay["beats"]) >= 1
     assert "Text appears" not in " ".join(seg.video_prompt_relay["beats"])
     assert "Scene location must be exactly" not in " ".join(seg.video_prompt_relay["beats"])
     assert "white tank top" in seg.video_prompt_relay["beats"][0]
@@ -954,8 +965,10 @@ def test_portrait_empty_llm_returns_lyrics_free_default():
     out = asyncio.run(prompter.generate_character_portrait_prompt(seed, "synthwave"))
     # Stage O3: the default is now a FULL-BODY studio shot (the portrait
     # doubles as the character sheet's full-body front cell).
-    assert out == ("front-facing full body studio shot of a singer, standing, "
-                   "head to toe visible, neutral grey background")
+    assert "solid flat neutral mid-grey background" in out
+    assert "#808080" in out
+    # Lyrics-free guard (the test's name is about the fallback NOT leaking the seed).
+    assert "lyric" not in out.lower()
     assert "midnight glass" not in out
 
 

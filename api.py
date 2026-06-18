@@ -41,6 +41,8 @@ from comfyui import (
     wait_for_completion_async,
     load_workflow,
     COMFYUI_URL,
+    has_flux_resolution_node,
+    summarize_resolution_state,
 )
 
 
@@ -73,6 +75,7 @@ from music_video_pipeline import (
     build_duet_portrait_prompt,
     build_role_age_contracts,
     build_role_clothing_contracts,
+    build_role_clothing_contracts_async,
     clamp_song_duration,
     enforce_performer_role,
     extract_section_role,
@@ -345,10 +348,13 @@ async def _run_direct_workflow(
     duration: Optional[float] = None,
 ) -> dict:
     workflow = load_workflow(workflow_name)
+    flux_t2i = has_flux_resolution_node(workflow)
+    megapixels: float | None = None
     if prompt:
         workflow = inject_prompt(workflow, prompt)
     if aspect_ratio:
-        workflow = inject_resolution(workflow, aspect_ratio)
+        megapixels = _mca_cfg()["t2i_megapixels"] if flux_t2i else 0.59
+        workflow = inject_resolution(workflow, aspect_ratio, megapixels=megapixels)
     if duration is not None:
         workflow = inject_segment_duration(workflow, duration)
     if input_image_bytes:
@@ -360,7 +366,19 @@ async def _run_direct_workflow(
     if input_video_bytes:
         uploaded = await upload_file_to_comfy(input_video_bytes, input_video_name or "input.mp4", "image")
         workflow = inject_input_image(workflow, uploaded)
+    if flux_t2i:
+        print(
+            "[direct-workflow] queueing "
+            f"workflow={workflow_name} purpose=direct aspect={aspect_ratio or 'workflow-default'} "
+            f"megapixels={megapixels if megapixels is not None else 'workflow-default'} "
+            f"{summarize_resolution_state(workflow)}"
+        )
     prompt_id = await queue_prompt_async(workflow)
+    if flux_t2i:
+        print(
+            "[direct-workflow] queued "
+            f"workflow={workflow_name} purpose=direct prompt_id={prompt_id}"
+        )
     jid = _new_job()
     JOBS[jid]["prompt_id"] = prompt_id
     asyncio.create_task(_run_direct_download_job(jid, prompt_id))
@@ -604,6 +622,7 @@ def _mca_cfg() -> dict:
         "output_node": str(c.get("output_node", "9")),
         "batch_size": int(c.get("mca_batch_size", 4)),
         "t2i_workflow": c.get("t2i_workflow", "Flux2 Klein 9B - T2I"),
+        "t2i_megapixels": float(c.get("t2i_megapixels", 2.5)),
         "free_every": int(c.get("comfy_free_every", 3)),
     }
 
@@ -620,8 +639,45 @@ MSR_FALLBACK_WORKFLOW = "LTX2.3 - IA2V-PromptRelay"
 MSR_PORTRAIT_ASPECT = "2:3"
 _PORTRAIT_FULLBODY_SUFFIX = (
     "full body shot, standing, facing the camera directly, head to toe "
-    "visible, entire figure including footwear in frame"
+    "visible, entire figure including footwear in frame, solid flat neutral "
+    "mid-grey background #808080, even flat ambient lighting"
 )
+
+# Framing tokens we de-duplicate when the LLM leaks them despite being
+# instructed not to. We keep only the suffix's occurrence.
+_PORTRAIT_FRAMING_DUP_TOKENS = (
+    "full body",
+    "head to toe",
+    "facing the camera",
+    "standing",
+    "front-facing",
+)
+
+
+def _dedupe_portrait_framing(prompt: str) -> str:
+    """Strip earlier occurrences of framing tokens that the deterministic
+    suffix re-asserts. Keeps the LAST occurrence (the suffix) so the prompt
+    reads cleanly. Conservative: only acts when a token appears >1 time."""
+    if not prompt:
+        return prompt
+    import re as _re
+    out = prompt
+    for tok in _PORTRAIT_FRAMING_DUP_TOKENS:
+        pat = _re.compile(r"\b" + _re.escape(tok) + r"\b", _re.IGNORECASE)
+        hits = pat.findall(out)
+        if len(hits) > 1:
+            # Drop all but the last by replacing the first n-1 with empty.
+            count = len(hits) - 1
+            def _sub(m, _box=[count]):
+                if _box[0] > 0:
+                    _box[0] -= 1
+                    return ""
+                return m.group(0)
+            out = pat.sub(_sub, out)
+    out = _re.sub(r"\s{2,}", " ", out)
+    out = _re.sub(r"\s*,\s*,+", ", ", out)
+    out = _re.sub(r"^\s*[,;:]\s*", "", out).strip(" ,;:")
+    return out
 
 # RC9: deterministic lip-sync booster appended to VOCAL segment prompts (LLM
 # may forget it; this guarantees it). Story/instrumental segments never get it.
@@ -631,7 +687,13 @@ LIPSYNC_BOOSTER = (
 )
 
 
-async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) -> str:
+async def _generate_still(
+    workflow_name: str,
+    prompt: str,
+    aspect_ratio: str,
+    *,
+    purpose: str = "still",
+) -> str:
     """Synchronously generate one still image; returns a local file path."""
     from comfyui import randomize_seeds
     # Stage O7: ALWAYS defrag before a Flux2 still. Job 67ed4b23 ran the
@@ -643,11 +705,18 @@ async def _generate_still(workflow_name: str, prompt: str, aspect_ratio: str) ->
     wf = load_workflow(workflow_name)
     wf = inject_prompt(wf, prompt)
     if aspect_ratio:
-        wf = inject_resolution(wf, aspect_ratio)
+        megapixels = _mca_cfg()["t2i_megapixels"] if has_flux_resolution_node(wf) else 0.59
+        wf = inject_resolution(wf, aspect_ratio, megapixels=megapixels)
     wf = randomize_seeds(wf)
+    prompt_preview = re.sub(r"\s+", " ", prompt or "").strip()[:180]
+    print(
+        f"[still] queueing purpose={purpose!r} workflow={workflow_name!r} "
+        f"aspect={aspect_ratio!r} {summarize_resolution_state(wf)} "
+        f"prompt={prompt_preview!r}"
+    )
     prompt_id, info = await queue_and_wait_with_recovery(wf)
     path = await download_output_to_local(info, _outputs_dir())
-    print(f"[still] {workflow_name}: {time.monotonic() - _t0:.1f}s")
+    print(f"[still] {workflow_name} purpose={purpose!r} prompt_id={prompt_id}: {time.monotonic() - _t0:.1f}s")
     return path
 
 
@@ -698,7 +767,10 @@ async def _resolve_source_image(
                     out_prompts[out_key] = t2i  # appearance anchor for MSR views
             else:
                 t2i = await MV_PROMPTER.generate_start_image_prompt(seed, genre)
-            return await _generate_still(_mca_cfg()["t2i_workflow"], t2i, aspect_ratio)
+            return await _generate_still(
+                _mca_cfg()["t2i_workflow"], t2i, aspect_ratio,
+                purpose=f"source_image:{mode}",
+            )
     except Exception as e:
         print(f"[create-mv] source image resolution failed ({mode}): {e} — continuing without start frame")
     return None
@@ -800,8 +872,13 @@ async def _resolve_singer_portrait(
         if age_contract:
             t2i = f"{t2i}, same apparent age throughout, {age_contract}"
         t2i = f"{t2i}, {_PORTRAIT_FULLBODY_SUFFIX}"
+        # Stage MSR-2026-06: drop duplicate framing tokens the LLM may have
+        # included despite being instructed not to — the suffix is now the
+        # single source of truth for framing/background.
+        t2i = _dedupe_portrait_framing(t2i)
         return await _generate_still(
             _mca_cfg()["t2i_workflow"], t2i, MSR_PORTRAIT_ASPECT,
+            purpose=f"{role}_portrait",
         )
     except Exception as e:
         print(f"[create-mv] {role} portrait generation failed: {e}")
@@ -1438,8 +1515,10 @@ async def _run_create_music_video(
             _extract_audio_clip(audio_path, seg.start_time, seg.end_time, clip)
             seg.audio_clip = clip
 
-        role_clothing_contracts = build_role_clothing_contracts(
-            f"{brief}\n{theme_eff}\n{source_description}", genre=brief,
+        role_clothing_contracts = await build_role_clothing_contracts_async(
+            MV_PROMPTER,
+            f"{brief}\n{theme_eff}\n{source_description}",
+            genre=brief,
         )
         role_age_contracts = build_role_age_contracts(
             f"{brief}\n{theme_eff}\n{source_description}", genre=brief,
@@ -1471,6 +1550,11 @@ async def _run_create_music_video(
         # for per-anchor portrait routing.
         all_roles_present = {extract_section_role(s.label) for s in segments}
         all_roles_present.discard(None)
+        try:
+            selected_workflow_has_msr = has_msr_nodes(load_workflow(video_workflow_id))
+        except Exception as e:
+            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
+            selected_workflow_has_msr = False
 
         # Fix 27: an explicit same-gender duet (ff/mm) takes a dedicated path —
         # ONE consistent lead portrait for all solo sections + a distinct
@@ -1619,13 +1703,31 @@ async def _run_create_music_video(
                     or next((v for v in portraits.values() if v), None)
                 )
             else:
-                # Legacy single-portrait path (upload/none source modes or only one role).
-                source = await _resolve_source_image(
-                    source_mode, source_image_bytes, source_image_name,
-                    source_description, theme_eff, lyrics_text, brief,
-                    aspect_ratio, consistent_character, tmp_dir,
-                    style_descriptor=style_desc, out_prompts=portrait_prompts, out_key="lead",
+                solo_roles = sorted(r for r in all_roles_present if r in ("male", "female"))
+                use_msr_solo_portrait = (
+                    selected_workflow_has_msr
+                    and consistent_character
+                    and source_mode in ("auto", "describe")
+                    and len(solo_roles) == 1
                 )
+                if use_msr_solo_portrait:
+                    solo_role = solo_roles[0]
+                    portraits[solo_role] = await _resolve_singer_portrait(
+                        solo_role, theme_eff, lyrics_text, brief, aspect_ratio,
+                        style_descriptor=style_desc, out_prompts=portrait_prompts, out_key=solo_role,
+                        clothing_contracts=role_clothing_contracts,
+                        age_contracts=role_age_contracts,
+                    )
+                    await free_comfy()
+                    source = portraits.get(solo_role)
+                else:
+                    # Legacy single-portrait path (upload/none source modes or non-MSR workflows).
+                    source = await _resolve_source_image(
+                        source_mode, source_image_bytes, source_image_name,
+                        source_description, theme_eff, lyrics_text, brief,
+                        aspect_ratio, consistent_character, tmp_dir,
+                        style_descriptor=style_desc, out_prompts=portrait_prompts, out_key="lead",
+                    )
 
         # 3b. MSR (Multiple Subject Reference): when the selected workflow
         # contains a LiconMSR node, build the reference assets once per song —
@@ -1637,15 +1739,11 @@ async def _run_create_music_video(
         # Stage O2: this block runs BEFORE the per-segment MCA frames (3c) so
         # every reference asset (sheet, backgrounds) exists before any
         # segment-bound generation starts.
-        msr_active = False
+        msr_active = selected_workflow_has_msr
         msr_char_refs: Dict[str, list] = {}
         msr_char_descs: Dict[str, str] = {}
         msr_prop_refs: list = []
         msr_bg_by_seg: Dict[int, str] = {}
-        try:
-            msr_active = has_msr_nodes(load_workflow(video_workflow_id))
-        except Exception as e:
-            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
         if msr_active:
             from msr_refs import (
                 background_prompt_mentions_people,
@@ -1671,6 +1769,7 @@ async def _run_create_music_video(
                             f"product still of {llm_prop}, single object, centered, "
                             f"plain neutral background, no people",
                             "1:1",
+                            purpose="msr_prop",
                         )
                         msr_prop_refs.append((prop_img, llm_prop))
                         print(f"[MSR] LLM prop generated: {llm_prop!r}")
@@ -1722,35 +1821,43 @@ async def _run_create_music_video(
                 age = (role_age_contracts.get(role, "") or "").strip()
                 return f"; apparent age stays {age}" if age else ""
 
+            # Stage MSR-2026-06: identity-lock prefix front-loads face/skin/hair
+            # cues so LiconMSR weights identity above outfit when matching the
+            # reference. Order matters — clothing follows identity, not vice-versa.
+            _identity_lock_male = (
+                "identity-locked: same face, same facial structure, same eye colour, "
+                "same hair colour and length, same skin tone, same beard/facial-hair "
+                "presence as the male reference subject"
+            )
+            _identity_lock_female = (
+                "identity-locked: same face, same facial structure, same eye colour, "
+                "same hair colour and length, same skin tone as the female reference subject"
+            )
             if role_clothing_contracts.get("male"):
                 male_contract = _compact_contract(role_clothing_contracts["male"])
                 _role_desc["male"] = (
-                    "the referenced male singer, use the exact same reference subject, "
-                    "face, hair, body and locked outfit. "
+                    f"{_identity_lock_male}, the referenced male singer. "
                     f"Outfit is {male_contract}{_age_contract_text('male')}; shirt and vest stay visible, "
                     "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
-                    "ignore the plain studio background in the character sheet"
+                    "ignore the solid grey background in the character sheet"
                 )
                 _role_desc["male2"] = (
-                    "the second referenced male singer, use the exact same reference subject, "
-                    "face, hair, body and locked outfit. "
+                    f"{_identity_lock_male}, the second referenced male singer. "
                     f"Outfit is {male_contract}{_age_contract_text('male')}; shirt and vest stay visible, "
                     "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
-                    "ignore the plain studio background in the character sheet"
+                    "ignore the solid grey background in the character sheet"
                 )
             if role_clothing_contracts.get("female"):
                 female_contract = _compact_contract(role_clothing_contracts["female"])
                 _role_desc["female"] = (
-                    "the referenced female singer, use the exact same reference subject, "
-                    "face, hair, body and locked outfit. "
+                    f"{_identity_lock_female}, the referenced female singer. "
                     f"Outfit is {female_contract}{_age_contract_text('female')}; "
-                    "ignore the plain studio background in the character sheet"
+                    "ignore the solid grey background in the character sheet"
                 )
                 _role_desc["female2"] = (
-                    "the second referenced female singer, use the exact same reference subject, "
-                    "face, hair, body and locked outfit. "
+                    f"{_identity_lock_female}, the second referenced female singer. "
                     f"Outfit is {female_contract}{_age_contract_text('female')}; "
-                    "ignore the plain studio background in the character sheet"
+                    "ignore the solid grey background in the character sheet"
                 )
             for r, portrait in char_portraits.items():
                 views: list = []
@@ -1816,6 +1923,7 @@ async def _run_create_music_video(
                             _mca_cfg()["t2i_workflow"],
                             f"{bgp}, no people, no characters",
                             aspect_ratio,
+                            purpose=f"msr_background:{i}",
                         )
                     except Exception as e:
                         print(f"[MSR] background generation failed for segment {i} "

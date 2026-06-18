@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from mv_prompt_hygiene import (
+    clean_beat_text,
+    collapse_duplicate_beats,
+    is_instructional_language,
+)
+
 try:
     from mv_director import MVDirector  # Stage K — producer-style director
     _MV_DIRECTOR_AVAILABLE = True
@@ -710,7 +716,8 @@ _MALE_CLOTHING_DEFAULT = (
     "no bare torso, masculine flat chest, no breasts"
 )
 _FEMALE_CLOTHING_DEFAULT = (
-    "fitted feminine top, denim shorts or skirt, feminine footwear"
+    "fitted cream short-sleeve blouse, high-waist indigo denim shorts, "
+    "white low-top sneakers"
 )
 
 _MALE_MARKERS_RE = re.compile(
@@ -830,6 +837,45 @@ def build_role_clothing_contracts(theme: str, genre: str = "") -> Dict[str, str]
         "male": _extract_role_clothing(context, "male"),
         "female": _extract_role_clothing(context, "female"),
     }
+
+
+async def build_role_clothing_contracts_async(
+    prompter: Optional["MusicVideoPrompter"],
+    theme: str,
+    genre: str = "",
+) -> Dict[str, str]:
+    """Stage MSR-2026-06: prefer a structured LLM wardrobe call (per role) for
+    deterministic colour + cut tokens; fall back to the regex extractor only
+    when the LLM fails or returns invalid JSON. Single source of truth for
+    clothing contracts during a job.
+    """
+    from mv_prompt_hygiene import (
+        validate_wardrobe_contract,
+        wardrobe_contract_to_compact_string,
+    )
+    context = f"{theme or ''}\n{genre or ''}"
+    out: Dict[str, str] = {
+        "male": _extract_role_clothing(context, "male"),
+        "female": _extract_role_clothing(context, "female"),
+    }
+    if prompter is None:
+        return out
+    for role in ("male", "female"):
+        try:
+            contract = await prompter.generate_wardrobe_contract(theme, genre, role)
+        except Exception as e:
+            print(f"[wardrobe] {role} LLM call failed: {e}; using regex fallback")
+            continue
+        if not isinstance(contract, dict):
+            continue
+        ok, errs = validate_wardrobe_contract(contract)
+        if not ok:
+            print(f"[wardrobe] {role} LLM result invalid: {errs}; using regex fallback")
+            continue
+        flat = wardrobe_contract_to_compact_string(contract)
+        if flat:
+            out[role] = flat
+    return out
 
 
 def _extract_role_age(text: str, role: str) -> str:
@@ -978,26 +1024,16 @@ def role_clothing_global_text(
     base = _base_role(role)
     if base == "male":
         outfit = contracts.get("male") or _MALE_CLOTHING_DEFAULT
-        return (
-            "Use the male performer reference as the locked source for his face, "
-            f"body, hair and outfit. The outfit is {outfit}. Keep that outfit unchanged for "
-            "this segment, with natural contact shadows and matching scene light."
-        )
+        return f"Male performer wearing {outfit}, natural contact shadows in scene light."
     if base == "female":
         outfit = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
-        return (
-            "Use the female performer reference as the locked source for her face, "
-            f"body, hair and outfit. The outfit is {outfit}. Keep that outfit unchanged for "
-            "this segment, with natural contact shadows and matching scene light."
-        )
+        return f"Female performer wearing {outfit}, natural contact shadows in scene light."
     if base == "duet":
         male = contracts.get("male") or _MALE_CLOTHING_DEFAULT
         female = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
         return (
-            "Use the performer references as locked sources. The male performer "
-            f"wears {male}. The female performer wears {female}. Keep each "
-            "outfit on the correct performer, with natural contact shadows and "
-            "matching scene light."
+            f"Male performer wearing {male}; female performer wearing {female}; "
+            "natural contact shadows in scene light."
         )
     return ""
 
@@ -1041,17 +1077,17 @@ def role_age_global_text(
     contracts = age_contracts or {}
     base = _base_role(role)
     if base == "male" and contracts.get("male"):
-        return f"Keep the male performer the same apparent age, {contracts['male']}."
+        return f"Male performer apparent age {contracts['male']}."
     if base == "female" and contracts.get("female"):
-        return f"Keep the female performer the same apparent age, {contracts['female']}."
+        return f"Female performer apparent age {contracts['female']}."
     if base == "duet":
         parts = []
         if contracts.get("male"):
-            parts.append(f"male performer is {contracts['male']}")
+            parts.append(f"male performer apparent age {contracts['male']}")
         if contracts.get("female"):
-            parts.append(f"female performer is {contracts['female']}")
+            parts.append(f"female performer apparent age {contracts['female']}")
         if parts:
-            return "Keep performer apparent ages locked. " + "; ".join(parts) + "."
+            return "; ".join(parts) + "."
     return ""
 
 
@@ -1287,9 +1323,8 @@ def scene_global_text(scene: str) -> str:
     if not scene:
         return ""
     return (
-        f"Use the scene reference as the real location. Location is {scene}. The performer "
-        "should look physically present in this location, not pasted over it, "
-        "with natural contact shadows and matching light."
+        f"{scene}. Photoreal cinematic still, subtle film grain, natural contact "
+        "shadows, performer grounded in the scene lighting."
     )
 
 
@@ -1394,9 +1429,16 @@ def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
         ).strip(" ,.;:")
         if not action:
             action = static
+        cleaned_static = clean_beat_text(static)
+        cleaned_action = clean_beat_text(action)
+        raw_beats = [b for b in (cleaned_static, cleaned_action) if b]
+        beats = collapse_duplicate_beats(raw_beats, threshold=0.85)
+        if not beats:
+            fallback = clean_beat_text(static) or "The performer is visible in the scene."
+            beats = [fallback]
         seg.video_prompt_relay = {
             "global": " ".join(p for p in global_parts if p).strip(),
-            "beats": [static, action],
+            "beats": beats,
         }
 
 
@@ -1612,10 +1654,17 @@ def extract_relay_spec(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     beats = raw.get("beats", [])
     if not isinstance(g, str) or not isinstance(beats, list):
         return None
-    cleaned = [str(b).strip() for b in beats if isinstance(b, (str, bytes)) and str(b).strip()]
-    if not cleaned:
+    pre_cleaned: List[str] = []
+    for b in beats:
+        if not isinstance(b, (str, bytes)):
+            continue
+        candidate = clean_beat_text(str(b), min_length=1)
+        if candidate:
+            pre_cleaned.append(candidate)
+    deduped = collapse_duplicate_beats(pre_cleaned, threshold=0.85)
+    if not deduped:
         return None
-    return {"global": g.strip(), "beats": cleaned[:RELAY_MAX_BEATS]}
+    return {"global": g.strip(), "beats": deduped[:RELAY_MAX_BEATS]}
 
 
 def _build_merged_segment(group: List["Segment"]) -> "Segment":
@@ -1642,6 +1691,7 @@ def _build_merged_segment(group: List["Segment"]) -> "Segment":
             p = (s.prompt or "").strip()
             if p:
                 all_beats.append(p)
+    all_beats = collapse_duplicate_beats(all_beats, threshold=0.85)
     capped = all_beats[:RELAY_MAX_BEATS]
     merged_relay: Optional[Dict[str, Any]] = (
         {"global": global_text, "beats": capped} if capped else None
@@ -3715,14 +3765,24 @@ class MusicVideoPrompter:
                             # Apply Fix 33 sanitizer per beat so vocal-section
                             # lyrics don't leak into non-vocal beats. global
                             # never contains lyrics by design (camera-only).
+                            # Then clean_beat_text drops dangling connectors
+                            # ("she trembles as") and empty results so the
+                            # relay never ships truncated beats to LTX.
                             seg_lyrics = r.get("lyrics", "") if r["is_vocal"] else ""
-                            relay = {
-                                "global": relay["global"],
-                                "beats": [
-                                    strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics)
-                                    for b in relay["beats"]
-                                ],
-                            }
+                            sanitized: list[str] = []
+                            for b in relay["beats"]:
+                                stripped = strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics)
+                                cleaned = clean_beat_text(stripped)
+                                if cleaned:
+                                    sanitized.append(cleaned)
+                            sanitized = collapse_duplicate_beats(sanitized, threshold=0.85)
+                            if sanitized:
+                                relay = {
+                                    "global": relay["global"],
+                                    "beats": sanitized,
+                                }
+                            else:
+                                relay = None
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -4176,14 +4236,17 @@ class MusicVideoPrompter:
                     "content": (
                         "Generate a text-to-image prompt for a CLEAN CHARACTER REFERENCE "
                         "PORTRAIT of the singer/performer of this song. Hard requirements: "
-                        "the subject faces the camera directly (front-facing), shown FULL "
-                        "BODY, standing, head to toe visible (entire figure including "
-                        "footwear in frame), face and mouth clearly visible and in sharp "
-                        "focus, mouth CLOSED in a relaxed neutral expression (lips lightly "
-                        "together, no teeth showing, no microphone-held pose, NOT mid-song); "
-                        "plain neutral background (white, light grey, or soft studio "
-                        "gradient); even studio lighting. NO scenery, environment, action, "
-                        "props or other people. " + style_clause +
+                        "face and mouth clearly visible and in sharp focus, "
+                        "mouth CLOSED in a relaxed neutral expression (lips lightly "
+                        "together, no teeth showing, no microphone-held pose, NOT mid-song). "
+                        "Background MUST be a solid flat neutral mid-grey (#808080) — no "
+                        "studio sweep, no floor seam, no gradient, no vignette, no shadow "
+                        "cast on the background; even flat ambient lighting on the subject. "
+                        "NO scenery, environment, action, props or other people. " +
+                        style_clause +
+                        "DO NOT include framing/pose words (no 'standing', 'full body', "
+                        "'head to toe', 'facing the camera' or 'front-facing') — those are "
+                        "appended deterministically downstream; describe APPEARANCE only. "
                         "Establish the character's face, hair (length, exact style, colour), "
                         "skin tone, age, build, and EXACT outfit (each garment named with "
                         "its cut and colour, plus footwear) in CONCRETE detail so every "
@@ -4216,10 +4279,69 @@ class MusicVideoPrompter:
         # strip_lyrics, so the T2I model would paint the lyrics onto the portrait.
         response = strip_portrait_role_conflicts(response, role)
         return response or (
-            "front-facing full body studio shot of a singer, standing, "
-            "head to toe visible, neutral grey background"
+            "singer on solid flat neutral mid-grey background (#808080), "
+            "even flat ambient lighting, closed mouth in neutral relaxed expression"
             + (f", wearing {clothing_contract}" if clothing_contract else "")
         )
+
+    async def generate_wardrobe_contract(
+        self, theme: str, genre: str, role: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Stage MSR-2026-06: ask the LLM for a structured wardrobe JSON for one role.
+
+        Returns dict matching the shape consumed by
+        `mv_prompt_hygiene.wardrobe_contract_to_compact_string`:
+            {"top": {"garment": str, "color": str, "fit": str},
+             "bottom": {"garment": str, "color": str},
+             "footwear": {"garment": str, "color": str},
+             "accessories": [str, ...]}
+        Returns None on failure so the caller can fall back to the regex
+        extractor.
+        """
+        if role not in ("male", "female"):
+            return None
+        system = (
+            "You design a wardrobe contract for ONE singer in a music video. "
+            "Output ONLY a single JSON object — no preamble, no markdown. "
+            "Schema: {\"top\":{\"garment\":<str>,\"color\":<str>,\"fit\":<str>},"
+            "\"bottom\":{\"garment\":<str>,\"color\":<str>},"
+            "\"footwear\":{\"garment\":<str>,\"color\":<str>},"
+            "\"accessories\":[<str>,...]}. "
+            "Hard rules: every garment is ONE specific item (never 'or'); "
+            "every color is a named colour (e.g. 'cream', 'indigo', 'burgundy', "
+            "'olive') — NOT a vague qualifier like 'dark' or 'light'. The "
+            "wardrobe must match the song's genre and visual mood. The garment "
+            "stays on for the whole video — no exposed underwear, no swim-only "
+            "items unless the song explicitly is about the beach/pool. "
+            f"Role is {role}. "
+        )
+        user_msg = (
+            f"Song theme: {theme}\nSong genre: {genre}\nDesign a wardrobe for the "
+            f"{role} singer. Output ONLY the JSON object."
+        )
+        try:
+            raw = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=300,
+            )
+        except Exception:
+            return None
+        if not raw:
+            return None
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""
