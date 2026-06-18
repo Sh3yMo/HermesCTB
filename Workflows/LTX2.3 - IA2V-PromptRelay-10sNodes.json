@@ -1,4 +1,4 @@
-﻿{
+{
   "101": {
     "inputs": {
       "model_name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
@@ -302,7 +302,7 @@
   },
   "759:1065": {
     "inputs": {
-      "steps": 12,
+      "steps": 8,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
@@ -452,8 +452,8 @@
         0
       ],
       "latent": [
-        "759:1060",
-        0
+        "3002",
+        2
       ]
     },
     "class_type": "LTXVImgToVideoInplace",
@@ -686,11 +686,11 @@
         0
       ],
       "positive": [
-        "759:1067",
+        "3002",
         0
       ],
       "negative": [
-        "759:1067",
+        "3002",
         1
       ]
     },
@@ -820,7 +820,7 @@
     "inputs": {
       "preview_rate": 8,
       "model": [
-        "700",
+        "3004",
         0
       ],
       "vae": [
@@ -1346,8 +1346,8 @@
   "759:1069_base": {
     "inputs": {
       "scheduler": "linear_quadratic",
-      "steps": 4,
-      "denoise": 0.45,
+      "steps": 6,
+      "denoise": 0.35,
       "model": [
         "759:1075",
         0
@@ -1356,6 +1356,141 @@
     "class_type": "BasicScheduler",
     "_meta": {
       "title": "BasicScheduler (Pass 2 base, 3 steps, linear_quadratic, denoise 0.45)"
+    }
+  },
+  "3001": {
+    "class_type": "LTXFaceDetector",
+    "inputs": {
+      "image": [
+        "759:1589",
+        0
+      ],
+      "padding": 0.15,
+      "fallback_bbox": "",
+      "debug": false
+    },
+    "_meta": {
+      "title": "10S Face Detector [[P:02 Image to Video]]"
+    }
+  },
+  "3002": {
+    "class_type": "LTXLikenessGuide",
+    "inputs": {
+      "positive": [
+        "759:1067",
+        0
+      ],
+      "negative": [
+        "759:1067",
+        1
+      ],
+      "vae": [
+        "174",
+        0
+      ],
+      "latent": [
+        "759:1060",
+        0
+      ],
+      "image": [
+        "759:1401",
+        0
+      ],
+      "strength": 0.9,
+      "placement_mode": "silent_reference",
+      "face_detect": "manual",
+      "reference_mask_mode": "bbox_only",
+      "face_padding": 0.15,
+      "crf": 24,
+      "blur_radius": 0,
+      "interpolation": "area",
+      "crop": "center",
+      "attention_strength": 1,
+      "face_bbox_within_reference": [
+        "3001",
+        0
+      ],
+      "emit_latent": "passthrough",
+      "debug": false
+    },
+    "_meta": {
+      "title": "10S Likeness Guide (silent reference)"
+    }
+  },
+  "3003": {
+    "class_type": "LTXLatentAnchorAware",
+    "inputs": {
+      "model": [
+        "700",
+        0
+      ],
+      "reference_image": [
+        "759:1401",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ],
+      "energy_latent": [
+        "759:1163",
+        0
+      ],
+      "sigmas": [
+        "759:1065",
+        0
+      ],
+      "strength": 0.1,
+      "cache_at_step": 5,
+      "similarity_threshold": 0.5,
+      "decay_with_distance": 0.15,
+      "energy_threshold": 0.3,
+      "bypass": false,
+      "debug": false,
+      "advanced_mode": true,
+      "cache_mode": "schedule",
+      "forwards_per_step": 1,
+      "cache_warmup": 50,
+      "anchor_frame": 0,
+      "depth_curve": "flat",
+      "block_index_filter": "10-30"
+    },
+    "_meta": {
+      "title": "10S Latent Anchor Aware"
+    }
+  },
+  "3004": {
+    "class_type": "LTXLikenessAnchor",
+    "inputs": {
+      "model": [
+        "3003",
+        0
+      ],
+      "reference_info": [
+        "3002",
+        3
+      ],
+      "strength": 0.25,
+      "reference_source": "auto",
+      "frame_0_bbox": [
+        "3001",
+        0
+      ],
+      "similarity_threshold": 0.5,
+      "decay_with_distance": 0,
+      "bypass": false,
+      "debug": false,
+      "advanced_mode": false,
+      "depth_curve": "middle",
+      "block_index_filter": "",
+      "similarity_sharpness": 8,
+      "override_face_bbox": "",
+      "skip_when_sigma_above": 0,
+      "pull_mode": "directional",
+      "late_block_falloff": 0.4
+    },
+    "_meta": {
+      "title": "10S Likeness Anchor"
     }
   }
 }

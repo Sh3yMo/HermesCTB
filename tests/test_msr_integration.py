@@ -78,10 +78,14 @@ def test_msr_workflow_wiring():
 
 def test_standard_workflow_untouched_by_msr_nodes():
     std = _load(_STD_WF)
-    for nid in ("2001", "2006", "2007", "2008"):
+    # MSR nodes (2001-2008) and 10s-Likeness Guide (3002) must not exist
+    # in the vanilla GitHub upstream IA2V-PromptRelay workflow. The 10s
+    # variant lives in a separate file (LTX2.3 - IA2V-PromptRelay-10sNodes.json).
+    for nid in ("2001", "2006", "2007", "2008", "3002"):
         assert nid not in std
-    assert std["759:1052"]["inputs"]["positive"] == ["3002", 0]
-    assert std["3002"]["inputs"]["positive"] == ["759:1067", 0]
+    # Original wiring: positive conditioning chains directly through 759:1067
+    # (no 10s-Guide hop).
+    assert std["759:1052"]["inputs"]["positive"] == ["759:1067", 0]
     assert std["1700"]["inputs"]["model"] == ["211", 0]
 
 
