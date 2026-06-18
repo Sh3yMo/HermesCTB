@@ -271,7 +271,7 @@
       "normalize_by_tokens": false,
       "epsilon": 0.001,
       "model": [
-        "211",
+        "2007",
         0
       ],
       "clip": [
@@ -286,6 +286,137 @@
     "class_type": "PromptRelaySmartEncode",
     "_meta": {
       "title": "Prompt Relay Encode (Smart) positive"
+    }
+  },
+  "2001": {
+    "inputs": {
+      "image": "msr_placeholder.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 1 [[P:MSR]]"
+    }
+  },
+  "2002": {
+    "inputs": {
+      "image": "msr_placeholder.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 2 [[P:MSR]]"
+    }
+  },
+  "2003": {
+    "inputs": {
+      "image": "msr_placeholder.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 3 [[P:MSR]]"
+    }
+  },
+  "2004": {
+    "inputs": {
+      "image": "msr_placeholder.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 4 [[P:MSR]]"
+    }
+  },
+  "2005": {
+    "inputs": {
+      "image": "msr_placeholder.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Background [[P:MSR]]"
+    }
+  },
+  "2006": {
+    "inputs": {
+      "1": [
+        "2001",
+        0
+      ],
+      "2": [
+        "2002",
+        0
+      ],
+      "3": [
+        "2003",
+        0
+      ],
+      "4": [
+        "2004",
+        0
+      ],
+      "width": [
+        "759:1080",
+        1
+      ],
+      "height": [
+        "759:1081",
+        1
+      ],
+      "frame_count": 41,
+      "background": [
+        "2005",
+        0
+      ]
+    },
+    "class_type": "LiconMSR",
+    "_meta": {
+      "title": "Licon MSR [[P:MSR]]"
+    }
+  },
+  "2007": {
+    "inputs": {
+      "model": [
+        "211",
+        0
+      ],
+      "lora_name": "LTX-2.3-Licon-MSR-V1.safetensors",
+      "strength_model": 1
+    },
+    "class_type": "LTXICLoRALoaderModelOnly",
+    "_meta": {
+      "title": "MSR IC-LoRA Loader [[P:MSR]]"
+    }
+  },
+  "2008": {
+    "inputs": {
+      "positive": [
+        "759:1067",
+        0
+      ],
+      "negative": [
+        "759:1067",
+        1
+      ],
+      "vae": [
+        "174",
+        0
+      ],
+      "latent": [
+        "759:1360",
+        0
+      ],
+      "image": [
+        "2006",
+        0
+      ],
+      "frame_idx": 0,
+      "strength": 1,
+      "latent_downscale_factor": 1,
+      "crop": "center",
+      "use_tiled_encode": false,
+      "tile_size": 256,
+      "tile_overlap": 64
+    },
+    "class_type": "LTXAddVideoICLoRAGuide",
+    "_meta": {
+      "title": "MSR Add Video IC-LoRA Guide [[P:MSR]]"
     }
   },
   "759:1063": {
@@ -336,8 +467,8 @@
   "759:1055": {
     "inputs": {
       "video_latent": [
-        "759:1360",
-        0
+        "2008",
+        2
       ],
       "audio_latent": [
         "759:1382",
@@ -373,11 +504,11 @@
   "759:1074": {
     "inputs": {
       "positive": [
-        "759:1067",
+        "2008",
         0
       ],
       "negative": [
-        "759:1067",
+        "2008",
         1
       ],
       "latent": [
@@ -464,8 +595,8 @@
   "759:1070": {
     "inputs": {
       "samples": [
-        "759:1068",
-        0
+        "759:1074",
+        2
       ],
       "upscale_model": [
         "101",
@@ -686,11 +817,11 @@
         0
       ],
       "positive": [
-        "759:1067",
+        "2008",
         0
       ],
       "negative": [
-        "759:1067",
+        "2008",
         1
       ]
     },

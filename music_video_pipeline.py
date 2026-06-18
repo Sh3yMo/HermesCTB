@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from mv_prompt_hygiene import (
+    clean_beat_text,
+    collapse_duplicate_beats,
+    is_instructional_language,
+)
+
 try:
     from mv_director import MVDirector  # Stage K — producer-style director
     _MV_DIRECTOR_AVAILABLE = True
@@ -299,16 +305,19 @@ class Segment:
     # `global` = camera+lighting+grading anchor (NO identity — image carries identity).
     # `beats` = 1-4 entries; beat 1 strictly static + generic subject for IA2V.
     video_prompt_relay: Optional[Dict[str, Any]] = None
-    # Song-wide producer visual medium (cel-shaded vs photoreal + palette/grain),
+    # Song-wide producer visual medium (cel-shaded vs photoreal + grain),
     # derived from the Stage-K producer profile. Stamped on every segment so the
-    # character portrait + MSR reference grid render in the SAME look the segment
-    # frames inherit — prevents the photoreal-grid vs stylized-segment style war.
+    # character portrait + MSR reference grid render in the same base medium.
     visual_style: str = ""
+    # LTX-only video look. May include director palette as overall grade, never
+    # as performer clothing/identity color.
+    video_style: str = ""
     # Fixed per-role clothing contract applied after segment planning. This is
     # separate from wardrobe arcs: even when wardrobe_enabled=False, every role
     # needs an explicit outfit lock so mixed-gender runs do not borrow clothing
     # from the other singer.
     role_clothing_contract: str = ""
+    role_age_contract: str = ""
     # Final people-free scene contract used by MSR background generation and
     # prepended to video/frame/relay prompts so the LTX pass does not drift to
     # a different location than the background reference.
@@ -345,7 +354,9 @@ class Segment:
             "background_prompt": self.background_prompt,
             "prop_prompt": self.prop_prompt,
             "visual_style": self.visual_style,
+            "video_style": self.video_style,
             "role_clothing_contract": self.role_clothing_contract,
+            "role_age_contract": self.role_age_contract,
             "scene_contract": self.scene_contract,
             "background_source": self.background_source,
             "requested_render_duration": self.requested_render_duration,
@@ -705,7 +716,8 @@ _MALE_CLOTHING_DEFAULT = (
     "no bare torso, masculine flat chest, no breasts"
 )
 _FEMALE_CLOTHING_DEFAULT = (
-    "fitted feminine top, denim shorts or skirt, feminine footwear"
+    "fitted cream short-sleeve blouse, high-waist indigo denim shorts, "
+    "white low-top sneakers"
 )
 
 _MALE_MARKERS_RE = re.compile(
@@ -720,6 +732,7 @@ _CLOTHING_HINT_RE = re.compile(
     r"\b(wears?|wearing|tr[aä]gt|outfit|clothing|shirt|tank\s*top|top|"
     r"hotpants?|shorts?|jeans?|denim|pants?|trousers|dress|skirt|boots?|"
     r"shoes?|sandals?|hat|tam|cap|beanie|hoodie|jacket|linen|leaf|"
+    r"cropped|high[- ]waist(?:ed)?|"
     r"marijuana|cannabis|rasta|beachwear)\b",
     re.IGNORECASE,
 )
@@ -727,6 +740,40 @@ _BODY_GARMENT_HINT_RE = re.compile(
     r"\b(shirt|tank\s*top|top|hotpants?|shorts?|jeans?|denim|pants?|"
     r"trousers|dress|skirt|boots?|shoes?|sandals?|hoodie|jacket|linen|"
     r"beachwear)\b",
+    re.IGNORECASE,
+)
+_SCENE_CONTEXT_RE = re.compile(
+    r"\b(rooftop|skyline|pole\s+lights?|performance|city|blue\s+hour|"
+    r"stage|alley|beach|studio|background|scene|location)\b",
+    re.IGNORECASE,
+)
+_GARMENT_PHRASE_RE = re.compile(
+    r"\b(?:white|black|blue|red|green|silver|gold|tan|brown|burgundy|fitted|"
+    r"loose|flowing|short|long|denim|leather|cotton|linen|silk|sequined|"
+    r"matching|simple|strappy|ankle|high[- ]cut|closed|buttoned|vintage|"
+    r"scuffed|cropped|high[- ]waist(?:ed)?|feminine|masculine|\s)+"
+    r"(?:tank\s*top|top|shirt|tee|shorts?|hotpants?|jeans?|pants?|trousers|"
+    r"dress|skirt|boots?|shoes?|sandals?|jacket|vest|hat|tam|cap|beanie|"
+    r"hoodie|earrings?|necklace)\b",
+    re.IGNORECASE,
+)
+
+_NO_MALE_ROLE_RE = re.compile(
+    r"\b(?:no\s+male(?:\s+(?:voice|vocal|vocalist|singer|performer))?|"
+    r"(?:female|woman)(?:\s+\w+){0,3}\s+only|solo\s+female|single\s+female)\b",
+    re.IGNORECASE,
+)
+_NO_FEMALE_ROLE_RE = re.compile(
+    r"\b(?:no\s+female(?:\s+(?:voice|vocal|vocalist|singer|performer))?|"
+    r"(?:male|man)(?:\s+\w+){0,3}\s+only|solo\s+male|single\s+male)\b",
+    re.IGNORECASE,
+)
+
+_AGE_RE = re.compile(
+    r"\b(?:early|mid|late)[- ](?:20s|30s|40s|fifties|twenties|thirties|forties)\b|"
+    r"\b(?:around|about|approximately)\s+\d{2}\s+years?\s+old\b|"
+    r"\b\d{2}[- ]year[- ]old\b|"
+    r"\bin\s+(?:his|her|their)\s+(?:early|mid|late)?[- ]?(?:20s|30s|40s|twenties|thirties|forties)\b",
     re.IGNORECASE,
 )
 
@@ -752,6 +799,10 @@ def _split_context_sentences(text: str) -> List[str]:
 
 
 def _extract_role_clothing(text: str, role: str) -> str:
+    if role == "male" and _NO_MALE_ROLE_RE.search(text or ""):
+        return ""
+    if role == "female" and _NO_FEMALE_ROLE_RE.search(text or ""):
+        return ""
     marker = _MALE_MARKERS_RE if role == "male" else _FEMALE_MARKERS_RE
     other_marker = _FEMALE_MARKERS_RE if role == "male" else _MALE_MARKERS_RE
     hits: List[str] = []
@@ -764,6 +815,12 @@ def _extract_role_clothing(text: str, role: str) -> str:
     if hits:
         cleaned = " ".join(hits)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        garments = [
+            re.sub(r"\s+", " ", m.group(0)).strip(" ,.;:")
+            for m in _GARMENT_PHRASE_RE.finditer(cleaned)
+        ]
+        if garments:
+            cleaned = ", ".join(dict.fromkeys(garments))
         if not _BODY_GARMENT_HINT_RE.search(cleaned):
             default = _MALE_CLOTHING_DEFAULT if role == "male" else _FEMALE_CLOTHING_DEFAULT
             cleaned = f"{cleaned}; {default}"
@@ -780,6 +837,98 @@ def build_role_clothing_contracts(theme: str, genre: str = "") -> Dict[str, str]
         "male": _extract_role_clothing(context, "male"),
         "female": _extract_role_clothing(context, "female"),
     }
+
+
+async def build_role_clothing_contracts_async(
+    prompter: Optional["MusicVideoPrompter"],
+    theme: str,
+    genre: str = "",
+) -> Dict[str, str]:
+    """Stage MSR-2026-06: prefer a structured LLM wardrobe call (per role) for
+    deterministic colour + cut tokens; fall back to the regex extractor only
+    when the LLM fails or returns invalid JSON. Single source of truth for
+    clothing contracts during a job.
+    """
+    from mv_prompt_hygiene import (
+        validate_wardrobe_contract,
+        wardrobe_contract_to_compact_string,
+    )
+    context = f"{theme or ''}\n{genre or ''}"
+    out: Dict[str, str] = {
+        "male": _extract_role_clothing(context, "male"),
+        "female": _extract_role_clothing(context, "female"),
+    }
+    if prompter is None:
+        return out
+    for role in ("male", "female"):
+        try:
+            contract = await prompter.generate_wardrobe_contract(theme, genre, role)
+        except Exception as e:
+            print(f"[wardrobe] {role} LLM call failed: {e}; using regex fallback")
+            continue
+        if not isinstance(contract, dict):
+            continue
+        ok, errs = validate_wardrobe_contract(contract)
+        if not ok:
+            print(f"[wardrobe] {role} LLM result invalid: {errs}; using regex fallback")
+            continue
+        flat = wardrobe_contract_to_compact_string(contract)
+        if flat:
+            out[role] = flat
+    return out
+
+
+def _extract_role_age(text: str, role: str) -> str:
+    context = text or ""
+    if role == "male" and _NO_MALE_ROLE_RE.search(context):
+        return ""
+    if role == "female" and _NO_FEMALE_ROLE_RE.search(context):
+        return ""
+    marker = _MALE_MARKERS_RE if role == "male" else _FEMALE_MARKERS_RE
+    for sentence in _split_context_sentences(context):
+        if marker.search(sentence):
+            m = _AGE_RE.search(sentence)
+            if m:
+                return m.group(0).strip()
+    m = _AGE_RE.search(context)
+    if m:
+        return m.group(0).strip()
+    return (
+        "adult male performer around 30 years old"
+        if role == "male"
+        else "adult female performer around 30 years old"
+    )
+
+
+def build_role_age_contracts(theme: str, genre: str = "") -> Dict[str, str]:
+    """Build fixed age contracts so repeated performer renders do not age-drift."""
+    context = f"{theme or ''}\n{genre or ''}"
+    return {
+        "male": _extract_role_age(context, "male"),
+        "female": _extract_role_age(context, "female"),
+    }
+
+
+def filter_role_contracts_for_present_roles(
+    segments: List["Segment"],
+    clothing_contracts: Dict[str, str],
+    age_contracts: Dict[str, str],
+    duet: str = "",
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    roles = {extract_section_role(s.label) for s in segments}
+    roles.discard(None)
+    duet_kind = (duet or "").strip().lower()
+    needs_male = "male" in roles or ("duet" in roles and duet_kind != "ff")
+    needs_female = "female" in roles or ("duet" in roles and duet_kind != "mm")
+    clothing = dict(clothing_contracts or {})
+    ages = dict(age_contracts or {})
+    if not needs_male:
+        clothing["male"] = ""
+        ages["male"] = ""
+    if not needs_female:
+        clothing["female"] = ""
+        ages["female"] = ""
+    return clothing, ages
 
 
 def _base_role(role: Optional[str]) -> Optional[str]:
@@ -803,33 +952,214 @@ def sanitize_role_prompt_text(
     contracts = clothing_contracts or {}
     base = _base_role(role)
     out = text
+    scene_integration = (
+        " Natural contact shadows under the performer, physically inside the "
+        "background, not pasted on top, no green screen or cutout look."
+    )
     if base == "male":
         out = _MALE_FORBIDDEN_RE.sub("", out)
         out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:")
         outfit = contracts.get("male") or _MALE_CLOTHING_DEFAULT
         out = (
-            "Clothing lock: the referenced male singer wears only this exact outfit: "
+            "Clothing lock. The referenced male singer wears only this exact outfit. "
             f"{outfit}. Shirt and vest stay visible; no bare chest, no topless "
             "or shirtless look. Masculine adult male body, flat chest, no "
-            f"breasts. Never swap clothing with any female performer. {out}."
+            f"breasts. Never swap clothing with any female performer."
+            f"{scene_integration} {out}."
         )
     elif base == "female":
         out = _FEMALE_FORBIDDEN_RE.sub("", out)
         out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:")
         outfit = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
         out = (
-            "Clothing lock: the referenced female singer wears only this exact outfit: "
-            f"{outfit}. Never swap clothing with any male performer. {out}."
+            "Clothing lock. The referenced female singer wears only this exact outfit. "
+            f"{outfit}. Never swap clothing with any male performer."
+            f"{scene_integration} {out}."
         )
     elif base == "duet":
         male = contracts.get("male") or _MALE_CLOTHING_DEFAULT
         female = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
         out = (
-            f"Clothing lock: the man wears exactly: {male}. The woman wears "
-            f"exactly: {female}. Never swap or blend clothing between "
-            f"performers. {out}."
+            f"Clothing lock. The man wears exactly {male}. The woman wears "
+            f"exactly {female}. Never swap or blend clothing between "
+            f"performers.{scene_integration} {out}."
         )
     return re.sub(r"\s{2,}", " ", out).strip()
+
+
+def strip_role_conflicts_from_text(text: str, role: Optional[str]) -> str:
+    if not text:
+        return text
+    base = _base_role(role)
+    out = text
+    if base == "male":
+        out = _MALE_FORBIDDEN_RE.sub("", out)
+    elif base == "female":
+        out = _FEMALE_FORBIDDEN_RE.sub("", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:])", r"\1", out)
+    return out.strip(" ,.;:")
+
+
+def strip_portrait_role_conflicts(text: str, role: Optional[str]) -> str:
+    out = strip_role_conflicts_from_text(text, role)
+    lower = out.lower()
+    looks_female = bool(re.search(r"\b(?:female|woman|girl)\b", lower))
+    looks_male = bool(re.search(r"\b(?:male|man|boy)\b", lower))
+    if _base_role(role) == "female" or (_base_role(role) is None and looks_female and not looks_male):
+        out = re.sub(r"\bmasculine\s+flat\s+chest\b", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bflat\s+chest\b", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bno\s+breasts\b", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\s{2,}", " ", out)
+        out = re.sub(r"\s*,\s*,+", ",", out)
+        out = re.sub(r"\s+([,.;:])", r"\1", out)
+    return out.strip(" ,.;:")
+
+
+def role_clothing_global_text(
+    role: Optional[str],
+    clothing_contracts: Optional[Dict[str, str]] = None,
+) -> str:
+    contracts = clothing_contracts or {}
+    base = _base_role(role)
+    if base == "male":
+        outfit = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        return f"Male performer wearing {outfit}, natural contact shadows in scene light."
+    if base == "female":
+        outfit = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        return f"Female performer wearing {outfit}, natural contact shadows in scene light."
+    if base == "duet":
+        male = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        female = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        return (
+            f"Male performer wearing {male}; female performer wearing {female}; "
+            "natural contact shadows in scene light."
+        )
+    return ""
+
+
+def role_clothing_static_beat_text(
+    role: Optional[str],
+    clothing_contracts: Optional[Dict[str, str]] = None,
+) -> str:
+    contracts = clothing_contracts or {}
+    base = _base_role(role)
+    if base == "male":
+        outfit = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        return f"The male performer is visibly wearing {outfit}."
+    if base == "female":
+        outfit = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        return f"The female performer is visibly wearing {outfit}."
+    if base == "duet":
+        male = contracts.get("male") or _MALE_CLOTHING_DEFAULT
+        female = contracts.get("female") or _FEMALE_CLOTHING_DEFAULT
+        return (
+            f"The male performer is visibly wearing {male}; the female performer "
+            f"is visibly wearing {female}."
+        )
+    return ""
+
+
+def _append_sentence_once(text: str, sentence: str) -> str:
+    text = (text or "").strip()
+    sentence = (sentence or "").strip()
+    if not sentence:
+        return text
+    if sentence.lower() in text.lower():
+        return text
+    return re.sub(r"\s{2,}", " ", f"{text.rstrip(' .')}. {sentence}" if text else sentence).strip()
+
+
+def role_age_global_text(
+    role: Optional[str],
+    age_contracts: Optional[Dict[str, str]] = None,
+) -> str:
+    contracts = age_contracts or {}
+    base = _base_role(role)
+    if base == "male" and contracts.get("male"):
+        return f"Male performer apparent age {contracts['male']}."
+    if base == "female" and contracts.get("female"):
+        return f"Female performer apparent age {contracts['female']}."
+    if base == "duet":
+        parts = []
+        if contracts.get("male"):
+            parts.append(f"male performer apparent age {contracts['male']}")
+        if contracts.get("female"):
+            parts.append(f"female performer apparent age {contracts['female']}")
+        if parts:
+            return "; ".join(parts) + "."
+    return ""
+
+
+def role_age_static_beat_text(
+    role: Optional[str],
+    age_contracts: Optional[Dict[str, str]] = None,
+) -> str:
+    contracts = age_contracts or {}
+    base = _base_role(role)
+    if base == "male" and contracts.get("male"):
+        return f"The male performer appears {contracts['male']}."
+    if base == "female" and contracts.get("female"):
+        return f"The female performer appears {contracts['female']}."
+    if base == "duet":
+        parts = []
+        if contracts.get("male"):
+            parts.append(f"the male performer appears {contracts['male']}")
+        if contracts.get("female"):
+            parts.append(f"the female performer appears {contracts['female']}")
+        if parts:
+            return "; ".join(parts) + "."
+    return ""
+
+
+def _segment_age_contracts(role: Optional[str], age_text: str) -> Dict[str, str]:
+    base = _base_role(role)
+    age_text = (age_text or "").strip()
+    if not age_text:
+        return {}
+    if base in ("male", "female"):
+        return {base: age_text}
+    if base == "duet":
+        out: Dict[str, str] = {}
+        male = re.search(
+            r"\bmale(?:\s+performer)?\s+(?:is|appears)\s+([^;]+)",
+            age_text,
+            re.IGNORECASE,
+        )
+        female = re.search(
+            r"\bfemale(?:\s+performer)?\s+(?:is|appears)\s+([^;]+)",
+            age_text,
+            re.IGNORECASE,
+        )
+        if male:
+            out["male"] = male.group(1).strip()
+        if female:
+            out["female"] = female.group(1).strip()
+        return out
+    return {}
+
+
+_EXISTING_WEAR_SENTENCE_RE = re.compile(
+    r"(?:(?<=^)|(?<=[.!?]\s))"
+    r"(?:he|she|the\s+(?:male|female)\s+(?:singer|vocalist|performer)|"
+    r"(?:male|female)\s+(?:singer|vocalist|performer))\s+wears?\b[^.!?]*[.!?]?\s*",
+    re.IGNORECASE,
+)
+_EXISTING_WEARING_CLAUSE_RE = re.compile(
+    r"\bwearing\b.*?\b(?=(?:stands?|standing|performs?|performing|sings?|"
+    r"singing|walks?|walking|poses?|posing|dances?|dancing)\b)",
+    re.IGNORECASE,
+)
+
+
+def _strip_existing_outfit_phrases(text: str) -> str:
+    if not text:
+        return text
+    out = _EXISTING_WEAR_SENTENCE_RE.sub("", text)
+    out = _EXISTING_WEARING_CLAUSE_RE.sub("", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.;:])", r"\1", out)
+    return out.strip(" ,.;:")
 
 
 def apply_role_clothing_contracts_to_segments(
@@ -846,23 +1176,101 @@ def apply_role_clothing_contracts_to_segments(
             seg.role_clothing_contract = ""
             continue
         base = _base_role(role)
+        effective_contracts = dict(clothing_contracts)
+        slot_key = getattr(seg, "wardrobe_slot", "") or ""
+        if slot_key:
+            if base in ("male", "duet"):
+                male_slot = _get_wardrobe_outfit(slot_key, "male")
+                if male_slot:
+                    effective_contracts["male"] = male_slot
+            if base in ("female", "duet"):
+                female_slot = _get_wardrobe_outfit(slot_key, "female")
+                if female_slot:
+                    effective_contracts["female"] = female_slot
         if base == "duet":
             seg.role_clothing_contract = (
-                f"male: {clothing_contracts.get('male', _MALE_CLOTHING_DEFAULT)}; "
-                f"female: {clothing_contracts.get('female', _FEMALE_CLOTHING_DEFAULT)}"
+                f"male: {effective_contracts.get('male', _MALE_CLOTHING_DEFAULT)}; "
+                f"female: {effective_contracts.get('female', _FEMALE_CLOTHING_DEFAULT)}"
             )
         else:
-            seg.role_clothing_contract = clothing_contracts.get(base or "", "")
-        seg.prompt = sanitize_role_prompt_text(seg.prompt, role, clothing_contracts)
+            seg.role_clothing_contract = effective_contracts.get(base or "", "")
+        if slot_key:
+            seg.prompt = _strip_existing_outfit_phrases(seg.prompt)
+            seg.frame_variant_prompt = _strip_existing_outfit_phrases(
+                seg.frame_variant_prompt
+            )
+        seg.prompt = sanitize_role_prompt_text(seg.prompt, role, effective_contracts)
         seg.frame_variant_prompt = sanitize_role_prompt_text(
-            seg.frame_variant_prompt, role, clothing_contracts,
+            seg.frame_variant_prompt, role, effective_contracts,
         )
         if seg.video_prompt_relay:
             relay = dict(seg.video_prompt_relay)
-            relay["beats"] = [
-                sanitize_role_prompt_text(str(b), role, clothing_contracts)
+            if slot_key:
+                if "global" in relay:
+                    relay["global"] = _strip_existing_outfit_phrases(
+                        str(relay.get("global", ""))
+                    )
+                relay["beats"] = [
+                    _strip_existing_outfit_phrases(str(b))
+                    for b in relay.get("beats", [])
+                ]
+            if "global" in relay:
+                relay["global"] = _append_sentence_once(
+                    str(relay.get("global", "")),
+                    role_clothing_global_text(role, effective_contracts),
+                )
+            beats = [
+                strip_role_conflicts_from_text(str(b), role)
                 for b in relay.get("beats", [])
             ]
+            if beats:
+                beats[0] = _append_sentence_once(
+                    beats[0],
+                    role_clothing_static_beat_text(role, effective_contracts),
+                )
+            relay["beats"] = beats
+            seg.video_prompt_relay = relay
+
+
+def apply_role_age_contracts_to_segments(
+    segments: List["Segment"],
+    age_contracts: Dict[str, str],
+) -> None:
+    for seg in segments:
+        role = extract_section_role(seg.label)
+        head = (seg.label or "").lower().strip().split(" - ", 1)[0]
+        if head.startswith("intro") or head.startswith("outro"):
+            role = None
+        base = _base_role(role)
+        if base not in ("male", "female", "duet"):
+            seg.role_age_contract = ""
+            continue
+        if base == "duet":
+            parts = []
+            if age_contracts.get("male"):
+                parts.append(f"male performer is {age_contracts['male']}")
+            if age_contracts.get("female"):
+                parts.append(f"female performer is {age_contracts['female']}")
+            seg.role_age_contract = "; ".join(parts)
+        else:
+            seg.role_age_contract = age_contracts.get(base, "")
+        if not seg.role_age_contract:
+            continue
+        age_global = role_age_global_text(role, age_contracts)
+        age_static = role_age_static_beat_text(role, age_contracts)
+        if age_static:
+            seg.prompt = _append_sentence_once(seg.prompt, age_static)
+            seg.frame_variant_prompt = _append_sentence_once(seg.frame_variant_prompt, age_static)
+        if seg.video_prompt_relay:
+            relay = dict(seg.video_prompt_relay)
+            if "global" in relay and age_global:
+                relay["global"] = _append_sentence_once(
+                    str(relay.get("global", "")), age_global,
+                )
+            beats = [str(b) for b in relay.get("beats", [])]
+            if beats and age_static:
+                beats[0] = _append_sentence_once(beats[0], age_static)
+            relay["beats"] = beats
             seg.video_prompt_relay = relay
 
 
@@ -910,6 +1318,16 @@ def apply_scene_contract_to_text(text: str, scene: str) -> str:
     return re.sub(r"\s{2,}", " ", f"{lock} {text}").strip()
 
 
+def scene_global_text(scene: str) -> str:
+    scene = _clean_scene_contract(scene)
+    if not scene:
+        return ""
+    return (
+        f"{scene}. Photoreal cinematic still, subtle film grain, natural contact "
+        "shadows, performer grounded in the scene lighting."
+    )
+
+
 def apply_scene_contracts_to_segments(segments: List["Segment"]) -> None:
     """Make each segment's people-free background prompt the hard scene anchor."""
     for seg in segments:
@@ -930,11 +1348,98 @@ def apply_scene_contracts_to_segments(segments: List["Segment"]) -> None:
         )
         if seg.video_prompt_relay:
             relay = dict(seg.video_prompt_relay)
-            relay["beats"] = [
-                apply_scene_contract_to_text(str(b), scene)
-                for b in relay.get("beats", [])
-            ]
+            if "global" in relay:
+                relay["global"] = _append_sentence_once(
+                    str(relay.get("global", "")),
+                    scene_global_text(scene),
+                )
             seg.video_prompt_relay = relay
+
+
+def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
+    for seg in segments:
+        if isinstance(seg.video_prompt_relay, dict) and seg.video_prompt_relay.get("beats"):
+            continue
+        role = extract_section_role(seg.label)
+        scene = getattr(seg, "scene_contract", "") or _clean_scene_contract(seg.background_prompt)
+        outfit = getattr(seg, "role_clothing_contract", "") or ""
+        contracts: Dict[str, str] = {}
+        base = _base_role(role)
+        if base in ("male", "female") and outfit:
+            contracts[base] = outfit
+        global_parts = [
+            scene_global_text(scene),
+            role_clothing_global_text(role, contracts),
+            role_age_global_text(
+                role,
+                _segment_age_contracts(role, getattr(seg, "role_age_contract", "")),
+            ),
+        ]
+        static = strip_lyrics_from_image_prompt(
+            getattr(seg, "frame_variant_prompt", "") or getattr(seg, "prompt", ""),
+            lyrics=getattr(seg, "lyrics", "") or "",
+        )
+        static = re.sub(
+            r"\bScene location must be exactly:\s*[^.]*\.?\s*",
+            "",
+            static,
+            flags=re.IGNORECASE,
+        )
+        static = re.sub(
+            r"\bClothing lock:\s*[^.]*\.?\s*",
+            "",
+            static,
+            flags=re.IGNORECASE,
+        )
+        static = re.sub(
+            r"\bText appears[^.]*\.?\s*",
+            "",
+            static,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:")
+        if not static:
+            static = "The performer is visible in the scene."
+        if role in ("male", "female", "duet"):
+            static = _append_sentence_once(
+                static,
+                role_clothing_static_beat_text(role, contracts),
+            )
+            static = _append_sentence_once(
+                static,
+                role_age_static_beat_text(
+                    role,
+                    _segment_age_contracts(role, getattr(seg, "role_age_contract", "")),
+                ),
+            )
+        action = strip_lyrics_from_image_prompt(
+            getattr(seg, "prompt", "") or static,
+            lyrics=getattr(seg, "lyrics", "") or "",
+        )
+        action = re.sub(
+            r"\bScene location must be exactly:\s*[^.]*\.?\s*",
+            "",
+            action,
+            flags=re.IGNORECASE,
+        )
+        action = re.sub(
+            r"\bText appears[^.]*\.?\s*",
+            "",
+            action,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:")
+        if not action:
+            action = static
+        cleaned_static = clean_beat_text(static)
+        cleaned_action = clean_beat_text(action)
+        raw_beats = [b for b in (cleaned_static, cleaned_action) if b]
+        beats = collapse_duplicate_beats(raw_beats, threshold=0.85)
+        if not beats:
+            fallback = clean_beat_text(static) or "The performer is visible in the scene."
+            beats = [fallback]
+        seg.video_prompt_relay = {
+            "global": " ".join(p for p in global_parts if p).strip(),
+            "beats": beats,
+        }
 
 
 # Clauses introducing the "opposite" performer that should be dropped from
@@ -1149,10 +1654,17 @@ def extract_relay_spec(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     beats = raw.get("beats", [])
     if not isinstance(g, str) or not isinstance(beats, list):
         return None
-    cleaned = [str(b).strip() for b in beats if isinstance(b, (str, bytes)) and str(b).strip()]
-    if not cleaned:
+    pre_cleaned: List[str] = []
+    for b in beats:
+        if not isinstance(b, (str, bytes)):
+            continue
+        candidate = clean_beat_text(str(b), min_length=1)
+        if candidate:
+            pre_cleaned.append(candidate)
+    deduped = collapse_duplicate_beats(pre_cleaned, threshold=0.85)
+    if not deduped:
         return None
-    return {"global": g.strip(), "beats": cleaned[:RELAY_MAX_BEATS]}
+    return {"global": g.strip(), "beats": deduped[:RELAY_MAX_BEATS]}
 
 
 def _build_merged_segment(group: List["Segment"]) -> "Segment":
@@ -1179,6 +1691,7 @@ def _build_merged_segment(group: List["Segment"]) -> "Segment":
             p = (s.prompt or "").strip()
             if p:
                 all_beats.append(p)
+    all_beats = collapse_duplicate_beats(all_beats, threshold=0.85)
     capped = all_beats[:RELAY_MAX_BEATS]
     merged_relay: Optional[Dict[str, Any]] = (
         {"global": global_text, "beats": capped} if capped else None
@@ -2925,6 +3438,7 @@ class MusicVideoPrompter:
                 # the pipeline reverts to the pre-Stage-K prompt verbatim.
                 director_brief = ""
                 _visual_style = ""  # producer visual medium for portrait + MSR grid
+                _video_style = ""   # LTX-only look, palette applies to grade only
                 if _MV_DIRECTOR_AVAILABLE and os.getenv("MV_DIRECTOR_ENABLED", "1") != "0":
                     try:
                         director = MVDirector()
@@ -2963,6 +3477,7 @@ class MusicVideoPrompter:
                         )
                         profile = director.apply_sub_genre_modifiers(profile, sub_genre)
                         _visual_style = director.visual_style_descriptor(profile)
+                        _video_style = director.video_style_descriptor(profile)
                         shot_plan = director.build_shot_plan(
                             aligned_sections=director_rows, profile=profile,
                             sentiment=sentiment, song_seed=song_seed,
@@ -2972,7 +3487,8 @@ class MusicVideoPrompter:
                         )
                         print(f"[Stage K] Director: {profile.get('name')} "
                               f"(sub_genre={sub_genre}); {len(shot_plan)} shot directives. "
-                              f"Visual style: {_visual_style!r}")
+                              f"Visual style: {_visual_style!r}; "
+                              f"Video style: {_video_style!r}")
                     except Exception as _mvd_err:
                         print(f"[Stage K] director brief failed ({_mvd_err}); "
                               f"falling back to pre-K prompt.")
@@ -3099,13 +3615,16 @@ class MusicVideoPrompter:
                     "  • Emit AT MOST 4 beats. Aim for one beat per ~5s of "
                     "duration (5s→1, 10s→2, 15s→3, 20s+→4). Omit the field "
                     "entirely for segments <5s.\n"
-                    "  • Beat 1 = strict static establishing description ONLY: "
-                    "no action verbs other than is/sits/stands/holds/wears/"
-                    "leans/lies/rests. NEVER include identity descriptors "
-                    "(elderly man, young woman, asian woman, etc.) — the "
-                    "input image carries identity. Use generic subject "
-                    "(\"A figure\", \"A person\", \"The performer\").\n"
-                    "  • Beats 2..N = one subject, one action each. Single "
+                    "  • Beat 1 = strict static visible state ONLY: describe "
+                    "what is already visible in the provided image/reference. "
+                    "No motion, no action, no camera movement, no event that "
+                    "appears later. Allowed static verbs: is, stands, sits, "
+                    "holds, wears, leans, lies, rests. Use generic subject "
+                    "(\"A figure\", \"A person\", \"The performer\") unless "
+                    "the visible clothing must be stated.\n"
+                    "  • Beats 2..N = ONLY what changes during that period. "
+                    "Do not repeat scene, outfit or identity details from "
+                    "Beat 1 or global. One subject, one action each. Single "
                     "subject may chain sequential verbs ('grabs and runs'); "
                     "cross-subject parallel ('panda runs while figure waves') "
                     "is OK; cross-subject parallel with three+ subjects is "
@@ -3114,9 +3633,10 @@ class MusicVideoPrompter:
                     "dialog in the LAST beat (late beats dominate).\n"
                     "  • Dialog quotes appear in EXACTLY one beat (the one "
                     "matching the vocal hit) and NEVER in beat 1.\n"
-                    "  • global = camera + lighting + grading only (no "
-                    "wardrobe, no identity — those come from the image and "
-                    "the per-beat text).\n\n"
+                    "  • global = persistent non-action anchors only: camera "
+                    "style, lighting, grading and scene continuity. Write it "
+                    "as natural flowing text, not labels, not numbered "
+                    "references. Do not duplicate it in every beat.\n\n"
                     "REQUIRED FIELD background_prompt (MSR scene reference — "
                     "you MUST emit it for EVERY row): a SHORT standalone "
                     "description of the segment's location/backdrop with "
@@ -3245,14 +3765,24 @@ class MusicVideoPrompter:
                             # Apply Fix 33 sanitizer per beat so vocal-section
                             # lyrics don't leak into non-vocal beats. global
                             # never contains lyrics by design (camera-only).
+                            # Then clean_beat_text drops dangling connectors
+                            # ("she trembles as") and empty results so the
+                            # relay never ships truncated beats to LTX.
                             seg_lyrics = r.get("lyrics", "") if r["is_vocal"] else ""
-                            relay = {
-                                "global": relay["global"],
-                                "beats": [
-                                    strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics)
-                                    for b in relay["beats"]
-                                ],
-                            }
+                            sanitized: list[str] = []
+                            for b in relay["beats"]:
+                                stripped = strip_lyrics_from_image_prompt(b, lyrics=seg_lyrics)
+                                cleaned = clean_beat_text(stripped)
+                                if cleaned:
+                                    sanitized.append(cleaned)
+                            sanitized = collapse_duplicate_beats(sanitized, threshold=0.85)
+                            if sanitized:
+                                relay = {
+                                    "global": relay["global"],
+                                    "beats": sanitized,
+                                }
+                            else:
+                                relay = None
                         segments.append(Segment(
                             index=i,
                             start_time=r["start_time"],
@@ -3269,6 +3799,7 @@ class MusicVideoPrompter:
                             background_prompt=str(spec.get("background_prompt", "")).strip(),
                             prop_prompt=str(spec.get("prop_prompt", "")).strip(),
                             visual_style=_visual_style,
+                            video_style=_video_style,
                         ))
                     if segments:
                         print(f"[Fix 29] aligned lighting plan applied: "
@@ -3705,14 +4236,17 @@ class MusicVideoPrompter:
                     "content": (
                         "Generate a text-to-image prompt for a CLEAN CHARACTER REFERENCE "
                         "PORTRAIT of the singer/performer of this song. Hard requirements: "
-                        "the subject faces the camera directly (front-facing), shown FULL "
-                        "BODY, standing, head to toe visible (entire figure including "
-                        "footwear in frame), face and mouth clearly visible and in sharp "
-                        "focus, mouth CLOSED in a relaxed neutral expression (lips lightly "
-                        "together, no teeth showing, no microphone-held pose, NOT mid-song); "
-                        "plain neutral background (white, light grey, or soft studio "
-                        "gradient); even studio lighting. NO scenery, environment, action, "
-                        "props or other people. " + style_clause +
+                        "face and mouth clearly visible and in sharp focus, "
+                        "mouth CLOSED in a relaxed neutral expression (lips lightly "
+                        "together, no teeth showing, no microphone-held pose, NOT mid-song). "
+                        "Background MUST be a solid flat neutral mid-grey (#808080) — no "
+                        "studio sweep, no floor seam, no gradient, no vignette, no shadow "
+                        "cast on the background; even flat ambient lighting on the subject. "
+                        "NO scenery, environment, action, props or other people. " +
+                        style_clause +
+                        "DO NOT include framing/pose words (no 'standing', 'full body', "
+                        "'head to toe', 'facing the camera' or 'front-facing') — those are "
+                        "appended deterministically downstream; describe APPEARANCE only. "
                         "Establish the character's face, hair (length, exact style, colour), "
                         "skin tone, age, build, and EXACT outfit (each garment named with "
                         "its cut and colour, plus footwear) in CONCRETE detail so every "
@@ -3725,9 +4259,11 @@ class MusicVideoPrompter:
                         "Never copy clothing, body shape, hair, beard, hat or accessories "
                         "from another singer role. If a MANDATORY ROLE CLOTHING CONTRACT is "
                         "provided, it overrides every other clothing mention in the context. "
-                        "For a male role: masculine adult male body, flat chest, no breasts. "
-                        "For a female role: never inherit male beard, rasta tam or dreadlocks "
-                        "unless explicitly stated in the female clothing contract. "
+                        "If and only if PORTRAIT ROLE is male: masculine adult male body, "
+                        "flat chest, no breasts. If PORTRAIT ROLE is female: do not write "
+                        "'flat chest', 'masculine' or 'no breasts'; never inherit male beard, "
+                        "rasta tam or dreadlocks unless explicitly stated in the female "
+                        "clothing contract. "
                         "Derive a fitting performer from the genre/lyrics mood. "
                         "LTX-Video will animate mouth opening for lip-sync when audio is "
                         "applied — the still MUST start from a closed-mouth resting state. "
@@ -3741,11 +4277,71 @@ class MusicVideoPrompter:
         # Fix 23: on empty LLM response, NEVER fall back to `seed` — it contains
         # raw lyrics (lyrics[:600]+theme) and the portrait path runs no
         # strip_lyrics, so the T2I model would paint the lyrics onto the portrait.
+        response = strip_portrait_role_conflicts(response, role)
         return response or (
-            "front-facing full body studio shot of a singer, standing, "
-            "head to toe visible, neutral grey background"
+            "singer on solid flat neutral mid-grey background (#808080), "
+            "even flat ambient lighting, closed mouth in neutral relaxed expression"
             + (f", wearing {clothing_contract}" if clothing_contract else "")
         )
+
+    async def generate_wardrobe_contract(
+        self, theme: str, genre: str, role: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Stage MSR-2026-06: ask the LLM for a structured wardrobe JSON for one role.
+
+        Returns dict matching the shape consumed by
+        `mv_prompt_hygiene.wardrobe_contract_to_compact_string`:
+            {"top": {"garment": str, "color": str, "fit": str},
+             "bottom": {"garment": str, "color": str},
+             "footwear": {"garment": str, "color": str},
+             "accessories": [str, ...]}
+        Returns None on failure so the caller can fall back to the regex
+        extractor.
+        """
+        if role not in ("male", "female"):
+            return None
+        system = (
+            "You design a wardrobe contract for ONE singer in a music video. "
+            "Output ONLY a single JSON object — no preamble, no markdown. "
+            "Schema: {\"top\":{\"garment\":<str>,\"color\":<str>,\"fit\":<str>},"
+            "\"bottom\":{\"garment\":<str>,\"color\":<str>},"
+            "\"footwear\":{\"garment\":<str>,\"color\":<str>},"
+            "\"accessories\":[<str>,...]}. "
+            "Hard rules: every garment is ONE specific item (never 'or'); "
+            "every color is a named colour (e.g. 'cream', 'indigo', 'burgundy', "
+            "'olive') — NOT a vague qualifier like 'dark' or 'light'. The "
+            "wardrobe must match the song's genre and visual mood. The garment "
+            "stays on for the whole video — no exposed underwear, no swim-only "
+            "items unless the song explicitly is about the beach/pool. "
+            f"Role is {role}. "
+        )
+        user_msg = (
+            f"Song theme: {theme}\nSong genre: {genre}\nDesign a wardrobe for the "
+            f"{role} singer. Output ONLY the JSON object."
+        )
+        try:
+            raw = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=300,
+            )
+        except Exception:
+            return None
+        if not raw:
+            return None
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""

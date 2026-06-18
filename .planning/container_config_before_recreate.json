@@ -1,0 +1,260 @@
+[
+    {
+        "Id": "6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68",
+        "Created": "2026-05-15T11:44:12.717897837Z",
+        "Path": "sh",
+        "Args": [
+            "-c",
+            "apt-get update -qq \u0026\u0026 apt-get install -y -qq ffmpeg \u0026\u0026\n       pip install -r requirements.txt -q \u0026\u0026\n       uvicorn api:app --host 0.0.0.0 --port 8766 --reload"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 4538,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-05-31T10:48:26.479681271Z",
+            "FinishedAt": "2026-05-31T10:48:24.913409414Z"
+        },
+        "Image": "sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834",
+        "ResolvConfPath": "/var/lib/docker/containers/6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68/hostname",
+        "HostsPath": "/var/lib/docker/containers/6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68/hosts",
+        "LogPath": "/var/lib/docker/containers/6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68/6a3a706696babfbd78ad4a1a5a423f537b1158bae7c45e617973cfd57d41cf68-json.log",
+        "Name": "/hermes-ctb-api-1",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "I:/HermesCTB:/app:rw"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "hermes_hermes-net",
+            "PortBindings": {
+                "8766/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "8766"
+                    }
+                ]
+            },
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": [
+                "host.docker.internal:host-gateway"
+            ],
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": null,
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": null,
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": "I:/HermesCTB",
+                "Destination": "/app",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "6a3a706696ba",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "8766/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "COMFYUI_URL=http://host.docker.internal:8188",
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=A035C8C19219BA821ECEA86B64E628F8D684696D",
+                "PYTHON_VERSION=3.11.15",
+                "PYTHON_SHA256=272179ddd9a2e41a0fc8e42e33dfbdca0b3711aa5abf372d3f2d51543d09b625"
+            ],
+            "Cmd": [
+                "sh",
+                "-c",
+                "apt-get update -qq \u0026\u0026 apt-get install -y -qq ffmpeg \u0026\u0026\n       pip install -r requirements.txt -q \u0026\u0026\n       uvicorn api:app --host 0.0.0.0 --port 8766 --reload"
+            ],
+            "Image": "python:3.11-slim",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": null,
+            "Labels": {
+                "com.docker.compose.config-hash": "2dad703a2d03766d9021ed6794bd992ca0008ac5775e7e010c9413f785e49a77",
+                "com.docker.compose.container-number": "1",
+                "com.docker.compose.depends_on": "",
+                "com.docker.compose.image": "sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834",
+                "com.docker.compose.oneoff": "False",
+                "com.docker.compose.project": "hermes",
+                "com.docker.compose.project.config_files": "I:\\Hermes\\docker-compose.yml,I:\\Hermes\\docker-compose.override.yml",
+                "com.docker.compose.project.working_dir": "I:\\Hermes",
+                "com.docker.compose.replace": "ctb-api-1",
+                "com.docker.compose.service": "ctb-api",
+                "com.docker.compose.version": "5.1.0"
+            },
+            "StopTimeout": 1
+        },
+        "NetworkSettings": {
+            "SandboxID": "4c76b1d56808fd63bfc6e12e7feb92081313a95425db7e08a1f25a0fcab3353c",
+            "SandboxKey": "/var/run/docker/netns/4c76b1d56808",
+            "Ports": {
+                "8766/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "8766"
+                    }
+                ]
+            },
+            "Networks": {
+                "hermes_hermes-net": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": [
+                        "hermes-ctb-api-1",
+                        "ctb-api"
+                    ],
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "722ebd448d39a97a10dc62c8025e6597b39c9b961efebf127760773c66169e6f",
+                    "EndpointID": "efd52b7f6bebf1c12ff8bb636e1e6217ac13c79bd0c64d5f5a46138be77795b7",
+                    "Gateway": "172.22.0.1",
+                    "IPAddress": "172.22.0.4",
+                    "MacAddress": "5e:5d:4a:34:f7:6e",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "hermes-ctb-api-1",
+                        "ctb-api",
+                        "6a3a706696ba"
+                    ]
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:e78299e55776ca065dcb769f80161f48465ad352014240eb5fe4712e22505e9b",
+            "size": 1746,
+            "annotations": {
+                "com.docker.official-images.bashbrew.arch": "amd64",
+                "org.opencontainers.image.base.digest": "sha256:486b1c3d3a6a836d2518d5ac1a7b522050a034ae83b47c063fd45d550b2b9dbf",
+                "org.opencontainers.image.base.name": "debian:trixie-slim",
+                "org.opencontainers.image.created": "2026-05-08T20:01:31Z",
+                "org.opencontainers.image.revision": "c859f2b9e567f72c94e00c969f916d3f92ae52a7",
+                "org.opencontainers.image.source": "https://github.com/docker-library/python.git#c859f2b9e567f72c94e00c969f916d3f92ae52a7:3.11/slim-trixie",
+                "org.opencontainers.image.url": "https://hub.docker.com/_/python",
+                "org.opencontainers.image.version": "3.11.15-slim-trixie"
+            },
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]
