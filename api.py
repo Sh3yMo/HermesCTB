@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -28,6 +29,11 @@ from comfyui import (
     inject_msr_images,
     inject_input_audio,
     inject_input_image,
+    inject_first_frame,
+    inject_last_frame,
+    inject_flf_clip_length,
+    inject_msr_flf_resolution,
+    inject_msr_flf_first_frame_strength,
     inject_prompt,
     inject_resolution,
     inject_segment_duration,
@@ -108,7 +114,40 @@ REGISTRY: dict = {}
 JOBS: dict[str, dict] = {}  # job_id → {status, output_path, error}
 
 
+# Per-run output directory. Set once at the start of each run (own asyncio task)
+# so all nested _outputs_dir() calls land in the same numbered subfolder. A
+# ContextVar keeps concurrent runs isolated without threading a path argument
+# through ~10 call sites.
+_RUN_DIR: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("run_dir", default=None)
+
+
+def _init_run_dir() -> str:
+    """Allocate the next numbered run subfolder under today's date and bind it
+    to the current run's context.
+
+    outputs/YYYY-MM-DD/01/, .../02/, ... — one folder per run. The mkdir loop
+    with exist_ok=False makes the index allocation atomic against parallel runs.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    day_dir = os.path.join("outputs", today)
+    os.makedirs(day_dir, exist_ok=True)
+    n = 1
+    while True:
+        run_dir = os.path.join(day_dir, f"{n:02d}")
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            break
+        except FileExistsError:
+            n += 1
+    _RUN_DIR.set(run_dir)
+    return run_dir
+
+
 def _outputs_dir() -> str:
+    run_dir = _RUN_DIR.get()
+    if run_dir is not None:
+        os.makedirs(run_dir, exist_ok=True)
+        return run_dir
     today = datetime.now().strftime("%Y-%m-%d")
     d = os.path.join("outputs", today)
     os.makedirs(d, exist_ok=True)
@@ -549,6 +588,7 @@ async def _run_music_video(
     tmp_dir: str,
 ) -> None:
     _job_running(jid)
+    _init_run_dir()  # outputs/YYYY-MM-DD/NN/ — one numbered folder per run
     try:
         seg_dir = os.path.join(tmp_dir, "segments")
         os.makedirs(seg_dir, exist_ok=True)
@@ -632,11 +672,67 @@ def _mca_cfg() -> dict:
 # required image inputs, so queuing it with placeholders would 400.
 MSR_FALLBACK_WORKFLOW = "LTX2.3 - IA2V-PromptRelay"
 
+# Workflows that use the standalone LTXMSRICLoRAFLF node and therefore need an
+# explicit first frame + last frame injected per segment (generated via Flux2
+# Klein M-I Edit). Only these trigger FF/LF creation; every other workflow keeps
+# its current behavior.
+MSR_FLF_WORKFLOWS = {"LTX2.3 - FFLFA2V-MSR"}
+
+# FFLFA2V renders at ~this longer edge (workflow node 199 "I2V/FLF Resize Longer
+# Edge"); MSR reference images are encoded at the same scale + the FF aspect so
+# the cross-attention tokens match the video. Update if slider 199 changes.
+MSR_FLF_LONGER_EDGE = 1024
+
+# Google Drive target for finished music videos (rclone remote `gdrive:`).
+GDRIVE_REMOTE = "gdrive:HermesCTB/MusicVideos"
+
+
+def _msr_flf_dims(image_path: str, longer_edge: int = MSR_FLF_LONGER_EDGE) -> tuple[int, int]:
+    """Derive msr_width/msr_height from the first frame: keep its aspect, scale the
+    longer edge to `longer_edge`, round both to /32 (node step), clamp >= 32."""
+    from PIL import Image
+    with Image.open(image_path) as im:
+        w, h = im.size
+    scale = longer_edge / max(w, h)
+
+    def _r32(v: float) -> int:
+        return max(32, int(round(v * scale / 32)) * 32)
+
+    return _r32(w), _r32(h)
+
+
+async def _upload_final_to_gdrive(final_path: str) -> None:
+    """Best-effort upload of the finished video to gdrive:<remote>/<date>-<NN>/.
+    Never raises — a failed upload must not fail the run."""
+    try:
+        if not (final_path and os.path.exists(final_path)):
+            return
+        run_dir = _RUN_DIR.get()
+        if run_dir:
+            tag = f"{os.path.basename(os.path.dirname(run_dir))}-{os.path.basename(run_dir)}"
+        else:
+            tag = datetime.now().strftime("%Y-%m-%d")
+        dest = f"{GDRIVE_REMOTE}/{tag}/"
+        proc = await asyncio.create_subprocess_exec(
+            "rclone", "copy", final_path, dest, "--no-traverse",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode == 0:
+            print(f"[create-mv] uploaded final video to {dest}")
+        else:
+            print(f"[create-mv] gdrive upload failed (rc={proc.returncode}): "
+                  f"{(out or b'').decode(errors='replace')[:300]}")
+    except Exception as e:
+        print(f"[create-mv] gdrive upload skipped (non-fatal): {e!r}")
+
 # Stage O3: the character portrait is a FULL-BODY frontal shot rendered in
 # portrait orientation (it doubles as the character sheet's full-body front
 # cell). Per-segment MCA frames keep the video aspect ratio via an explicit
 # resolution override (MCA output otherwise follows its source image).
-MSR_PORTRAIT_ASPECT = "2:3"
+# Stage R: 16:27 so 3 cells (front+side+face) tile horizontally to exactly
+# 16:9 with NO grey padding (see msr_refs.compose_character_sheet).
+MSR_PORTRAIT_ASPECT = "16:27"
 _PORTRAIT_FULLBODY_SUFFIX = (
     "full body shot, standing, facing the camera directly, head to toe "
     "visible, entire figure including footwear in frame, solid flat neutral "
@@ -863,6 +959,7 @@ async def _resolve_singer_portrait(
         t2i = await MV_PROMPTER.generate_character_portrait_prompt(
             seed, genre, style_descriptor=style_descriptor,
             role=base_role, clothing_contract=clothing_contract,
+            age_contract=age_contract,
         )
         if out_prompts is not None:
             out_prompts[out_key or role] = t2i  # appearance anchor for the MSR views
@@ -1041,20 +1138,19 @@ async def _resolve_duet_portrait(
 
 
 def _build_flux2_segment_frame_prompt(prompt: str, style_descriptor: str = "") -> str:
-    full_prompt = (prompt or "").rstrip()
+    # Flux2 still prompt — positive prose only, no LTX video-grading language and
+    # no negatives (Flux2 has no negative prompts). The scene prompt is already
+    # Flux2-clean (seg.flux2_frame_prompt); we append a short style cue and a
+    # positive identity/integration instruction for the M-I Edit composite.
+    parts = [(prompt or "").strip().rstrip(".")]
     if style_descriptor:
-        full_prompt += (
-            f" Render this video frame with this overall visual medium and color grade. "
-            f"{style_descriptor.rstrip('.')}."
-        )
-    full_prompt += (
-        " Keep the singer's face, hair, skin tone, and same exact garments from "
-        "the reference image. Do not change clothing color, cut, or style. "
-        "Place the singer physically inside the background with natural contact "
-        "shadows and matching light direction; not pasted on top, no green "
-        "screen, no cutout look."
+        parts.append(style_descriptor.strip().rstrip("."))
+    parts.append(
+        "the same face, hair, skin tone and exact garments as the reference person, "
+        "standing naturally inside the scene with realistic contact shadows and "
+        "matching light direction, fully part of the location"
     )
-    return full_prompt.strip()
+    return ". ".join(p for p in parts if p).strip() + "."
 
 
 async def _run_flux2_segment_frame(
@@ -1143,6 +1239,89 @@ async def _run_flux2_segment_frame(
         return local
     except Exception as e:
         print(f"[create-mv] Flux2 segment frame failed: {e}")
+        return None
+
+
+def _build_flux2_last_frame_prompt(prompt: str, style_descriptor: str = "") -> str:
+    base = _build_flux2_segment_frame_prompt(prompt, style_descriptor)
+    # Positive still phrasing (no colon, no motion/timeline words) — same person,
+    # scene and outfit, only a small natural change in pose or expression.
+    return (
+        base
+        + " the same person in the same location and same outfit, in a slightly "
+        "different relaxed pose with a small natural change in head angle or "
+        "expression, identical framing and background"
+    )
+
+
+async def _run_flux2_last_frame(
+    first_frame_path: str,
+    prompt: str,
+    style_descriptor: str = "",
+) -> Optional[str]:
+    """Stage P (FLF): per-segment LAST FRAME via Flux2 Klein M-I Edit, edited
+    FROM the segment's first frame (slot 33 drives dims, 34/36 weight identity) so
+    FF and LF share identity/scene/outfit and LTX interpolates the in-between
+    motion. Returns a local PNG path, or None on failure (caller leaves LF unset —
+    harmless since the FLF node runs with lock_last_frame=False)."""
+    try:
+        from comfyui import randomize_seeds
+        wf_path = os.path.join(CONFIG.get("workflows_dir", "./Workflows"),
+                               _FLUX2_MIEDIT["workflow"])
+        if not os.path.exists(wf_path):
+            raise FileNotFoundError(f"Flux2 M-I Edit workflow missing: {wf_path}")
+        with open(wf_path, encoding="utf-8") as f:
+            wf = json.load(f)
+        wf = _strip_flux2_miedit_unused(wf)
+        wf = _flux2_use_gguf(wf)
+
+        full_prompt = _build_flux2_last_frame_prompt(prompt, style_descriptor)
+
+        ff_bytes = open(first_frame_path, "rb").read()
+        names = [f"lfsrc_{uuid.uuid4().hex}.png" for _ in range(3)]
+        await free_comfy()  # Stage O7 defrag before the Flux2 9B edit
+        async with httpx.AsyncClient(timeout=30) as client:
+            for name in names:
+                up = await client.post(
+                    f"{COMFYUI_URL}/upload/image",
+                    files={"image": (name, ff_bytes, "image/png")},
+                    data={"overwrite": "true"},
+                )
+                up.raise_for_status()
+
+        wf[_FLUX2_MIEDIT["load_img_a"]]["inputs"]["image"] = names[0]  # 33: dims (FF)
+        wf[_FLUX2_MIEDIT["load_img_b"]]["inputs"]["image"] = names[1]  # 34: FF ref
+        wf[_FLUX2_MIEDIT["load_img_c"]]["inputs"]["image"] = names[2]  # 36: FF ref dup
+        wf[_FLUX2_MIEDIT["prompt_node"]]["inputs"]["text"] = full_prompt
+        wf = randomize_seeds(wf)
+
+        prompt_id, _ = await queue_and_wait_with_recovery(wf)
+        async with httpx.AsyncClient(timeout=10) as client:
+            hist = (await client.get(f"{COMFYUI_URL}/history/{prompt_id}")).json()
+        images = (
+            hist.get(prompt_id, {}).get("outputs", {})
+            .get(_FLUX2_MIEDIT["save_node"], {}).get("images", [])
+        )
+        if not images:
+            raise RuntimeError(
+                f"[lastframe] history missing SaveImage {_FLUX2_MIEDIT['save_node']} output"
+            )
+        img = images[0]
+        out_dir = os.path.join(_outputs_dir(), "segment_frames")
+        os.makedirs(out_dir, exist_ok=True)
+        local = os.path.join(out_dir, f"lf_{uuid.uuid4().hex}.png")
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.get(
+                f"{COMFYUI_URL}/view",
+                params={"filename": img["filename"], "type": img.get("type", "output"),
+                        "subfolder": img.get("subfolder", "")},
+            )
+            r.raise_for_status()
+            with open(local, "wb") as f:
+                f.write(r.content)
+        return local
+    except Exception as e:
+        print(f"[create-mv] Flux2 last frame failed: {e}")
         return None
 
 
@@ -1260,6 +1439,7 @@ async def _run_create_music_video(
     wardrobe_enabled: bool = False,
 ) -> None:
     _job_running(jid)
+    _init_run_dir()  # outputs/YYYY-MM-DD/NN/ — one numbered folder per run
     # Threaded through the whole pipeline so the final output can be named
     # "<artist> - <title>.mp4" / ".mp3" instead of the generic job-id form.
     settings_artist = ""
@@ -1508,6 +1688,32 @@ async def _run_create_music_video(
             wardrobe_enabled=wardrobe_enabled,
         )
 
+        _mv_max = os.environ.get("MV_MAX_SEGMENTS", "").strip()
+        if not _mv_max:
+            try:
+                with open(os.path.join(os.path.dirname(__file__), ".mv_max_segments"), "r") as _mf:
+                    _mv_max = _mf.read().strip()
+            except FileNotFoundError:
+                _mv_max = ""
+        if _mv_max.isdigit() and int(_mv_max) > 0:
+            _n = int(_mv_max)
+            _kept = {s.index for s in segments[:_n]}
+            segments = segments[:_n]
+            for _s in segments:
+                if _s.reuse_of is not None and _s.reuse_of not in _kept:
+                    _s.reuse_of = None
+            print(f"[MV_MAX_SEGMENTS] DEBUG slice -> {len(segments)} segment(s)")
+
+        # DEBUG: render only ONE specific segment by index (e.g. skip an
+        # instrumental intro to test a vocal/close-up shot). Overrides MV_MAX_SEGMENTS.
+        _mv_pick = os.environ.get("MV_SEGMENT_PICK", "").strip()
+        if _mv_pick.isdigit():
+            _k = int(_mv_pick)
+            if 0 <= _k < len(segments):
+                segments = [segments[_k]]
+                segments[0].reuse_of = None
+                print(f"[MV_SEGMENT_PICK] DEBUG -> rendering only segment index {_k}")
+
         seg_dir = os.path.join(tmp_dir, "segments")
         os.makedirs(seg_dir, exist_ok=True)
         for seg in segments:
@@ -1526,12 +1732,75 @@ async def _run_create_music_video(
         role_clothing_contracts, role_age_contracts = filter_role_contracts_for_present_roles(
             segments, role_clothing_contracts, role_age_contracts, duet=duet,
         )
-        apply_role_clothing_contracts_to_segments(segments, role_clothing_contracts)
-        apply_role_age_contracts_to_segments(segments, role_age_contracts)
+        _EYEWEAR_RE = re.compile(
+            r",?\s*(tinted\s+)?(aviators?|sunglasses|shades|dark\s+glasses|tinted\s+(?:lenses|glasses)|eyewear)\b",
+            re.IGNORECASE,
+        )
+        for _r in list(role_clothing_contracts.keys()):
+            _c = role_clothing_contracts[_r]
+            _c = _EYEWEAR_RE.sub("", _c)
+            _c = re.sub(r",\s*,", ",", _c).strip(", ").strip()
+            role_clothing_contracts[_r] = _c
+        print(f"[EyewearStrip] post-strip clothing: {role_clothing_contracts}")
+        # RC2: detect MSR early — under MSR the sheet + subject descriptions own
+        # identity/wardrobe/age, so those tokens must NOT be injected into the
+        # relay global/beats (which stay pure scene/camera/action).
+        try:
+            selected_workflow_has_msr = has_msr_nodes(load_workflow(video_workflow_id))
+        except Exception as e:
+            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
+            selected_workflow_has_msr = False
+        apply_role_clothing_contracts_to_segments(
+            segments, role_clothing_contracts, msr_active=selected_workflow_has_msr,
+        )
+        apply_role_age_contracts_to_segments(
+            segments, role_age_contracts, msr_active=selected_workflow_has_msr,
+        )
         apply_scene_contracts_to_segments(segments)
-        ensure_relay_specs_for_segments(segments)
+        ensure_relay_specs_for_segments(segments, msr_active=selected_workflow_has_msr)
         print(f"[RoleLock] clothing contracts: {role_clothing_contracts}")
         print(f"[RoleLock] age contracts: {role_age_contracts}")
+
+        # R2-4/RC4: one batched LLM pass enforces LTX-2.3 wording on every relay
+        # (no colons, no meta, single flowing prose) — wording/format only, never
+        # content. A deterministic normalizer runs inside even on LLM failure.
+        # Fail-soft: any error leaves the relays as-is.
+        try:
+            if has_relay_smart_node(load_workflow(video_workflow_id)):
+                _relay_segs = [
+                    (i, s) for i, s in enumerate(segments)
+                    if isinstance(s.video_prompt_relay, dict)
+                ]
+                if _relay_segs:
+                    _relays_in = [
+                        {"index": i,
+                         "global": s.video_prompt_relay.get("global", ""),
+                         "beats": list(s.video_prompt_relay.get("beats", []))}
+                        for i, s in _relay_segs
+                    ]
+                    _polished = await MV_PROMPTER.polish_relays_for_ltx(_relays_in)
+                    _by_idx = {p.get("index"): p for p in _polished}
+                    for i, s in _relay_segs:
+                        p = _by_idx.get(i)
+                        if p:
+                            s.video_prompt_relay = {
+                                "global": p.get("global", ""),
+                                "beats": p.get("beats", []),
+                            }
+                    print(f"[relay-polish] LTX wording applied to {len(_relays_in)} relays")
+        except Exception as e:
+            print(f"[relay-polish] skipped (non-fatal): {e}")
+
+        # Model-format pass (batched, one LLM call over all segments): rewrites
+        # video_prompt -> LTX-clean (seg.ltx_video_prompt) and frame_variant_prompt
+        # -> Flux2-clean (seg.flux2_frame_prompt). Runs for every workflow so the
+        # single-prompt LTX path and the Flux2 FF/LF stills stop receiving each
+        # other's formatting. Deterministic baseline applied even on LLM failure.
+        try:
+            await MV_PROMPTER.polish_segment_prompts(segments)
+            print(f"[prompt-polish] model-formatted {len(segments)} segment prompts")
+        except Exception as e:
+            print(f"[prompt-polish] skipped (non-fatal): {e}")
 
         # 3. Source image(s) + per-segment MCA variant frames.
         # Role hints come from LLM-authored section labels like
@@ -1550,11 +1819,7 @@ async def _run_create_music_video(
         # for per-anchor portrait routing.
         all_roles_present = {extract_section_role(s.label) for s in segments}
         all_roles_present.discard(None)
-        try:
-            selected_workflow_has_msr = has_msr_nodes(load_workflow(video_workflow_id))
-        except Exception as e:
-            print(f"[MSR] workflow probe failed (treating as non-MSR): {e}")
-            selected_workflow_has_msr = False
+        # selected_workflow_has_msr already probed above (before contract apply).
 
         # Fix 27: an explicit same-gender duet (ff/mm) takes a dedicated path —
         # ONE consistent lead portrait for all solo sections + a distinct
@@ -1754,27 +2019,17 @@ async def _run_create_music_video(
             msr_dir = os.path.join(_outputs_dir(), "msr_refs")
             os.makedirs(msr_dir, exist_ok=True)
 
-            # Props first — their count decides whether views-mode can fit.
+            # Props: ONLY user-uploaded prop references become MSR subjects.
+            # R2-2/RC6: the old path auto-promoted any LLM-planned `prop_prompt`
+            # to a generated MSR subject, which produced spurious objects
+            # (e.g. a hallucinated "INONE" deodorant bottle) that competed with
+            # the character sheet and contradicted the wardrobe contract. A prop
+            # mentioned in a scene is an accessory — it belongs in the wardrobe
+            # contract / scene prose, not as a standalone MSR subject image.
             for p in (msr_prop_paths or []):
                 msr_prop_refs.append((
                     p, "the signature prop shown in the reference, kept visually identical",
                 ))
-            if not msr_prop_refs:
-                llm_prop = next((s.prop_prompt for s in segments if s.prop_prompt), "")
-                if llm_prop:
-                    try:
-                        await free_comfy()
-                        prop_img = await _generate_still(
-                            _mca_cfg()["t2i_workflow"],
-                            f"product still of {llm_prop}, single object, centered, "
-                            f"plain neutral background, no people",
-                            "1:1",
-                            purpose="msr_prop",
-                        )
-                        msr_prop_refs.append((prop_img, llm_prop))
-                        print(f"[MSR] LLM prop generated: {llm_prop!r}")
-                    except Exception as e:
-                        print(f"[MSR] prop still generation failed (non-fatal): {e}")
 
             ref_mode = msr_ref_mode if msr_ref_mode in ("sheet", "views") else "sheet"
             char_portraits = {
@@ -1791,10 +2046,11 @@ async def _run_create_music_video(
                 }
                 char_portraits[next(iter(solo_roles)) if len(solo_roles) == 1 else "lead"] = source
             need_duet = any(extract_section_role(s.label) == "duet" for s in segments)
-            if ref_mode == "views" and (need_duet or msr_prop_refs):
-                print("[MSR] views mode would overflow the 4 subject slots "
-                      f"(duet={need_duet}, props={len(msr_prop_refs)}) -> forcing sheet mode")
-                ref_mode = "sheet"
+            # R3-1: views mode now survives for duets. allocate_msr_subjects'
+            # overflow logic (sum of refs > 4) reduces each duet member to its
+            # single front view (male_front + female_front + bg = 3 slots), so
+            # separate per-view references no longer overflow. Props are off
+            # (R2-2) so they can't force sheet mode either.
 
             _role_desc = {
                 "male": "the male singer", "female": "the female singer",
@@ -1819,46 +2075,27 @@ async def _run_create_music_video(
 
             def _age_contract_text(role: str) -> str:
                 age = (role_age_contracts.get(role, "") or "").strip()
-                return f"; apparent age stays {age}" if age else ""
+                # Age contracts already read like "around 30 years old" — don't
+                # prepend another "around" (avoids "around around 30 years old").
+                return f", {age}" if age else ""
 
-            # Stage MSR-2026-06: identity-lock prefix front-loads face/skin/hair
-            # cues so LiconMSR weights identity above outfit when matching the
-            # reference. Order matters — clothing follows identity, not vice-versa.
-            _identity_lock_male = (
-                "identity-locked: same face, same facial structure, same eye colour, "
-                "same hair colour and length, same skin tone, same beard/facial-hair "
-                "presence as the male reference subject"
-            )
-            _identity_lock_female = (
-                "identity-locked: same face, same facial structure, same eye colour, "
-                "same hair colour and length, same skin tone as the female reference subject"
-            )
+            # R3-2: the official LiconMSR card warns that OVER-description (as well
+            # as under-description) degrades reference consistency. Keep each
+            # subject description short + accurate: identity anchor (face/hair/skin
+            # as the reference) + age + outfit. No multi-sentence lock, no body/
+            # background boilerplate — those bloated the prompt and hurt identity.
+            _id_male = "the male singer, same face, hair and skin tone as the male reference"
+            _id_female = "the female singer, same face, hair and skin tone as the female reference"
             if role_clothing_contracts.get("male"):
                 male_contract = _compact_contract(role_clothing_contracts["male"])
-                _role_desc["male"] = (
-                    f"{_identity_lock_male}, the referenced male singer. "
-                    f"Outfit is {male_contract}{_age_contract_text('male')}; shirt and vest stay visible, "
-                    "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
-                    "ignore the solid grey background in the character sheet"
-                )
-                _role_desc["male2"] = (
-                    f"{_identity_lock_male}, the second referenced male singer. "
-                    f"Outfit is {male_contract}{_age_contract_text('male')}; shirt and vest stay visible, "
-                    "no bare chest, no topless or shirtless look; masculine flat chest, no breasts; "
-                    "ignore the solid grey background in the character sheet"
-                )
+                _md = f"{_id_male}{_age_contract_text('male')}, wearing {male_contract}"
+                _role_desc["male"] = _md
+                _role_desc["male2"] = _md.replace("the male singer", "the second male singer", 1)
             if role_clothing_contracts.get("female"):
                 female_contract = _compact_contract(role_clothing_contracts["female"])
-                _role_desc["female"] = (
-                    f"{_identity_lock_female}, the referenced female singer. "
-                    f"Outfit is {female_contract}{_age_contract_text('female')}; "
-                    "ignore the solid grey background in the character sheet"
-                )
-                _role_desc["female2"] = (
-                    f"{_identity_lock_female}, the second referenced female singer. "
-                    f"Outfit is {female_contract}{_age_contract_text('female')}; "
-                    "ignore the solid grey background in the character sheet"
-                )
+                _fd = f"{_id_female}{_age_contract_text('female')}, wearing {female_contract}"
+                _role_desc["female"] = _fd
+                _role_desc["female2"] = _fd.replace("the female singer", "the second female singer", 1)
             for r, portrait in char_portraits.items():
                 views: list = []
                 try:
@@ -1888,8 +2125,8 @@ async def _run_create_music_video(
                     )
                     msr_char_refs[r] = [sheet]
                     msr_char_descs[r] = (
-                        f"{desc} (character turnaround sheet: full body front, "
-                        f"back and side views, face close-up front)"
+                        f"{desc} (character turnaround sheet: full body front "
+                        f"and side views, plus a face close-up front)"
                     )
                 else:
                     msr_char_refs[r] = (([portrait] + views)[:4]
@@ -2155,6 +2392,20 @@ async def _run_create_music_video(
             msr_role = extract_section_role(seg.label)
             if msr_role is None:
                 msr_role = _explicit_story_role(seg)
+            if msr_role is None:
+                # Robustness (no-skip): a segment with no annotated role
+                # (Intro/Outro/instrumental, or a split sub-section that lost
+                # its suffix) would otherwise allocate 0 subjects and fall back
+                # to the non-MSR workflow — whose LoadImage default points at a
+                # stale 'pasted/image (14).png' and crashes the whole job.
+                # Borrow the nearest annotated singer (else any built role) so
+                # the segment renders on the MSR graph with a real character.
+                msr_role = _nearest_annotated_role(segments, i)
+                if msr_role is None and msr_char_refs:
+                    msr_role = next(iter(msr_char_refs))
+                if msr_role is not None:
+                    print(f"[MSR] segment {i}: no annotated role -> borrowing "
+                          f"{msr_role!r} sheet (no-skip).")
             if msr_active:
                 from msr_refs import allocate_msr_subjects, build_msr_reference_block
                 msr_subjects, msr_descs = allocate_msr_subjects(
@@ -2183,7 +2434,7 @@ async def _run_create_music_video(
             )
             # RC9: vocal segments (have lyrics) get the lip-sync booster so the
             # character actually sings; story/instrumental segments do not.
-            seg_prompt = seg.prompt
+            seg_prompt = seg.ltx_video_prompt or seg.prompt
             video_style_hint = getattr(seg, "video_style", "") or video_style_desc
             integration_hint = (
                 " The performer is naturally present in this real location, "
@@ -2225,10 +2476,72 @@ async def _run_create_music_video(
                     seg_prompt = f"{seg_prompt} {msr_ref_block}".strip()
                 wf = inject_prompt(wf, seg_prompt)
             frame = frame_by_seg.get(i, source or "")
+            # FFLFA2V-MSR: this is the only path that injects an explicit first AND
+            # last frame. The MSR-FLF node locks the first frame and uses the last
+            # frame as a soft end anchor; LF is edited from FF via Flux2 M-I Edit so
+            # both share identity/scene/outfit. Gated on use_msr so a refs-incomplete
+            # fallback to the IA2V workflow does not run a wasted LF edit.
+            is_flf = video_workflow_id in MSR_FLF_WORKFLOWS and use_msr
+            if is_flf:
+                # The locked first frame must be the singer composited INTO the
+                # scene background, not the bare grey-studio portrait. The upstream
+                # FF stage leaves frame_by_seg as the raw portrait for borrowed MSR
+                # segments, which lock_first_frame=True then freezes for ~1s before
+                # LTX drifts into the scene. Rebuild the composite here when the FF
+                # is not already one (composites are saved as segment_frames/seg_*.png).
+                already_composite = bool(frame) and os.path.basename(frame).startswith("seg_")
+                role_portrait = portraits.get(msr_role) or frame or source
+                if not already_composite and msr_bg and os.path.exists(msr_bg) \
+                        and role_portrait and os.path.exists(role_portrait):
+                    ff_still = seg.flux2_frame_prompt or (
+                        strip_lyrics_from_image_prompt(seg.frame_variant_prompt, lyrics=seg.lyrics)
+                        if getattr(seg, "frame_variant_prompt", "")
+                        else seg.prompt
+                    )
+                    composite = await _run_flux2_segment_frame(
+                        msr_bg, role_portrait, ff_still, style_descriptor=video_style_desc,
+                    )
+                    if composite and os.path.exists(composite):
+                        frame = composite
+                        frame_by_seg[i] = composite
+            if is_flf and frame and os.path.exists(frame):
+                # MSR reference encode size follows the actual generation resolution
+                # (FF aspect at the workflow longer edge), not the static default.
+                try:
+                    mw, mh = _msr_flf_dims(frame)
+                    wf = inject_msr_flf_resolution(wf, mw, mh)
+                except Exception as _e:
+                    print(f"[create-mv] msr resolution from FF failed (non-fatal): {_e!r}")
+                # Optional runtime override of first_frame_strength (color-flash tuning).
+                _ff_str = os.environ.get("MSR_FF_STRENGTH", "").strip()
+                if _ff_str:
+                    try:
+                        wf = inject_msr_flf_first_frame_strength(wf, float(_ff_str))
+                    except ValueError:
+                        pass
+                with open(frame, "rb") as fr:
+                    up = await upload_file_to_comfy(fr.read(), os.path.basename(frame), "image")
+                wf = inject_first_frame(wf, up)
+                # FFLFA2V clip length is slider-driven (not audio-driven); set it to
+                # the segment duration so the clip fills its slot instead of being
+                # freeze-padded from the fixed ~5s default.
+                _flf_secs = getattr(seg, "duration", 0) or 0
+                if _flf_secs:
+                    wf = inject_flf_clip_length(wf, _flf_secs)
+                lf_still = seg.flux2_frame_prompt or (
+                    strip_lyrics_from_image_prompt(seg.frame_variant_prompt, lyrics=seg.lyrics)
+                    if getattr(seg, "frame_variant_prompt", "")
+                    else seg.prompt
+                )
+                lf_path = await _run_flux2_last_frame(frame, lf_still, style_descriptor=video_style_desc)
+                if lf_path and os.path.exists(lf_path):
+                    with open(lf_path, "rb") as lf:
+                        up_lf = await upload_file_to_comfy(lf.read(), os.path.basename(lf_path), "image")
+                    wf = inject_last_frame(wf, up_lf)
             # Frameless MSR (Stage Q): no start-frame upload/injection. (The
             # frameless workflow has no non-MSR LoadImage anyway, so this is also
             # a no-op there — the guard just saves the upload.)
-            if frame and os.path.exists(frame) and not msr_active:
+            elif frame and os.path.exists(frame) and not msr_active:
                 with open(frame, "rb") as fr:
                     up = await upload_file_to_comfy(fr.read(), os.path.basename(frame), "image")
                 wf = inject_input_image(wf, up)
@@ -2301,6 +2614,8 @@ async def _run_create_music_video(
                     "video_path": getattr(s, "video_clip", "") or "",
                     "prompt": getattr(s, "prompt", "") or "",
                     "frame_variant_prompt": getattr(s, "frame_variant_prompt", "") or "",
+                    "ltx_video_prompt": getattr(s, "ltx_video_prompt", "") or "",
+                    "flux2_frame_prompt": getattr(s, "flux2_frame_prompt", "") or "",
                     "background_prompt": getattr(s, "background_prompt", "") or "",
                     "scene_contract": getattr(s, "scene_contract", "") or "",
                     "background_source": getattr(s, "background_source", "") or "",
@@ -2331,6 +2646,7 @@ async def _run_create_music_video(
         except Exception as _e:
             print(f"[create-mv] segments JSON write failed (non-fatal): {_e!r}")
 
+        await _upload_final_to_gdrive(final_path)
         _job_done(jid, final_path, lyrics_path)
     except Exception as e:
         _job_failed(jid, str(e))
@@ -2361,6 +2677,7 @@ async def create_music_video(
     artist: str = Form(""),
     msr_ref_mode: str = Form("sheet"),  # MSR: "sheet" = one composed character sheet per role, "views" = 4 single-view refs. Only used when video_workflow_id contains a LiconMSR node.
     msr_prop_images: Optional[List[UploadFile]] = File(None),  # MSR: optional prop reference uploads, kept identical across all segments (win over the LLM-planned prop).
+    lyrics: Optional[UploadFile] = File(None),  # DEBUG: pre-authored lyrics sidecar; written next to song as <stem>_lyrics.txt so pipeline reuses them instead of generating.
 ):
     """Autonomous music-video creation. Lyrics are always pipeline-authored —
     callers pass a topic in `brief`, never finished lyrics.
@@ -2398,6 +2715,11 @@ async def create_music_video(
         song_path = os.path.join(tmp_dir, song.filename or "song.wav")
         with open(song_path, "wb") as f:
             f.write(await song.read())
+        if lyrics is not None:
+            stem, _ = os.path.splitext(song_path)
+            sidecar = f"{stem}_lyrics.txt"
+            with open(sidecar, "wb") as f:
+                f.write(await lyrics.read())
     src_bytes = await source_image.read() if source_image is not None else None
     src_name = source_image.filename if source_image is not None else None
 

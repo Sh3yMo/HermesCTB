@@ -189,6 +189,64 @@ def collapse_duplicate_beats(
     return kept
 
 
+def normalize_ltx_text(text: str | None) -> str:
+    """Deterministic, content-preserving LTX wording cleanup (R2-4 safety net).
+
+    LTX-2.3 prompts must be single flowing natural-language phrasing — no
+    colons, no line breaks, no label syntax. This applies ONLY safe transforms
+    (it never drops words/sentences, so it cannot change meaning):
+    - newlines/tabs collapsed to spaces
+    - colons turned into commas ("X: Y" -> "X, Y")
+    - repeated spaces collapsed, dangling/duplicated punctuation tidied
+
+    Used as the always-on net under the LLM polish pass: even if the LLM call
+    fails, beats/globals reach PromptRelaySmartEncode colon-free and single-line.
+    """
+    if not text:
+        return ""
+    # Drop the scene-lock meta phrase — LTX rules forbid meta-instructions ("must"),
+    # and the scene description that follows is kept.
+    out = re.sub(r"\bScene location must be exactly\b[,:]?\s*", "", text, flags=re.IGNORECASE)
+    out = re.sub(r"[\r\n\t]+", " ", out)
+    out = out.replace(":", ", ")
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"\s+([,.;!?])", r"\1", out)
+    out = re.sub(r",\s*([,.;])", r"\1", out)
+    out = re.sub(r"(,\s*){2,}", ", ", out)
+    out = re.sub(r"\.\s*\.+", ".", out)
+    return out.strip(" ,;")
+
+
+# LTX video-grading / scene-lock artifacts that must never leak into a Flux2 still
+# prompt. The music-video segment plan writes these into frame_variant_prompt
+# (LTX-flavored), but Flux2 wants clean prose with no video-grade/colon language.
+_FLUX2_STRIP_PATTERNS = (
+    r"Render this video frame with this overall visual medium and color grade\.?",
+    r"The overall video color grade and cinematography use palette tones[^.]*\.?",
+    r"Do not recolor[^.]*\.?",
+    r"\bNo movement\b\.?",
+    r"Scene location must be exactly[,:]?",
+)
+
+
+def normalize_flux2_text(text: str | None) -> str:
+    """Deterministic, content-preserving cleanup for Flux2 still prompts.
+
+    Flux2 wants natural-language prose without colons and without LTX video-grading
+    language. Strips the known LTX / scene-lock artifacts that leak in from the
+    music-video segment plan, converts style-enum underscores to spaces
+    (chiaroscuro_caravaggio -> chiaroscuro caravaggio), then applies the shared
+    single-line/colon cleanup. Always-on fallback under the LLM Flux2-format pass.
+    """
+    if not text:
+        return ""
+    out = text
+    for pat in _FLUX2_STRIP_PATTERNS:
+        out = re.sub(pat, " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"(?<=[A-Za-z])_(?=[A-Za-z])", " ", out)
+    return normalize_ltx_text(out)
+
+
 def wardrobe_contract_to_compact_string(contract: dict) -> str:
     """Flatten a structured wardrobe dict into a single deterministic string.
 

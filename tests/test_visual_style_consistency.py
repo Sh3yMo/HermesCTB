@@ -95,12 +95,12 @@ def test_injects_appearance_and_style_into_every_view() -> None:
     style = "bold cel-shaded 2D cartoon illustration style"
     appearance = "dark-skinned woman, long straight black hair, gold two-piece bikini, white heels"
     views = build_view_prompts(style_descriptor=style, appearance_desc=appearance)
-    assert len(views) == len(MSR_VIEW_PROMPTS) == 3
+    # Stage R: 2 MCA views (side, face); the front body cell is the portrait.
+    assert len(views) == len(MSR_VIEW_PROMPTS) == 2
     for v in views:
         assert "gold two-piece bikini" in v   # garment carried into every angle
         assert "cel-shaded" in v               # producer medium carried too
-    # The 3 generated MCA framings are preserved; the front body cell is the
+    # The 2 generated MCA framings are preserved; the front body cell is the
     # original portrait in the production sheet.
-    assert "seen from behind" in views[0]
-    assert "strict side profile" in views[1]
-    assert "facing the camera" in views[2]
+    assert "strict side profile" in views[0]
+    assert "facing the camera" in views[1]

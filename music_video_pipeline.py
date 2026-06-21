@@ -327,6 +327,11 @@ class Segment:
     planned_frames: int = 0
     actual_frames: int = 0
     fit_delta_frames: int = 0
+    # Model-formatted prompts (polish_segment_prompts): LTX-clean video prompt and
+    # Flux2-clean still prompt. Empty until the batched formatter runs; callers
+    # fall back to prompt / frame_variant_prompt.
+    ltx_video_prompt: str = ""
+    flux2_frame_prompt: str = ""
 
     @property
     def duration(self) -> float:
@@ -346,6 +351,8 @@ class Segment:
             "end_frame": self.end_frame,
             "end_frame_comfy": self.end_frame_comfy,
             "frame_variant_prompt": self.frame_variant_prompt,
+            "ltx_video_prompt": self.ltx_video_prompt,
+            "flux2_frame_prompt": self.flux2_frame_prompt,
             "transition": self.transition,
             "status": self.status,
             "reuse_of": self.reuse_of,
@@ -711,9 +718,8 @@ def same_gender_veto(
 
 
 _MALE_CLOTHING_DEFAULT = (
-    "masculine reggae outfit: burgundy short-sleeve shirt under a closed brown "
-    "buttoned vest, tan trousers, sandals, rasta tam; shirt and vest stay on, "
-    "no bare torso, masculine flat chest, no breasts"
+    "charcoal crew-neck t-shirt, dark indigo straight-leg jeans, "
+    "black leather boots"
 )
 _FEMALE_CLOTHING_DEFAULT = (
     "fitted cream short-sleeve blouse, high-waist indigo denim shorts, "
@@ -893,11 +899,7 @@ def _extract_role_age(text: str, role: str) -> str:
     m = _AGE_RE.search(context)
     if m:
         return m.group(0).strip()
-    return (
-        "adult male performer around 30 years old"
-        if role == "male"
-        else "adult female performer around 30 years old"
-    )
+    return "around 30 years old"
 
 
 def build_role_age_contracts(theme: str, genre: str = "") -> Dict[str, str]:
@@ -1070,6 +1072,18 @@ def _append_sentence_once(text: str, sentence: str) -> str:
     return re.sub(r"\s{2,}", " ", f"{text.rstrip(' .')}. {sentence}" if text else sentence).strip()
 
 
+_AGE_PERFORMER_PREFIX_RE = re.compile(
+    r"^\s*(?:an?\s+)?(?:adult\s+)?(?:male|female)\s+performer\s+(?:is\s+|aged\s+|of\s+age\s+)?",
+    re.IGNORECASE,
+)
+
+
+def _bare_age(age: str) -> str:
+    """Strip leading 'adult male/female performer' tokens so age templates that
+    already prepend 'performer apparent age' don't double the word (RC3)."""
+    return _AGE_PERFORMER_PREFIX_RE.sub("", (age or "").strip()).strip(" ,.;:")
+
+
 def role_age_global_text(
     role: Optional[str],
     age_contracts: Optional[Dict[str, str]] = None,
@@ -1077,15 +1091,15 @@ def role_age_global_text(
     contracts = age_contracts or {}
     base = _base_role(role)
     if base == "male" and contracts.get("male"):
-        return f"Male performer apparent age {contracts['male']}."
+        return f"Male performer apparent age {_bare_age(contracts['male'])}."
     if base == "female" and contracts.get("female"):
-        return f"Female performer apparent age {contracts['female']}."
+        return f"Female performer apparent age {_bare_age(contracts['female'])}."
     if base == "duet":
         parts = []
         if contracts.get("male"):
-            parts.append(f"male performer apparent age {contracts['male']}")
+            parts.append(f"male performer apparent age {_bare_age(contracts['male'])}")
         if contracts.get("female"):
-            parts.append(f"female performer apparent age {contracts['female']}")
+            parts.append(f"female performer apparent age {_bare_age(contracts['female'])}")
         if parts:
             return "; ".join(parts) + "."
     return ""
@@ -1098,15 +1112,15 @@ def role_age_static_beat_text(
     contracts = age_contracts or {}
     base = _base_role(role)
     if base == "male" and contracts.get("male"):
-        return f"The male performer appears {contracts['male']}."
+        return f"The male performer appears {_bare_age(contracts['male'])}."
     if base == "female" and contracts.get("female"):
-        return f"The female performer appears {contracts['female']}."
+        return f"The female performer appears {_bare_age(contracts['female'])}."
     if base == "duet":
         parts = []
         if contracts.get("male"):
-            parts.append(f"the male performer appears {contracts['male']}")
+            parts.append(f"the male performer appears {_bare_age(contracts['male'])}")
         if contracts.get("female"):
-            parts.append(f"the female performer appears {contracts['female']}")
+            parts.append(f"the female performer appears {_bare_age(contracts['female'])}")
         if parts:
             return "; ".join(parts) + "."
     return ""
@@ -1165,8 +1179,16 @@ def _strip_existing_outfit_phrases(text: str) -> str:
 def apply_role_clothing_contracts_to_segments(
     segments: List["Segment"],
     clothing_contracts: Dict[str, str],
+    msr_active: bool = False,
 ) -> None:
-    """Apply fixed role clothing contracts to segment prompts and relay beats."""
+    """Apply fixed role clothing contracts to segment prompts and relay beats.
+
+    RC2: when ``msr_active`` is True the MSR character sheet + subject
+    descriptions own identity/wardrobe, so clothing is NOT injected into the
+    relay ``global``/``beats`` (those stay pure scene/camera/action). The
+    ``seg.role_clothing_contract`` attribute is still set (read by the MSR
+    subject-description builder in api.py).
+    """
     for seg in segments:
         role = extract_section_role(seg.label)
         head = (seg.label or "").lower().strip().split(" - ", 1)[0]
@@ -1214,7 +1236,7 @@ def apply_role_clothing_contracts_to_segments(
                     _strip_existing_outfit_phrases(str(b))
                     for b in relay.get("beats", [])
                 ]
-            if "global" in relay:
+            if not msr_active and "global" in relay:
                 relay["global"] = _append_sentence_once(
                     str(relay.get("global", "")),
                     role_clothing_global_text(role, effective_contracts),
@@ -1223,7 +1245,7 @@ def apply_role_clothing_contracts_to_segments(
                 strip_role_conflicts_from_text(str(b), role)
                 for b in relay.get("beats", [])
             ]
-            if beats:
+            if not msr_active and beats:
                 beats[0] = _append_sentence_once(
                     beats[0],
                     role_clothing_static_beat_text(role, effective_contracts),
@@ -1235,6 +1257,7 @@ def apply_role_clothing_contracts_to_segments(
 def apply_role_age_contracts_to_segments(
     segments: List["Segment"],
     age_contracts: Dict[str, str],
+    msr_active: bool = False,
 ) -> None:
     for seg in segments:
         role = extract_section_role(seg.label)
@@ -1261,7 +1284,9 @@ def apply_role_age_contracts_to_segments(
         if age_static:
             seg.prompt = _append_sentence_once(seg.prompt, age_static)
             seg.frame_variant_prompt = _append_sentence_once(seg.frame_variant_prompt, age_static)
-        if seg.video_prompt_relay:
+        # RC2: with MSR active, the subject description owns age — keep the
+        # relay global/beats free of performer-age tokens.
+        if not msr_active and seg.video_prompt_relay:
             relay = dict(seg.video_prompt_relay)
             if "global" in relay and age_global:
                 relay["global"] = _append_sentence_once(
@@ -1333,8 +1358,11 @@ def apply_scene_contracts_to_segments(segments: List["Segment"]) -> None:
     for seg in segments:
         scene = _clean_scene_contract(seg.background_prompt)
         source = "llm"
-        if not scene or scene_contract_mentions_people(scene):
-            from msr_refs import derive_background_prompt
+        from msr_refs import derive_background_prompt, scene_is_artificial_studio
+        # R3-4: a studio/seamless backdrop is not a real location and bleeds a
+        # grey void into the MSR output — treat it like a people-mention and
+        # replace with a derived real location.
+        if not scene or scene_contract_mentions_people(scene) or scene_is_artificial_studio(scene):
             scene = _clean_scene_contract(
                 derive_background_prompt(seg.frame_variant_prompt or seg.prompt)
             )
@@ -1356,7 +1384,21 @@ def apply_scene_contracts_to_segments(segments: List["Segment"]) -> None:
             seg.video_prompt_relay = relay
 
 
-def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
+# RC2 (R2-3): the wardrobe lock that `sanitize_role_prompt_text` prepends to
+# seg.prompt/frame_variant_prompt ("Clothing lock. The referenced ... outfit.
+# {outfit}. ... no green screen or cutout look.") feeds MCA frame generation but
+# must NOT leak into relay beats. The old strip only matched "Clothing lock:"
+# (colon); the real text uses "Clothing lock." (period) + several outfit
+# sentences, so it was never removed. This strips the whole injected block.
+_SANITIZE_CLOTHING_BLOCK_RE = re.compile(
+    r"Clothing lock\..*?cutout look\.\s*", re.IGNORECASE | re.DOTALL,
+)
+
+
+def ensure_relay_specs_for_segments(
+    segments: List["Segment"],
+    msr_active: bool = False,
+) -> None:
     for seg in segments:
         if isinstance(seg.video_prompt_relay, dict) and seg.video_prompt_relay.get("beats"):
             continue
@@ -1367,14 +1409,17 @@ def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
         base = _base_role(role)
         if base in ("male", "female") and outfit:
             contracts[base] = outfit
-        global_parts = [
-            scene_global_text(scene),
-            role_clothing_global_text(role, contracts),
-            role_age_global_text(
-                role,
-                _segment_age_contracts(role, getattr(seg, "role_age_contract", "")),
-            ),
-        ]
+        # RC2: under MSR the sheet/subject-desc owns identity+wardrobe+age;
+        # keep the fallback relay global/beats free of clothing/age tokens.
+        global_parts = [scene_global_text(scene)]
+        if not msr_active:
+            global_parts += [
+                role_clothing_global_text(role, contracts),
+                role_age_global_text(
+                    role,
+                    _segment_age_contracts(role, getattr(seg, "role_age_contract", "")),
+                ),
+            ]
         static = strip_lyrics_from_image_prompt(
             getattr(seg, "frame_variant_prompt", "") or getattr(seg, "prompt", ""),
             lyrics=getattr(seg, "lyrics", "") or "",
@@ -1385,6 +1430,7 @@ def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
             static,
             flags=re.IGNORECASE,
         )
+        static = _SANITIZE_CLOTHING_BLOCK_RE.sub("", static)
         static = re.sub(
             r"\bClothing lock:\s*[^.]*\.?\s*",
             "",
@@ -1399,7 +1445,7 @@ def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
         ).strip(" ,.;:")
         if not static:
             static = "The performer is visible in the scene."
-        if role in ("male", "female", "duet"):
+        if not msr_active and role in ("male", "female", "duet"):
             static = _append_sentence_once(
                 static,
                 role_clothing_static_beat_text(role, contracts),
@@ -1415,6 +1461,7 @@ def ensure_relay_specs_for_segments(segments: List["Segment"]) -> None:
             getattr(seg, "prompt", "") or static,
             lyrics=getattr(seg, "lyrics", "") or "",
         )
+        action = _SANITIZE_CLOTHING_BLOCK_RE.sub("", action)
         action = re.sub(
             r"\bScene location must be exactly:\s*[^.]*\.?\s*",
             "",
@@ -3642,7 +3689,10 @@ class MusicVideoPrompter:
                     "description of the segment's location/backdrop with "
                     "STRICTLY NO people, no characters, no faces, no clothing "
                     "— scenery and lighting only, e.g. 'neon-lit rain-slick "
-                    "alley at night, shallow depth of field'. Under 25 words. "
+                    "alley at night, shallow depth of field'. It MUST be a real "
+                    "diegetic LOCATION — NEVER a photo studio, seamless backdrop, "
+                    "cyclorama, high-key studio, or plain grey/white background. "
+                    "Under 25 words. "
                     "Consistent with the segment's lighting state. Sections "
                     "that share a location (e.g. repeated choruses) MUST use "
                     "an IDENTICAL background_prompt. If the user specified "
@@ -4195,6 +4245,7 @@ class MusicVideoPrompter:
         style_descriptor: str = "",
         role: str = "",
         clothing_contract: str = "",
+        age_contract: str = "",
     ) -> str:
         """RC7a: T2I prompt for a clean SINGER reference portrait (identity anchor).
 
@@ -4216,6 +4267,14 @@ class MusicVideoPrompter:
             context += (
                 "\nMANDATORY ROLE CLOTHING CONTRACT: "
                 f"{clothing_contract}. Use ONLY this clothing for this role."
+            )
+        if age_contract:
+            # RB5: Flux defaults faces young when age is unspecified. Pin the
+            # apparent age so the portrait (and every view + the video) reads
+            # at the intended age instead of ~20.
+            context += (
+                f"\nMANDATORY APPARENT AGE: {age_contract}. Render the face to "
+                "read clearly as this age (skin texture, features, maturity)."
             )
         if style_descriptor:
             context += (
@@ -4281,6 +4340,7 @@ class MusicVideoPrompter:
         return response or (
             "singer on solid flat neutral mid-grey background (#808080), "
             "even flat ambient lighting, closed mouth in neutral relaxed expression"
+            + (f", apparent age {age_contract}" if age_contract else "")
             + (f", wearing {clothing_contract}" if clothing_contract else "")
         )
 
@@ -4313,6 +4373,8 @@ class MusicVideoPrompter:
             "wardrobe must match the song's genre and visual mood. The garment "
             "stays on for the whole video — no exposed underwear, no swim-only "
             "items unless the song explicitly is about the beach/pool. "
+            "Always respond in English regardless of the input language — every "
+            "garment name and colour MUST be an English word. "
             f"Role is {role}. "
         )
         user_msg = (
@@ -4338,10 +4400,198 @@ class MusicVideoPrompter:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            return None
+            # RC1/A2: models often wrap the JSON in prose ("Here is the
+            # wardrobe: {...}. Hope this helps."). Fall back to extracting the
+            # outermost {...} span so the LLM override still beats the regex
+            # default instead of silently dropping to the hardcoded fallback.
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end <= start:
+                return None
+            try:
+                data = json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                return None
         if not isinstance(data, dict):
             return None
         return data
+
+    async def polish_relays_for_ltx(
+        self, relays: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """R2-4/RC4: rewrite ALL segment relays to LTX-2.3 wording in ONE batched
+        LLM call (not per-segment — saves cost/latency).
+
+        Wording/format ONLY — content (scene, location, identity, wardrobe,
+        actions, order, beat count) must stay identical. A deterministic
+        normalizer (`mv_prompt_hygiene.normalize_ltx_text`) is ALWAYS applied,
+        so output reaches PromptRelaySmartEncode colon-free + single-line even
+        when the LLM call fails. Fail-soft: any error / shape mismatch keeps the
+        deterministically-normalized originals.
+        """
+        from mv_prompt_hygiene import normalize_ltx_text
+
+        def _norm_item(it: Dict[str, Any]) -> Dict[str, Any]:
+            beats = [normalize_ltx_text(str(b)) for b in (it.get("beats") or [])]
+            return {
+                "index": it.get("index"),
+                "global": normalize_ltx_text(str(it.get("global", ""))),
+                "beats": [b for b in beats if b],
+            }
+
+        if not relays:
+            return relays
+        baseline = [_norm_item(it) for it in relays]
+        system = (
+            "You rewrite music-video shot descriptions into LTX-2.3 video-model "
+            "wording. RULES: each text is a single flowing natural-language phrase; "
+            "NO colons, NO labels or headers, NO bullet points, NO line breaks, "
+            "NO meta-instructions (no 'use the', 'must', 'should', 'never'). Write "
+            "like a cinematographer describing a continuous shot. ABSOLUTE "
+            "CONSTRAINT: change WORDING/FORMAT ONLY — never change, add, or remove "
+            "meaning, scene, location, characters, identity, wardrobe, actions, or "
+            "their order. Keep the SAME number of beats per item and the SAME "
+            "index. Output ONLY a JSON array of "
+            "{\"index\":int,\"global\":str,\"beats\":[str,...]} — no prose, no markdown."
+        )
+        user_msg = json.dumps(baseline, ensure_ascii=False)
+        try:
+            raw = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=3000,
+            )
+        except Exception as e:
+            print(f"[relay-polish] LLM call failed: {e}; deterministic normalize only")
+            return baseline
+        if not raw:
+            return baseline
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            start, end = text.find("["), text.rfind("]")
+            if start == -1 or end <= start:
+                print("[relay-polish] unparseable LLM JSON; deterministic normalize only")
+                return baseline
+            try:
+                data = json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                return baseline
+        if not isinstance(data, list) or len(data) != len(baseline):
+            print("[relay-polish] item-count mismatch; deterministic normalize only")
+            return baseline
+        out: List[Dict[str, Any]] = []
+        for base, got in zip(baseline, data):
+            if not isinstance(got, dict):
+                out.append(base)
+                continue
+            got_beats = [str(b) for b in (got.get("beats") or [])]
+            if len(got_beats) != len(base["beats"]):
+                # Beat count changed -> LLM altered structure; keep safe baseline.
+                out.append(base)
+                continue
+            out.append({
+                "index": base["index"],
+                "global": normalize_ltx_text(str(got.get("global", ""))) or base["global"],
+                "beats": [normalize_ltx_text(b) or base["beats"][i]
+                          for i, b in enumerate(got_beats)],
+            })
+        return out
+
+    async def polish_segment_prompts(self, segments: List[Segment]) -> None:
+        """Batched, model-aware format pass over ALL segments in ONE LLM call.
+
+        Rewrites each segment's video_prompt -> LTX-clean (seg.ltx_video_prompt)
+        and frame_variant_prompt -> Flux2-clean (seg.flux2_frame_prompt) — wording
+        and format ONLY, scene/identity/wardrobe/order unchanged. All segment
+        prompts are fixed before rendering, so one batched call (mirrors
+        polish_relays_for_ltx) suffices. Deterministic normalizers are always
+        applied first as the fail-soft baseline, so the fields are populated even
+        if the LLM call fails or returns bad JSON.
+        """
+        from mv_prompt_hygiene import normalize_ltx_text, normalize_flux2_text
+        try:
+            from prompt_enhancer import FLUX_FORMAT_RULES, LTX_FORMAT_RULES
+        except Exception:
+            FLUX_FORMAT_RULES = LTX_FORMAT_RULES = ""
+
+        if not segments:
+            return
+
+        baseline: List[Dict[str, Any]] = []
+        for s in segments:
+            s.ltx_video_prompt = normalize_ltx_text(s.prompt or "")
+            s.flux2_frame_prompt = normalize_flux2_text(s.frame_variant_prompt or s.prompt or "")
+            baseline.append({
+                "index": s.index,
+                "video_prompt": s.prompt or "",
+                "frame_variant_prompt": s.frame_variant_prompt or "",
+            })
+
+        system = (
+            "You reformat music-video segment prompts so each targets the right "
+            "generation model. For EACH input item produce two rewrites: "
+            "'ltx_video_prompt' rewrites 'video_prompt' for the LTX-2.3 VIDEO model; "
+            "'flux2_frame_prompt' rewrites 'frame_variant_prompt' (a single STILL "
+            "photo of the same scene) for the FLUX-2 IMAGE model.\n\n"
+            f"{LTX_FORMAT_RULES}\n\n{FLUX_FORMAT_RULES}\n\n"
+            "ABSOLUTE CONSTRAINT: change WORDING/FORMAT ONLY — never change, add or "
+            "remove meaning, scene, location, characters, identity, wardrobe, props, "
+            "actions or their order. Translate any non-English words to English so "
+            "BOTH outputs are 100% English. Keep the SAME index. Output ONLY a JSON "
+            "array of {\"index\":int,\"ltx_video_prompt\":str,\"flux2_frame_prompt\":str} "
+            "— no prose, no markdown."
+        )
+        user_msg = json.dumps(baseline, ensure_ascii=False)
+        try:
+            raw = await self._call_openrouter(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=6000,
+            )
+        except Exception as e:
+            print(f"[prompt-polish] LLM call failed: {e}; deterministic normalize only")
+            return
+        if not raw:
+            return
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            start, end = text.find("["), text.rfind("]")
+            if start == -1 or end <= start:
+                print("[prompt-polish] unparseable LLM JSON; deterministic normalize only")
+                return
+            try:
+                data = json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                return
+        if not isinstance(data, list):
+            return
+        by_index = {s.index: s for s in segments}
+        for got in data:
+            if not isinstance(got, dict):
+                continue
+            seg = by_index.get(got.get("index"))
+            if seg is None:
+                continue
+            ltx = normalize_ltx_text(str(got.get("ltx_video_prompt", "")))
+            flux = normalize_flux2_text(str(got.get("flux2_frame_prompt", "")))
+            if ltx:
+                seg.ltx_video_prompt = ltx
+            if flux:
+                seg.flux2_frame_prompt = flux
 
     async def extract_scene_anchor(self, theme: str) -> str:
         """Extract constant visual elements from a theme description for use as scene anchor."""
