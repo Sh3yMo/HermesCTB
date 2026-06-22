@@ -207,6 +207,92 @@ def inject_input_audio(workflow: dict, audio_filename: str) -> dict:
     return workflow
 
 
+# First/Last frame LoadImage tags for the FFLFA2V-MSR workflow. The LTXMSRICLoRAFLF
+# node takes explicit first_frame / last_frame images via dedicated LoadImage nodes
+# titled with these tags, so the music-video loop can inject them independently of
+# the generic inject_input_image / MSR slot injectors.
+FF_TITLE_TAG = "[[P:FF]]"
+LF_TITLE_TAG = "[[P:LF]]"
+
+
+def _inject_tagged_loadimage(workflow: dict, tag: str, image_filename: str) -> dict:
+    for node in workflow.values():
+        if not (isinstance(node, dict) and node.get("class_type") == "LoadImage"):
+            continue
+        if tag in node.get("_meta", {}).get("title", ""):
+            node["inputs"]["image"] = image_filename
+            return workflow
+    return workflow
+
+
+def inject_first_frame(workflow: dict, image_filename: str) -> dict:
+    """Patch the [[P:FF]]-tagged LoadImage with the segment's first-frame image."""
+    return _inject_tagged_loadimage(workflow, FF_TITLE_TAG, image_filename)
+
+
+def inject_last_frame(workflow: dict, image_filename: str) -> dict:
+    """Patch the [[P:LF]]-tagged LoadImage with the segment's last-frame image."""
+    return _inject_tagged_loadimage(workflow, LF_TITLE_TAG, image_filename)
+
+
+def inject_flf_clip_length(workflow: dict, seconds: float) -> dict:
+    """Drive the FFLFA2V clip length from the segment duration.
+
+    Unlike the audio-driven IA2V workflows, FFLFA2V's clip length is fixed by the
+    "Clip Length (in seconds)" mxSlider (frame_count = seconds*fps+1) and trimmed by
+    the "Cut OFF End Frames" counter — both ignored by inject_segment_duration. We
+    set the slider to the segment duration and zero the end trim so the rendered
+    clip fills the segment slot instead of being freeze-padded. Scoped to the FLF
+    workflow's specific node titles, so other workflows are untouched.
+
+    Also trims ONE start frame ("Cut OFF Start Frames" = 1): frame 0 is the
+    locked external first frame whose grade differs from the LTX decode and shows
+    as a colour flash whose size scales with the first-frame-vs-scene brightness
+    gap (lowering first_frame_strength only partly mitigates it on dark scenes).
+    Dropping that single frame removes the flash gap-independently. The slider's
+    +1 frame (secs*fps+1) absorbs the trim, so length stays at secs*fps = target.
+    """
+    secs = max(1, int(round(seconds)))
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        title = node.get("_meta", {}).get("title", "").lower()
+        ct = node.get("class_type", "")
+        if ct == "mxSlider" and "clip length" in title:
+            node["inputs"]["Xi"] = secs
+            node["inputs"]["Xf"] = secs
+        elif ct == "JWInteger" and "cut off end" in title:
+            node["inputs"]["value"] = 0
+        elif ct == "JWInteger" and "cut off start" in title:
+            node["inputs"]["value"] = 1
+    return workflow
+
+
+def inject_msr_flf_resolution(workflow: dict, width: int, height: int) -> dict:
+    """Set msr_width/msr_height on the LTXMSRICLoRAFLF node so MSR reference
+    images are encoded at the actual generation resolution (driven per-segment by
+    the first frame's aspect) rather than the static workflow default."""
+    for node in workflow.values():
+        if isinstance(node, dict) and "LTXMSRICLoRAFLF" in node.get("class_type", ""):
+            node["inputs"]["msr_width"] = int(width)
+            node["inputs"]["msr_height"] = int(height)
+            break
+    return workflow
+
+
+def inject_msr_flf_first_frame_strength(workflow: dict, strength: float) -> dict:
+    """Set first_frame_strength on the LTXMSRICLoRAFLF node.
+
+    At 1.0 the external Flux2 first frame is hard-pinned at frame 0, so its grade
+    (which differs from the LTX decode) shows as a 1-frame colour flash. Lowering
+    it lets the model harmonise frame 0's colour with the rest of the clip."""
+    for node in workflow.values():
+        if isinstance(node, dict) and "LTXMSRICLoRAFLF" in node.get("class_type", ""):
+            node["inputs"]["first_frame_strength"] = float(strength)
+            break
+    return workflow
+
+
 # ---------------------------------------------------------------------------
 # MSR (Multiple Subject Reference) helpers — LTX2.3 - IA2V-PromptRelay-MSR
 # ---------------------------------------------------------------------------
@@ -220,11 +306,31 @@ MSR_MAX_SUBJECTS = 4
 
 
 def has_msr_nodes(workflow: dict) -> bool:
-    """True when the workflow contains a LiconMSR reference node."""
+    """True when the workflow contains an MSR reference node.
+
+    Matches the legacy LiconMSR guide node and the standalone
+    LTXMSRICLoRAFLF[_Experimental] node (MSR via cross-attention + FF/LF).
+    """
     for node in workflow.values():
-        if isinstance(node, dict) and node.get("class_type") == "LiconMSR":
-            return True
+        if isinstance(node, dict):
+            ct = node.get("class_type", "")
+            if ct == "LiconMSR" or "LTXMSRICLoRAFLF" in ct:
+                return True
     return False
+
+
+def _find_msr_ref(workflow: dict):
+    """Locate the MSR reference node. Returns (node_id, kind) where kind is
+    'licon' (LiconMSR) or 'flf' (LTXMSRICLoRAFLF*), or (None, None)."""
+    for nid, n in workflow.items():
+        if not isinstance(n, dict):
+            continue
+        ct = n.get("class_type", "")
+        if ct == "LiconMSR":
+            return nid, "licon"
+        if "LTXMSRICLoRAFLF" in ct:
+            return nid, "flf"
+    return None, None
 
 
 def msr_frame_count(image_count: int) -> int:
@@ -250,13 +356,16 @@ def inject_msr_images(workflow: dict, subject_images: list[str], background_imag
     if not subject_images:
         raise ValueError("MSR requires at least one subject image")
 
-    licon_id = next(
-        (nid for nid, n in workflow.items() if isinstance(n, dict) and n.get("class_type") == "LiconMSR"),
-        None,
-    )
-    if licon_id is None:
+    ref_id, ref_kind = _find_msr_ref(workflow)
+    if ref_id is None:
         return workflow
-    licon = workflow[licon_id]
+    ref = workflow[ref_id]
+
+    # Subject-image input key on the reference node differs by node kind:
+    # LiconMSR uses bare "1".."4"; the standalone LTXMSRICLoRAFLF node uses
+    # "msr_image_1".."msr_image_4".
+    def _subj_key(slot: str) -> str:
+        return slot if ref_kind == "licon" else f"msr_image_{slot}"
 
     slot_nodes: dict[str, str] = {}  # slot key ("1".."4", "background") -> LoadImage node id
     for node_id, node in workflow.items():
@@ -284,11 +393,11 @@ def inject_msr_images(workflow: dict, subject_images: list[str], background_imag
             raise ValueError(f"MSR workflow is missing the 'MSR Subject {slot}' LoadImage node")
         workflow[slot_nodes[slot]]["inputs"]["image"] = filename
 
-    # Drop unused subject slots: LiconMSR input key + orphaned LoadImage node.
+    # Drop unused subject slots: reference-node input key + orphaned LoadImage node.
     for slot in ("1", "2", "3", "4"):
         if int(slot) <= len(subject_images):
             continue
-        licon["inputs"].pop(slot, None)
+        ref["inputs"].pop(_subj_key(slot), None)
         node_id = slot_nodes.get(slot)
         if node_id is not None:
             workflow.pop(node_id, None)
@@ -296,8 +405,10 @@ def inject_msr_images(workflow: dict, subject_images: list[str], background_imag
     # Volle MSR-Referenzvideo-Länge (Referenz-WF nutzt 41) — die "kleinste gültige"
     # frame_count-Heuristik verkürzte das Guide-Video auf 17 und ließ die Identität
     # nach den ersten Frames driften (nur Haare blieben). 41 deckt auch den max.
-    # 4-Subjekt+BG-Fall ab (8*5+1).
-    licon["inputs"]["frame_count"] = _MSR_FRAME_COUNTS[-1]
+    # 4-Subjekt+BG-Fall ab (8*5+1). Der FLF-Node bäckt msr_frame_count als Widget,
+    # daher nur für LiconMSR setzen.
+    if ref_kind == "licon":
+        ref["inputs"]["frame_count"] = _MSR_FRAME_COUNTS[-1]
     return workflow
 
 

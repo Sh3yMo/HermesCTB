@@ -13,9 +13,41 @@ from mv_prompt_hygiene import (
     collapse_duplicate_beats,
     has_duplicate_framing_phrases,
     is_instructional_language,
+    normalize_ltx_text,
     validate_wardrobe_contract,
     wardrobe_contract_to_compact_string,
 )
+
+
+# ---------- normalize_ltx_text (R2-4/RC4 deterministic safety net) ----------
+
+def test_normalize_ltx_text_removes_colons():
+    out = normalize_ltx_text("Male performer wearing onyx trench coat: belted, no sunglasses")
+    assert ":" not in out
+    # content words preserved
+    assert "onyx trench coat" in out
+    assert "belted" in out
+
+
+def test_normalize_ltx_text_collapses_newlines_to_single_line():
+    out = normalize_ltx_text("rain falls on the street.\nthe singer looks up.\n\nneon glows")
+    assert "\n" not in out
+    assert "rain falls on the street" in out
+    assert "neon glows" in out
+
+
+def test_normalize_ltx_text_tidies_punctuation_without_dropping_words():
+    out = normalize_ltx_text("a man stands ,  rain drips : cold wind , , blows")
+    assert ":" not in out
+    assert ", ," not in out
+    assert "  " not in out
+    for w in ("man", "stands", "rain", "drips", "cold", "wind", "blows"):
+        assert w in out
+
+
+def test_normalize_ltx_text_empty():
+    assert normalize_ltx_text("") == ""
+    assert normalize_ltx_text(None) == ""
 
 
 # ---------- clean_beat_text ----------
@@ -221,34 +253,38 @@ def test_dedupe_portrait_framing_passes_through_no_dupes():
 
 # ---------- character sheet 16:9 padding ----------
 
-def test_compose_sheet_pads_portrait_grid_to_16_9(tmp_path):
+def test_compose_sheet_three_cells_native_16_9_no_padding(tmp_path):
+    # Stage R (RC5/RC7): 3 cells of 16:27 tile horizontally to exactly 16:9
+    # with NO grey padding (the grey field used to bleed into the video bg).
     from PIL import Image
     from msr_refs import compose_character_sheet, NEUTRAL_BG_RGB
 
     src = tmp_path / "view.png"
-    Image.new("RGB", (512, 768), (50, 50, 50)).save(src)
+    Image.new("RGB", (1024, 1728), (50, 50, 50)).save(src)
     out = tmp_path / "sheet.png"
-    compose_character_sheet([str(src)] * 4, str(out), cell_w=512, cell_h=768)
+    compose_character_sheet([str(src)] * 3, str(out))  # default cells 1024x1728
     img = Image.open(out).convert("RGB")
     w, h = img.size
-    # Aspect-ratio rounded to /32 should match 16:9 within a 32-pixel slack.
-    assert abs(w / h - 16 / 9) < 0.05, (w, h)
+    assert (w, h) == (3072, 1728)
     assert w % 32 == 0 and h % 32 == 0
-    # Padding corner pixel must be neutral mid-grey #808080.
-    assert img.getpixel((0, 0)) == NEUTRAL_BG_RGB
+    assert abs(w / h - 16 / 9) < 1e-6
+    # No padding: corners are view content, NOT the neutral pad grey.
+    assert img.getpixel((0, 0)) != NEUTRAL_BG_RGB
+    assert img.getpixel((w - 1, h - 1)) != NEUTRAL_BG_RGB
 
 
-def test_compose_sheet_target_aspect_none_keeps_legacy_2x3(tmp_path):
+def test_compose_sheet_horizontal_row_no_padding(tmp_path):
+    # Stage R: target_aspect=None lays cells out in a single horizontal row.
     from PIL import Image
     from msr_refs import compose_character_sheet
 
     src = tmp_path / "view.png"
-    Image.new("RGB", (512, 768), (50, 50, 50)).save(src)
+    Image.new("RGB", (512, 864), (50, 50, 50)).save(src)
     out = tmp_path / "sheet.png"
-    compose_character_sheet([str(src)] * 4, str(out),
-                            cell_w=512, cell_h=768, target_aspect=None)
+    compose_character_sheet([str(src)] * 3, str(out),
+                            cell_w=512, cell_h=864, target_aspect=None)
     img = Image.open(out).convert("RGB")
-    assert img.size == (1024, 1536)
+    assert img.size == (3 * 512, 864)
 
 
 # ---------- inject_msr_resolution ----------

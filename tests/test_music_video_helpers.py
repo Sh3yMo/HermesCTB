@@ -537,8 +537,10 @@ def test_role_clothing_contracts_do_not_copy_female_outfit_to_missing_male():
     contracts = build_role_clothing_contracts(text, "reggae")
     assert "hotpants" not in contracts["male"].lower()
     assert "marijuana leaf" not in contracts["male"].lower()
-    assert "closed brown buttoned vest" in contracts["male"]
-    assert "no bare torso" in contracts["male"]
+    # Male names only a hat (rasta tam) → no body garment matched → the neutral
+    # male default body garments are appended (RC1: default is no longer reggae).
+    assert "dark indigo straight-leg jeans" in contracts["male"]
+    assert "black leather boots" in contracts["male"]
     assert "hotpants" in contracts["female"].lower()
 
 
@@ -928,8 +930,29 @@ def test_ensure_relay_specs_includes_age_and_avoids_generic_story_placeholder():
     ]).lower()
     assert "rain-streaked window" in combined
     assert "silver cropped jacket" in combined
-    assert "adult female performer around 30 years old" in combined
+    # RC3: age contract is rendered bare ("around 30 years old") — the leading
+    # "adult female performer" tokens are stripped so the template that prepends
+    # "performer apparent age" does not double the word.
+    assert "around 30 years old" in combined
+    assert "female performer apparent age adult female performer" not in combined
     assert "the performer holds the pose" not in combined
+
+
+def test_apply_scene_contracts_replaces_studio_with_real_location():
+    # R3-4: an LLM-authored studio/seamless backdrop must be replaced by a
+    # derived real location (it bleeds a grey void into the MSR output).
+    seg = Segment(
+        index=0, start_time=0, end_time=8, label="Pre-Chorus - female",
+        prompt="Medium close-up of female singer at night with neon and rain.",
+        frame_variant_prompt="Female singer, neon-lit rainy night, moonlight.",
+        background_prompt="High-key seamless studio background, blue mist, silvery highlights",
+        scene_contract="High-key seamless studio background, blue mist, silvery highlights",
+    )
+    apply_scene_contracts_to_segments([seg])
+    sc = seg.scene_contract.lower()
+    assert "studio" not in sc
+    assert "seamless" not in sc
+    assert seg.background_source == "fallback"
 
 
 def test_apply_scene_contracts_falls_back_when_background_mentions_people():
@@ -1272,3 +1295,103 @@ def test_duet_prompt_embeds_theme_when_given_and_omits_when_empty():
     assert "Theme context: rainy neon street." in with_theme
     no_theme = mvp.build_duet_portrait_prompt("")
     assert "Theme context:" not in no_theme
+
+
+# ── RC1/RC2/RC3 prompt-hygiene regression guards ─────────────────────
+
+
+def test_male_clothing_default_is_neutral_no_reggae_no_colon():
+    # RC1: the male default must not be the reggae test fixture, and must not
+    # carry a label+colon (colons are illegal in LTX prompts).
+    d = mvp._MALE_CLOTHING_DEFAULT.lower()
+    assert "reggae" not in d
+    assert "rasta" not in d
+    assert ":" not in mvp._MALE_CLOTHING_DEFAULT
+
+
+def test_role_age_global_text_does_not_double_performer():
+    # RC3: even when handed the old verbose contract, the template must not
+    # produce "performer ... performer".
+    txt = mvp.role_age_global_text(
+        "male", {"male": "adult male performer around 30 years old"},
+    )
+    assert txt == "Male performer apparent age around 30 years old."
+    assert txt.lower().count("performer") == 1
+
+
+def _msr_seg():
+    return Segment(
+        index=0, start_time=0, end_time=8, label="Verse 1 - male",
+        prompt="Male singer in a neon alley.",
+        frame_variant_prompt="Close-up of the male singer in a neon alley.",
+        background_prompt="rain-slicked neon alley",
+        scene_contract="rain-slicked neon alley",
+        video_prompt_relay={
+            "global": "Cold synthwave noir, handheld camera, rain on the street.",
+            "beats": ["The singer stands still as rain falls.",
+                      "He looks down as a breath forms."],
+        },
+    )
+
+
+def test_msr_gate_keeps_clothing_and_age_out_of_relay():
+    # RC2: with MSR active the sheet/subject-desc own wardrobe + age, so the
+    # relay global/beats must stay free of clothing/age tokens.
+    seg = _msr_seg()
+    clothing = {"male": "charcoal trench coat, black boots", "female": ""}
+    ages = {"male": "around 30 years old", "female": ""}
+    apply_role_clothing_contracts_to_segments([seg], clothing, msr_active=True)
+    mvp.apply_role_age_contracts_to_segments([seg], ages, msr_active=True)
+    relay = seg.video_prompt_relay
+    blob = " ".join([relay["global"], *relay["beats"]]).lower()
+    assert "trench coat" not in blob
+    assert "wearing" not in blob
+    assert "apparent age" not in blob
+    assert "around 30 years old" not in blob
+    # The attribute is still set for the MSR subject-description builder.
+    assert seg.role_clothing_contract == "charcoal trench coat, black boots"
+
+
+def test_ensure_relay_strips_clothing_lock_block_from_beats():
+    # R2-3: sanitize_role_prompt_text prepends a "Clothing lock. ... outfit. ...
+    # cutout look." block to frame_variant_prompt (feeds MCA gen). ensure_relay
+    # builds beats from that text and must strip the whole block, not leak the
+    # wardrobe into PromptRelay beats.
+    fv = (
+        "Clothing lock. The referenced male singer wears only this exact outfit. "
+        "oversized onyx trench coat, ebony slim trousers, charcoal leather boots. "
+        "Shirt and vest stay visible; no bare chest, no topless or shirtless look. "
+        "Masculine adult male body, flat chest, no breasts. Never swap clothing "
+        "with any female performer. Natural contact shadows under the performer, "
+        "physically inside the background, not pasted on top, no green screen or "
+        "cutout look. Medium shot of the singer on a rain-slicked neon street."
+    )
+    seg = Segment(
+        index=0, start_time=0, end_time=8, label="Verse 1 - male",
+        prompt=fv, frame_variant_prompt=fv,
+        background_prompt="rain-slicked neon street",
+        scene_contract="rain-slicked neon street",
+        role_clothing_contract="oversized onyx trench coat, ebony slim trousers, charcoal leather boots",
+    )
+    ensure_relay_specs_for_segments([seg], msr_active=True)
+    blob = " ".join(seg.video_prompt_relay["beats"]).lower()
+    assert "clothing lock" not in blob
+    assert "onyx trench coat" not in blob
+    assert "no breasts" not in blob
+    # The actual scene/action survives.
+    assert "rain-slicked neon street" in blob
+
+
+def test_non_msr_still_injects_clothing_and_age_into_relay():
+    # Regression guard: the non-MSR (IA2V) path keeps the wardrobe/age lock in
+    # the relay, since there is no sheet to carry identity.
+    seg = _msr_seg()
+    clothing = {"male": "charcoal trench coat, black boots", "female": ""}
+    ages = {"male": "around 30 years old", "female": ""}
+    apply_role_clothing_contracts_to_segments([seg], clothing, msr_active=False)
+    mvp.apply_role_age_contracts_to_segments([seg], ages, msr_active=False)
+    blob = " ".join([
+        seg.video_prompt_relay["global"], *seg.video_prompt_relay["beats"],
+    ]).lower()
+    assert "charcoal trench coat" in blob
+    assert "around 30 years old" in blob

@@ -194,10 +194,9 @@ def test_compose_character_sheet_grid(tmp_path):
     out = compose_character_sheet(views, str(tmp_path / "sheet.png"),
                                   cell_w=256, cell_h=384, target_aspect=None)
     img = Image.open(out)
-    # Stage Q: seamless 2x2, no border, 2:3 portrait cells
-    # (target_aspect=None keeps the legacy un-padded layout; Stage MSR-2026-06
-    # adds 16:9 padding by default — covered by tests/test_mv_prompt_hygiene.py.)
-    assert img.size == (2 * 256, 2 * 384)
+    # Stage R: single horizontal row of cells, no padding. N cells -> N*cell_w
+    # wide, cell_h tall.
+    assert img.size == (len(views) * 256, 384)
     assert img.mode == "RGB"
 
 
@@ -291,13 +290,55 @@ def test_build_msr_reference_block():
         "neon-lit alley at night",
     )
     assert not block.startswith("References:")
-    assert "Use the first subject reference as" in block
-    assert "Use the second subject reference as" in block
-    assert "Use the background reference as the real location" in block
+    # R3-2: concise descriptive wording (no imperative "Use the ... as ...").
+    assert "The first reference shows" in block
+    assert "The second reference shows" in block
+    assert "background reference is the scene" in block
     assert "[1]" not in block
     assert "Background reference:" not in block
-    assert block.endswith("natural contact shadows and matching light.")
+    assert "not on a plain backdrop" in block
     assert build_msr_reference_block([], "x") == ""
+
+
+def test_scene_is_artificial_studio():
+    from msr_refs import scene_is_artificial_studio
+    for bad in (
+        "High-key seamless studio background, soft cool blue moonlight",
+        "plain grey background", "cyclorama wall", "green screen", "seamless backdrop",
+    ):
+        assert scene_is_artificial_studio(bad), bad
+    for ok in (
+        "Rain-soaked neon city alley at night", "Rooftop above city skyline at dawn",
+        "misty forest clearing",
+    ):
+        assert not scene_is_artificial_studio(ok), ok
+
+
+def test_derive_background_prompt_no_studio_mapping():
+    # R3-4: "studio" must NOT map back to a studio backdrop.
+    from msr_refs import derive_background_prompt
+    out = derive_background_prompt("a singer in a high-key studio with moonlight").lower()
+    assert "studio" not in out
+    assert "seamless" not in out
+
+
+def test_allocate_views_solo_three_subjects():
+    # R3-1: views mode → solo role gets its 3 separate view images as subjects.
+    refs = {"female": ["front.png", "side.png", "face.png"]}
+    descs = {"female": "the female singer"}
+    paths, ds = allocate_msr_subjects("female", refs, descs)
+    assert paths == ["front.png", "side.png", "face.png"]
+    assert len(ds) == 3
+
+
+def test_allocate_duet_overflow_front_only():
+    # R3-1: duet with 3-view refs each overflows 4 slots → each reduced to front.
+    refs = {"male": ["m_front.png", "m_side.png", "m_face.png"],
+            "female": ["f_front.png", "f_side.png", "f_face.png"]}
+    descs = {"male": "the male singer", "female": "the female singer"}
+    paths, ds = allocate_msr_subjects("duet", refs, descs)
+    assert paths == ["m_front.png", "f_front.png"]
+    assert len(ds) == 2
 
 
 def test_derive_background_prompt():
@@ -335,25 +376,29 @@ def test_background_prompt_people_guard():
     assert not background_prompt_mentions_people("")
 
 
-def test_compose_character_sheet_four_views(tmp_path):
-    # Stage Q: portrait + back + side + face-front = 4 cells -> seamless 2x2
+def test_compose_character_sheet_three_views(tmp_path):
+    # Stage R: portrait(front) + side + face = 3 cells -> single horizontal row,
+    # each cell 16:27, joined to exactly 16:9 with no padding.
     from PIL import Image
 
     paths = []
-    for i in range(4):
+    for i in range(3):
         p = tmp_path / f"v{i}.png"
         Image.new("RGB", (200, 300), (i * 40, 10, 10)).save(p)
         paths.append(str(p))
     out = compose_character_sheet(paths, str(tmp_path / "sheet.png"),
-                                  cell_w=128, cell_h=192, target_aspect=None)
+                                  cell_w=512, cell_h=864, target_aspect=None)
     with Image.open(out) as sheet:
-        assert sheet.size == (2 * 128, 2 * 192)
+        # 3 * 512 x 864 = 1536 x 864 = 16:9, both divisible by 32
+        assert sheet.size == (1536, 864)
+        assert sheet.size[0] % 32 == 0 and sheet.size[1] % 32 == 0
+        assert round(sheet.size[0] / sheet.size[1], 3) == round(16 / 9, 3)
 
 
 def test_msr_view_prompts_closed_mouth():
     # Stage M: every reference still must demand a closed mouth
-    # Stage Q: 3 MCA views (back, side, face-front); portrait is the 4th cell
-    assert len(MSR_VIEW_PROMPTS) == 3
+    # Stage R: 2 MCA views (side, face-front); portrait is the front cell
+    assert len(MSR_VIEW_PROMPTS) == 2
     for p in MSR_VIEW_PROMPTS:
         assert "mouth closed" in p
 

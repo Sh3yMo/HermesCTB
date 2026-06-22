@@ -30,25 +30,26 @@ _VIEW_COMMON = (
     "background, even soft studio lighting"
 )
 
-# Stage O3 / Stage Q: the full-body FRONT view comes straight from the T2I
-# portrait (the portrait IS a full-body frontal now), so MCA only renders the
-# three missing views. Portrait + back + side + face-front = 4 cells -> a
-# seamless 2x2 sheet. (The face-side close-up was dropped so all four cells are
-# equal-size portrait tiles that join into one rectangle.)
+# Stage R (2026-06-18): 3-cell sheet at the OUTPUT aspect. The full-body FRONT
+# view comes straight from the T2I portrait; MCA renders only SIDE + FACE views.
+# Portrait(front) + side + face = 3 cells, each 16:27 -> joined horizontally
+# they form exactly 16:9 with NO grey padding (the padding was the dominant
+# grey field that bled into the video background). Back view dropped: singers
+# are seen from the front in-frame, so the back cell wasted a tile + grey.
 MSR_VIEW_PROMPTS: List[str] = [
-    f"full body shot, standing, seen from behind, back view showing the back of the head and outfit, {_VIEW_COMMON}",
     f"full body shot, standing, strict side profile view facing left, {_VIEW_COMMON}",
     f"close-up portrait of the face, head and shoulders, facing the camera, {_VIEW_COMMON}",
 ]
 
 # Labels align with the sheet/refs ordering: [portrait] + MCA views.
 MSR_VIEW_LABELS: List[str] = [
-    "full body front", "back", "side", "face front",
+    "full body front", "side", "face front",
 ]
 
 
 def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") -> List[str]:
-    """The 3 MCA reference-view prompts, pinned to a concrete appearance + medium.
+    """The 2 MCA reference-view prompts (side + face), pinned to a concrete
+    appearance + medium.
 
     The static MSR_VIEW_PROMPTS only say "identical hairstyle, identical outfit"
     — too vague, so the model invents per-angle details that disagree (phantom
@@ -70,7 +71,6 @@ def build_view_prompts(style_descriptor: str = "", appearance_desc: str = "") ->
         )
     common = _VIEW_COMMON + ((", " + ", ".join(extras)) if extras else "")
     return [
-        f"full body shot, standing, seen from behind, back view showing the back of the head and outfit, {common}",
         f"full body shot, standing, strict side profile view facing left, {common}",
         f"close-up portrait of the face, head and shoulders, facing the camera, {common}",
     ]
@@ -90,54 +90,54 @@ def _round_up_to_multiple(n: int, base: int = 32) -> int:
 def compose_character_sheet(
     view_paths: List[str],
     out_path: str,
-    cell_w: int = 512,
-    cell_h: int = 768,
-    target_aspect: Optional[tuple] = (16, 9),
+    cell_w: int = 1024,
+    cell_h: int = 1728,
+    target_aspect: Optional[tuple] = None,
     bg_color: tuple = NEUTRAL_BG_RGB,
     **_legacy,
 ) -> str:
-    """Compose up to 4 portrait view stills into one seamless sheet padded to
-    the output video's aspect ratio.
+    """Compose the character views into one horizontal sheet at the OUTPUT
+    aspect ratio — NO grey padding.
 
-    Stage MSR-2026-06: LiconMSR builds a pseudo-reference-video at the OUTPUT
-    video aspect ratio (16:9 for 1024x576). The character sheet is 2:3
-    portrait by design (face fidelity in full-body cells). If the sheet is
-    handed to LiconMSR as-is the node stretches it to 16:9 and the face is
-    distorted vertically, breaking identity. We avoid that by padding the
-    portrait grid horizontally with neutral mid-grey (#808080) so the sheet
-    already matches the output aspect; LiconMSR then only down-scales without
-    stretching. The same neutral grey is used by `generate_character_portrait_prompt`
-    as the requested background, so padding edges are seamless with the cell
-    interiors.
+    Stage R (2026-06-18): LiconMSR builds a pseudo-reference-video at the OUTPUT
+    video aspect ratio (16:9 for 1024x576). The previous design tiled a 2x3-ish
+    portrait grid then PADDED it to 16:9 with grey — but that grey field became
+    the dominant reference signal and bled a flat grey studio into every output
+    frame (RC5). Instead we now lay the views out in a single horizontal row of
+    16:27 cells: 3 cells (front + side + face) -> 1536x864 = 16:9 exactly, with
+    zero padding. The sheet already matches the output aspect, so LiconMSR only
+    down-scales (no stretch, no grey bars).
 
-    Output dimensions are rounded up to a multiple of 32 (LTX-2.3 requirement).
-    Pass ``target_aspect=None`` to disable padding (legacy behaviour, used by
-    tests).
+    `cell_w`/`cell_h` default to 1024x1728 (= 16:27; 1024/64=16, 1728/64=27).
+    With 3 cells the result is 3072x1728 (16:9, both /32). High enough to avoid a
+    lossy intermediate downscale of the ~1216x2048 portrait. (LiconMSR still
+    rescales the whole sheet to the reference-video resolution internally, so
+    going higher than this yields no further model-facing detail.) Each view is
+    centre-fit into its cell.
 
-    Fewer than 4 views still tile into a 2-column grid (trailing cells grey).
-    `cell_w`/`cell_h` set the per-cell pixel size (default 512x768 = 2:3).
+    ``target_aspect`` is kept for back-compat: when a tuple is passed the old
+    grey-padding behaviour is applied after tiling (used by legacy tests). The
+    production path passes ``None`` (no padding).
+
     Legacy `cell_size`/`border` kwargs are accepted and ignored (back-compat).
     Returns out_path.
     """
     if not view_paths:
         raise ValueError("compose_character_sheet needs at least one view image")
     paths = view_paths[:4]
-    cols = 1 if len(paths) == 1 else 2
-    rows = (len(paths) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), bg_color)
+    # Single horizontal row — each cell is 16:27, so N cells tile to N*16:27.
+    # For N=3 that is exactly 16:9 with no padding.
+    sheet = Image.new("RGB", (len(paths) * cell_w, cell_h), bg_color)
     for idx, p in enumerate(paths):
         img = Image.open(p).convert("RGB")
         img = ImageOps.fit(img, (cell_w, cell_h), Image.LANCZOS, centering=(0.5, 0.5))
-        col = idx % cols
-        row = idx // cols
-        sheet.paste(img, (col * cell_w, row * cell_h))
+        sheet.paste(img, (idx * cell_w, 0))
     if target_aspect:
         tw_a, th_a = target_aspect
         sheet_w, sheet_h = sheet.size
         sheet_ratio = sheet_w / sheet_h
         target_ratio = tw_a / th_a
         if sheet_ratio < target_ratio:
-            # Sheet is too tall for target ratio — pad width.
             new_h = sheet_h
             new_w = int(round(sheet_h * target_ratio))
         else:
@@ -181,7 +181,9 @@ _BG_HINTS: List[Tuple[str, str]] = [
     (r"warehouse|industrial", "empty industrial warehouse interior"),
     (r"stage|concert|club", "empty concert stage with haze and rig lights"),
     (r"forest|woods", "misty forest clearing"),
-    (r"studio", "empty studio space with seamless backdrop"),
+    # R3-4: NO "studio" mapping — a studio/seamless backdrop is never a valid
+    # scene (it bleeds a grey void into the video). If the only hint is "studio"
+    # the deriver falls through to the real-location default below.
     (r"city|urban|street|alley|downtown", "empty urban street"),
 ]
 
@@ -202,6 +204,22 @@ _BG_PERSON_RE = re.compile(
     r"hair|hairstyle|she|he|her|his)\b",
     re.IGNORECASE,
 )
+
+
+_STUDIO_SCENE_RE = re.compile(
+    r"\b(?:studio|seamless\s+backdrop|seamless\s+background|cyclorama|cyc\s+wall|"
+    r"high[-\s]?key\s+(?:studio|background|backdrop)|plain\s+(?:grey|gray|white)\s+"
+    r"(?:background|backdrop)|infinity\s+cove|green\s+screen)\b",
+    re.IGNORECASE,
+)
+
+
+def scene_is_artificial_studio(scene: str) -> bool:
+    """R3-4: True when a scene_contract is a photo-studio/seamless backdrop
+    rather than a real diegetic location. Such 'scenes' bleed a flat grey/white
+    void into the MSR output, so the caller must replace them with a real
+    location (derive_background_prompt)."""
+    return bool(_STUDIO_SCENE_RE.search(scene or ""))
 
 
 def background_prompt_mentions_people(bg_prompt: str) -> bool:
@@ -303,17 +321,17 @@ def build_msr_reference_block(subject_descs: List[str], background_desc: str) ->
     if not subject_descs:
         return ""
     ordinals = ["first", "second", "third", "fourth"]
-    lines = [
-        "Use the subject references only for identity, body, face, hair and locked clothing; "
-        "do not use their plain studio backgrounds as the scene."
-    ]
+    # R3-2: concise + descriptive (not imperative/over-described — the MSR card
+    # warns both over- and under-description degrade consistency).
+    lines = []
     for i, d in enumerate(subject_descs, start=1):
         label = ordinals[i - 1] if i <= len(ordinals) else f"subject {i}"
-        lines.append(f"Use the {label} subject reference as {d.rstrip('.')}.")
+        lines.append(f"The {label} reference shows {d.rstrip('.')}.")
     if background_desc:
+        # One short clause keeps the scene = background-ref (not the subjects'
+        # plain grey backdrop) to counter grey bleed, without a verbose lock.
         lines.append(
-            f"Use the background reference as the real location: {background_desc.rstrip('.')}. "
-            "The performer should look physically present there, with natural contact "
-            "shadows and matching light."
+            f"The background reference is the scene, {background_desc.rstrip('.')}; "
+            "the performers are present there, not on a plain backdrop."
         )
     return " ".join(lines)

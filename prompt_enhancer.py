@@ -14,6 +14,42 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+# Per-model prompt-format rules — single source of truth. Reused by the
+# music-video batched prompt formatter (MusicVideoPrompter.polish_segment_prompts)
+# so Flux2 stills and LTX video prompts are written the way each model wants.
+FLUX_FORMAT_RULES = (
+    "CRITICAL FORMAT RULES FOR FLUX MODEL: "
+    "1) Output a SINGLE FLOWING PARAGRAPH in natural English. "
+    "No bullet points, no labels, no section headers. "
+    "2) TARGET 30-80 WORDS — this is the sweet spot for Flux. Never exceed 100 words. "
+    "3) FRONT-LOAD the most important elements: main subject and action come first. "
+    "4) Camera and lens language IS understood as rendering instructions by Flux — "
+    "use focal lengths (24mm, 50mm, 85mm), aperture (f/1.4, f/2.8), "
+    "camera references (shot on ARRI Alexa, Hasselblad medium format), "
+    "film stocks (Kodak Portra 400, Fujifilm Pro 400H). These control the visual output. "
+    "5) DO NOT use quality boosters like 'masterpiece', 'best quality', '4k', 'highly detailed'. "
+    "Flux ignores or is harmed by these. "
+    "6) DO NOT include negative language ('no artifacts', 'without distortion', 'no green screen', "
+    "'not pasted', 'no cutout'). Flux does not support negative prompts. Instead use POSITIVE "
+    "alternatives (e.g., 'sharp focus' instead of 'not blurry'). "
+    "7) Use specific visual descriptions: materials, textures, color grading terms. "
+    "8) NO colons, NO underscores in style words. "
+    "9) This is a STILL photo, not a video frame — never use words like 'video frame', "
+    "'no movement', 'color grade for the video', or motion/timeline language."
+)
+
+LTX_FORMAT_RULES = (
+    "CRITICAL FORMAT RULES FOR LTX-2.3 VIDEO MODEL: "
+    "1) Output a SINGLE FLOWING NATURAL-LANGUAGE PARAGRAPH. No colons, no labels, "
+    "no headers, no bullet points, no line breaks, no meta-instructions "
+    "('use the', 'must', 'should', 'never'). "
+    "2) Write like a cinematographer describing one continuous shot, events in "
+    "chronological order, starting directly with the action. "
+    "3) Weave camera, lens, lighting, style and mood into the prose. "
+    "4) Keep under ~200 words."
+)
+
+
 DIRECTOR_PRESETS = {
     "none": {"label": "No Director", "hint": "neutral cinematic look, no franchise style cues, balanced color grading"},
     "kurosawa": {"label": "Akira Kurosawa", "hint": "epic widescreen compositions, weather-as-emotion tendency (atmospheric elements reinforce mood), samurai-era texture, bold graphic framing, Rashomon / Seven Samurai grandeur"},
