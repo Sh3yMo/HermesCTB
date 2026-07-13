@@ -17,6 +17,19 @@
       "title": "RandomNoise (Seed)"
     }
   },
+  "121": {
+    "inputs": {
+      "text": "The old, battle-weary warrior, with his long beard and battered helmet and bloodstained armour, stands before the viewer and speaks in a broken, pensive voice: \"Well, we have won the battle --- but at what cost\"",
+      "clip": [
+        "146",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt) positive"
+    }
+  },
   "146": {
     "inputs": {
       "clip_name1": "gemma_3_12B_it_fp4_mixed.safetensors",
@@ -35,7 +48,7 @@
     },
     "class_type": "LoadImage",
     "_meta": {
-      "title": "First Frame [[P:02 Image to Video]] "
+      "title": "First Frame [[P:FF]]"
     }
   },
   "174": {
@@ -128,8 +141,8 @@
       },
       "lora_3": {
         "on": true,
-        "lora": "LTX2.3_reasoning_I2V_V3.safetensors",
-        "strength": 0.8
+        "lora": "LTX2_BestBreasts_lora_V2_step_06000.safetensors",
+        "strength": 0.5
       },
       "➕ Add Lora": "",
       "model": [
@@ -192,13 +205,22 @@
       "chunks": 4,
       "dim_threshold": 4096,
       "model": [
-        "1700",
+        "2105",
         0
       ]
     },
     "class_type": "LTXVChunkFeedForward",
     "_meta": {
       "title": "LTXV Chunk FeedForward"
+    }
+  },
+  "786": {
+    "inputs": {
+      "image": "pasted/image (14).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Last Frame [[P:LF]]"
     }
   },
   "852": {
@@ -264,28 +286,22 @@
       "title": "Anything Everywhere"
     }
   },
-  "1700": {
+  "1680": {
     "inputs": {
-      "global_prompt": "",
-      "smart_prompt": "",
-      "normalize_by_tokens": false,
-      "epsilon": 0.001,
-      "model": [
-        "211",
-        0
-      ],
-      "clip": [
-        "146",
-        0
-      ],
-      "latent": [
-        "759:1060",
-        0
-      ]
+      "value": 0
     },
-    "class_type": "PromptRelaySmartEncode",
+    "class_type": "JWInteger",
     "_meta": {
-      "title": "Prompt Relay Encode (Smart) positive"
+      "title": "Cut OFF Start Frames [[P:Last Frame input]]"
+    }
+  },
+  "1682": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "JWInteger",
+    "_meta": {
+      "title": "Cut OFF End Frames [[P:Last Frame input]]"
     }
   },
   "759:1063": {
@@ -302,19 +318,11 @@
   },
   "759:1065": {
     "inputs": {
-      "steps": 12,
-      "max_shift": 2.05,
-      "base_shift": 0.95,
-      "stretch": true,
-      "terminal": 0.1,
-      "latent": [
-        "759:1055",
-        0
-      ]
+      "sigmas": "1., 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
     },
-    "class_type": "LTXVScheduler",
+    "class_type": "ManualSigmas",
     "_meta": {
-      "title": "LTXVScheduler (Pass 1, 14 steps, R3G4L)"
+      "title": "ManualSigmas"
     }
   },
   "759:1064": {
@@ -336,8 +344,8 @@
   "759:1055": {
     "inputs": {
       "video_latent": [
-        "759:1360",
-        0
+        "2100",
+        2
       ],
       "audio_latent": [
         "759:1382",
@@ -373,11 +381,11 @@
   "759:1074": {
     "inputs": {
       "positive": [
-        "759:1067",
+        "2100",
         0
       ],
       "negative": [
-        "759:1067",
+        "2100",
         1
       ],
       "latent": [
@@ -686,11 +694,11 @@
         0
       ],
       "positive": [
-        "759:1067",
+        "2100",
         0
       ],
       "negative": [
-        "759:1067",
+        "2100",
         1
       ]
     },
@@ -836,8 +844,8 @@
   "759:1542": {
     "inputs": {
       "any": [
-        "1700",
-        1
+        "121",
+        0
       ]
     },
     "class_type": "LayerUtility: AnyRerouter",
@@ -847,6 +855,10 @@
   },
   "759:1541": {
     "inputs": {
+      "any_01": [
+        "759:1533",
+        0
+      ],
       "any_03": [
         "759:1542",
         0
@@ -859,6 +871,10 @@
   },
   "759:1549": {
     "inputs": {
+      "any_01": [
+        "759:1533",
+        1
+      ],
       "any_03": [
         "759:1550",
         0
@@ -1056,6 +1072,22 @@
       "title": "LTXVPreprocess [[P:02 Image to Video]]"
     }
   },
+  "759:1567": {
+    "inputs": {
+      "img_compression": [
+        "948",
+        0
+      ],
+      "image": [
+        "759:1566",
+        0
+      ]
+    },
+    "class_type": "LTXVPreprocess",
+    "_meta": {
+      "title": "LTXVPreprocess [[P:Last Frame input]]"
+    }
+  },
   "759:1299": {
     "inputs": {
       "expression": "a * 0.5"
@@ -1159,6 +1191,29 @@
       "title": "🔀 hight [[P:02 Image to Video]]"
     }
   },
+  "759:1610": {
+    "inputs": {
+      "resize_type": "scale dimensions",
+      "resize_type.width": [
+        "759:1587",
+        0
+      ],
+      "resize_type.height": [
+        "759:1588",
+        0
+      ],
+      "resize_type.crop": "center",
+      "scale_method": "lanczos",
+      "input": [
+        "786",
+        0
+      ]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize [[P:Last Frame input]]"
+    }
+  },
   "759:1330": {
     "inputs": {
       "any_02": [
@@ -1180,6 +1235,43 @@
       "title": "* 0.5"
     }
   },
+  "759:1533": {
+    "inputs": {
+      "num_guides": "2",
+      "num_guides.frame_idx_1": 0,
+      "num_guides.strength_1": 1,
+      "num_guides.frame_idx_2": -1,
+      "num_guides.strength_2": 1,
+      "positive": [
+        "121",
+        0
+      ],
+      "negative": [
+        "593",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ],
+      "latent": [
+        "759:1060",
+        0
+      ],
+      "num_guides.image_1": [
+        "759:1401",
+        0
+      ],
+      "num_guides.image_2": [
+        "759:1567",
+        0
+      ]
+    },
+    "class_type": "LTXVAddGuideMulti",
+    "_meta": {
+      "title": "LTXVAddGuideMulti [[P:Last Frame input]]"
+    }
+  },
   "759:1495": {
     "inputs": {
       "audio": [
@@ -1198,6 +1290,10 @@
   },
   "759:1360": {
     "inputs": {
+      "any_01": [
+        "759:1533",
+        2
+      ],
       "any_03": [
         "759:1361",
         0
@@ -1206,6 +1302,19 @@
     "class_type": "Any Switch (rgthree)",
     "_meta": {
       "title": "Any Switch (rgthree)"
+    }
+  },
+  "759:1566": {
+    "inputs": {
+      "longer_edge": 1536,
+      "images": [
+        "759:1610",
+        0
+      ]
+    },
+    "class_type": "ResizeImagesByLongerEdge",
+    "_meta": {
+      "title": "Resize [[P:Last Frame input]]"
     }
   },
   "759:1583": {
@@ -1270,16 +1379,11 @@
   },
   "759:1069": {
     "inputs": {
-      "start": 0.75,
-      "end": 0,
-      "sigmas": [
-        "759:1069_base",
-        0
-      ]
+      "sigmas": "0.8025, 0.6332, 0.3425, 0.0"
     },
-    "class_type": "Sigmas Rescale",
+    "class_type": "ManualSigmas",
     "_meta": {
-      "title": "Sigmas Rescale (Pass 2, start=0.75, R3G4L)"
+      "title": "ManualSigmas"
     }
   },
   "759:1073": {
@@ -1321,6 +1425,10 @@
   },
   "759:1625": {
     "inputs": {
+      "any_01": [
+        "759:1620",
+        0
+      ],
       "any_02": [
         "759:1071",
         0
@@ -1343,19 +1451,236 @@
       "title": "Final Frame Selector"
     }
   },
-  "759:1069_base": {
+  "759:1621": {
     "inputs": {
-      "scheduler": "linear_quadratic",
-      "steps": 4,
-      "denoise": 0.45,
-      "model": [
-        "759:1075",
+      "expression": "a-b",
+      "a": [
+        "759:1073",
+        0
+      ],
+      "b": [
+        "1682",
         0
       ]
     },
-    "class_type": "BasicScheduler",
+    "class_type": "MathExpression|pysssss",
     "_meta": {
-      "title": "BasicScheduler (Pass 2 base, 3 steps, linear_quadratic, denoise 0.45)"
+      "title": "a-1*b [[P:Last Frame input]]"
+    }
+  },
+  "759:1620": {
+    "inputs": {
+      "start_index": [
+        "1680",
+        0
+      ],
+      "num_frames": [
+        "759:1621",
+        0
+      ],
+      "images": [
+        "759:1071",
+        0
+      ]
+    },
+    "class_type": "GetImageRangeFromBatch",
+    "_meta": {
+      "title": "Get Image [[P:Last Frame input]]"
+    }
+  },
+  "2102": {
+    "inputs": {
+      "model": [
+        "211",
+        0
+      ],
+      "lora_name": "LTX-2.3-Licon-MSR-V1.safetensors",
+      "strength_model": 1
+    },
+    "class_type": "LTXICLoRALoaderModelOnly",
+    "_meta": {
+      "title": "MSR IC-LoRA Loader [[P:MSR-FLF]]"
+    }
+  },
+  "2103": {
+    "inputs": {
+      "positive": [
+        "121",
+        0
+      ],
+      "negative": [
+        "593",
+        0
+      ],
+      "frame_rate": [
+        "759:1113",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "MSR FLF Conditioning [[P:MSR-FLF]]"
+    }
+  },
+  "2101": {
+    "inputs": {
+      "conditioning": [
+        "2103",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "MSR FLF Negative (zeroed) [[P:MSR-FLF]]"
+    }
+  },
+  "2110": {
+    "inputs": {
+      "image": "pasted/image (14).png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 1 [[P:MSR]]"
+    }
+  },
+  "2111": {
+    "inputs": {
+      "image": "pasted/image (14).png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 2 [[P:MSR]]"
+    }
+  },
+  "2112": {
+    "inputs": {
+      "image": "pasted/image (14).png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 3 [[P:MSR]]"
+    }
+  },
+  "2113": {
+    "inputs": {
+      "image": "pasted/image (14).png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Subject 4 [[P:MSR]]"
+    }
+  },
+  "2114": {
+    "inputs": {
+      "image": "pasted/image (14).png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "MSR Background [[P:MSR]]"
+    }
+  },
+  "2100": {
+    "inputs": {
+      "positive": [
+        "2103",
+        0
+      ],
+      "negative": [
+        "2101",
+        0
+      ],
+      "vae": [
+        "174",
+        0
+      ],
+      "latent": [
+        "759:1060",
+        0
+      ],
+      "enable_msr_latent_injection": false,
+      "enable_msr_attention": true,
+      "msr_width": 1024,
+      "msr_height": 576,
+      "msr_frame_count": "41",
+      "msr_image_1": [
+        "2110",
+        0
+      ],
+      "msr_strength_1": 1.0,
+      "msr_image_2": [
+        "2111",
+        0
+      ],
+      "msr_strength_2": 1.0,
+      "msr_image_3": [
+        "2112",
+        0
+      ],
+      "msr_strength_3": 1.0,
+      "msr_image_4": [
+        "2113",
+        0
+      ],
+      "msr_strength_4": 1.0,
+      "msr_background": [
+        "2114",
+        0
+      ],
+      "msr_background_strength": 1.0,
+      "msr_attention_strength": 0.6,
+      "first_frame": [
+        "149",
+        0
+      ],
+      "lock_first_frame": true,
+      "lock_first_frame_len": 1,
+      "first_frame_strength": 0.85,
+      "first_frame_attention_strength": 1.0,
+      "last_frame": [
+        "786",
+        0
+      ],
+      "lock_last_frame": false,
+      "last_frame_strength": 1.0,
+      "last_frame_attention_strength": 1.0,
+      "latent_downscale_factor": 1.0,
+      "crop": "center",
+      "use_tiled_encode": false,
+      "tile_size": 256,
+      "tile_overlap": 64
+    },
+    "class_type": "LTXMSRICLoRAFLF_Experimental",
+    "_meta": {
+      "title": "MSR FF/LF [[P:MSR-FLF]]"
+    }
+  },
+  "2105": {
+    "inputs": {
+      "global_prompt": "",
+      "smart_prompt": "",
+      "normalize_by_tokens": false,
+      "epsilon": 0.001,
+      "model": [
+        "2102",
+        0
+      ],
+      "clip": [
+        "146",
+        0
+      ],
+      "latent": [
+        "759:1060",
+        0
+      ]
+    },
+    "class_type": "PromptRelaySmartEncode",
+    "_meta": {
+      "title": "Prompt Relay Encode (Smart) positive"
     }
   }
 }

@@ -28,11 +28,13 @@ def test_pick_relay_beat_count_below_minimum():
 
 
 def test_pick_relay_beat_count_at_minimum():
-    assert pick_relay_beat_count(5.0) == 1
+    # Floor at RELAY_FLF_MIN_BEATS (3): beat[0] static FF + 2 motion beats so FF/LF
+    # bracket real motion. A single motion beat collapses FF≈LF.
+    assert pick_relay_beat_count(5.0) == 3
 
 
 def test_pick_relay_beat_count_adaptive():
-    assert pick_relay_beat_count(10.0) == 2
+    assert pick_relay_beat_count(10.0) == 3   # floor 3 until duration warrants more
     assert pick_relay_beat_count(15.0) == 3
     assert pick_relay_beat_count(20.0) == 4
 

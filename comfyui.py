@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 import os
 import random
 import shlex
@@ -245,14 +246,13 @@ def inject_flf_clip_length(workflow: dict, seconds: float) -> dict:
     clip fills the segment slot instead of being freeze-padded. Scoped to the FLF
     workflow's specific node titles, so other workflows are untouched.
 
-    Also trims ONE start frame ("Cut OFF Start Frames" = 1): frame 0 is the
-    locked external first frame whose grade differs from the LTX decode and shows
-    as a colour flash whose size scales with the first-frame-vs-scene brightness
-    gap (lowering first_frame_strength only partly mitigates it on dark scenes).
-    Dropping that single frame removes the flash gap-independently. The slider's
-    +1 frame (secs*fps+1) absorbs the trim, so length stays at secs*fps = target.
+    Keeps both cut-offs at 0 — the first frame IS the injected start frame and must
+    remain frame 0 (trimming it would make the video start on a model-generated
+    frame, not the FF). Rounds the slider UP (ceil) so the clip is >= the
+    assembler's target frame count; the assembler then trims the small surplus
+    instead of freeze-padding (cloning) the last frame to fill a short clip.
     """
-    secs = max(1, int(round(seconds)))
+    secs = max(1, math.ceil(seconds))
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
@@ -261,10 +261,8 @@ def inject_flf_clip_length(workflow: dict, seconds: float) -> dict:
         if ct == "mxSlider" and "clip length" in title:
             node["inputs"]["Xi"] = secs
             node["inputs"]["Xf"] = secs
-        elif ct == "JWInteger" and "cut off end" in title:
+        elif ct == "JWInteger" and ("cut off end" in title or "cut off start" in title):
             node["inputs"]["value"] = 0
-        elif ct == "JWInteger" and "cut off start" in title:
-            node["inputs"]["value"] = 1
     return workflow
 
 

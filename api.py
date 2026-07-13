@@ -77,6 +77,7 @@ from music_video_pipeline import (
     apply_role_clothing_contracts_to_segments,
     apply_scene_contracts_to_segments,
     ensure_relay_specs_for_segments,
+    enforce_motion_only_beats,
     assemble_video,
     build_duet_portrait_prompt,
     build_role_age_contracts,
@@ -676,7 +677,7 @@ MSR_FALLBACK_WORKFLOW = "LTX2.3 - IA2V-PromptRelay"
 # explicit first frame + last frame injected per segment (generated via Flux2
 # Klein M-I Edit). Only these trigger FF/LF creation; every other workflow keeps
 # its current behavior.
-MSR_FLF_WORKFLOWS = {"LTX2.3 - FFLFA2V-MSR"}
+MSR_FLF_WORKFLOWS = {"LTX2.3 - FFLFA2V-MSR", "LTX2.3 - FFLFA2V-MSR-PromptRelay"}
 
 # FFLFA2V renders at ~this longer edge (workflow node 199 "I2V/FLF Resize Longer
 # Edge"); MSR reference images are encoded at the same scale + the FF aspect so
@@ -1137,19 +1138,32 @@ async def _resolve_duet_portrait(
         return None
 
 
-def _build_flux2_segment_frame_prompt(prompt: str, style_descriptor: str = "") -> str:
+def _build_flux2_segment_frame_prompt(
+    prompt: str, style_descriptor: str = "", action_mode: bool = False,
+) -> str:
     # Flux2 still prompt — positive prose only, no LTX video-grading language and
     # no negatives (Flux2 has no negative prompts). The scene prompt is already
     # Flux2-clean (seg.flux2_frame_prompt); we append a short style cue and a
     # positive identity/integration instruction for the M-I Edit composite.
+    # action_mode (RELAY_BEAT0_ACTION experiment): the prompt is a motion beat, so
+    # the still must show the figure MID-ACTION (not a static "standing" pose) — FF
+    # then already brackets motion like the LF does, so LTX has no idle start frame.
     parts = [(prompt or "").strip().rstrip(".")]
     if style_descriptor:
         parts.append(style_descriptor.strip().rstrip("."))
-    parts.append(
-        "the same face, hair, skin tone and exact garments as the reference person, "
-        "standing naturally inside the scene with realistic contact shadows and "
-        "matching light direction, fully part of the location"
-    )
+    if action_mode:
+        parts.append(
+            "the same face, hair, skin tone and exact garments as the reference person, "
+            "captured mid-action in the exact pose described, naturally part of the scene "
+            "with realistic contact shadows and matching light direction, fully part of "
+            "the location"
+        )
+    else:
+        parts.append(
+            "the same face, hair, skin tone and exact garments as the reference person, "
+            "standing naturally inside the scene with realistic contact shadows and "
+            "matching light direction, fully part of the location"
+        )
     return ". ".join(p for p in parts if p).strip() + "."
 
 
@@ -1158,6 +1172,7 @@ async def _run_flux2_segment_frame(
     singer_path: str,
     prompt: str,
     style_descriptor: str = "",
+    action_mode: bool = False,
 ) -> Optional[str]:
     """Stage P (2D): composite one per-segment START FRAME via Flux2 Klein M-I Edit.
 
@@ -1187,7 +1202,7 @@ async def _run_flux2_segment_frame(
         wf = _strip_flux2_miedit_unused(wf)
         wf = _flux2_use_gguf(wf)
 
-        full_prompt = _build_flux2_segment_frame_prompt(prompt, style_descriptor)
+        full_prompt = _build_flux2_segment_frame_prompt(prompt, style_descriptor, action_mode=action_mode)
 
         bg_bytes = open(background_path, "rb").read()
         singer_bytes = open(singer_path, "rb").read()
@@ -1243,15 +1258,23 @@ async def _run_flux2_segment_frame(
 
 
 def _build_flux2_last_frame_prompt(prompt: str, style_descriptor: str = "") -> str:
-    base = _build_flux2_segment_frame_prompt(prompt, style_descriptor)
-    # Positive still phrasing (no colon, no motion/timeline words) — same person,
-    # scene and outfit, only a small natural change in pose or expression.
-    return (
-        base
-        + " the same person in the same location and same outfit, in a slightly "
-        "different relaxed pose with a small natural change in head angle or "
-        "expression, identical framing and background"
+    # LF = the END state of the segment's action (caller passes the end/last beat),
+    # composited from the FF for identity. NO "near-clone of the FF" language — FF
+    # (start) and LF (end) must differ so LTX has motion to interpolate across the
+    # clip. Identity/wardrobe stay consistent via _build_flux2_segment_frame_prompt.
+    #
+    # Lock identity/outfit/location to the FF reference WITHOUT freezing the action:
+    # pose, facial expression and gesture MUST advance to the end of the beat (if
+    # the beat says "the singer cries", the LF must show her crying). This separates
+    # "what stays" (person, garments, place) from "what changes" (the motion).
+    lock = (
+        "Same person, face, hairstyle, outfit and location as the reference image, "
+        "kept identical, now rendered at the END state of the following action with "
+        "the body pose, facial expression, gesture and motion fully showing it "
+        "completed"
     )
+    body = _build_flux2_segment_frame_prompt(prompt, style_descriptor)
+    return f"{lock}. {body}"
 
 
 async def _run_flux2_last_frame(
@@ -1791,6 +1814,15 @@ async def _run_create_music_video(
         except Exception as e:
             print(f"[relay-polish] skipped (non-fatal): {e}")
 
+        # kijai PromptRelay spec enforcement: beats[1..N] keep ONLY what changes.
+        # Runs AFTER the relay-polish LLM pass so its (content-preserving) rewrite
+        # can't re-introduce outfit/scene into the motion beats. This is also the
+        # deterministic fix for FF/LF clothing drift — the LF still is prompted
+        # with beats[-1], so once that beat is outfit-free the Flux2 LF edit
+        # inherits the first frame's wardrobe instead of inventing a new one.
+        for _seg in segments:
+            enforce_motion_only_beats(_seg)
+
         # Model-format pass (batched, one LLM call over all segments): rewrites
         # video_prompt -> LTX-clean (seg.ltx_video_prompt) and frame_variant_prompt
         # -> Flux2-clean (seg.flux2_frame_prompt). Runs for every workflow so the
@@ -2289,12 +2321,29 @@ async def _run_create_music_video(
                 # cell-shaded new-character / wrong-background bug. Falls back to
                 # MCA per-segment when a given background is missing.
                 seg_bgs = {i: msr_bg_by_seg.get(i, "") for i in idxs} if msr_active else {}
+                _b0a = os.environ.get("RELAY_BEAT0_ACTION", "").strip().lower() in ("1", "true", "yes")
                 if any(seg_bgs.values()):
                     for k, i in enumerate(idxs):
                         bg = seg_bgs.get(i, "")
                         if bg:
+                            # RELAY_BEAT0_ACTION: FF from the first relay beat (action),
+                            # so the composite start frame already shows motion (mirrors
+                            # the LF=beats[-1] path). Identity/closed-mouth still come
+                            # from the portrait in slots 34/36.
+                            _segi = segments[i]
+                            _relb = (
+                                _segi.video_prompt_relay.get("beats")
+                                if isinstance(_segi.video_prompt_relay, dict) else None
+                            )
+                            if _b0a and _relb:
+                                _ffp = enforce_performer_role(str(_relb[0]), role)
+                                _ffa = True
+                            else:
+                                _ffp = prompts[k]
+                                _ffa = False
                             fr = await _run_flux2_segment_frame(
-                                bg, portrait, prompts[k], style_descriptor=video_style_desc,
+                                bg, portrait, _ffp, style_descriptor=video_style_desc,
+                                action_mode=_ffa,
                             )
                             frame_by_seg[i] = fr or portrait
                         else:
@@ -2332,6 +2381,37 @@ async def _run_create_music_video(
         # 4. Per-segment IA2V render (fresh frame each segment, no chaining,
         #    no inject_resolution — IA2V resolution is driven by the input image).
         out_dir = _outputs_dir()
+
+        # Debug-Sidecar: persist the finalized per-segment prompts/relay BEFORE the
+        # render loop, so an aborted run (no final video → no segments_*.json, tmp
+        # wiped in finally) still leaves the exact prompts for diagnosis. Best-effort.
+        try:
+            plan_records = []
+            for s in segments:
+                _relay = s.video_prompt_relay if isinstance(s.video_prompt_relay, dict) else None
+                _beats = _relay.get("beats") if _relay else None
+                _lf_still = (
+                    (_beats[-1] if _beats and len(_beats) >= 2 else None)
+                    or getattr(s, "flux2_frame_prompt", "")
+                    or getattr(s, "prompt", "")
+                )
+                plan_records.append({
+                    "index": getattr(s, "index", None),
+                    "label": getattr(s, "label", ""),
+                    "prompt": getattr(s, "prompt", "") or "",
+                    "flux2_frame_prompt": getattr(s, "flux2_frame_prompt", "") or "",
+                    "frame_variant_prompt": getattr(s, "frame_variant_prompt", "") or "",
+                    "video_prompt_relay": _relay,
+                    "lf_still": _lf_still,
+                    "role_clothing_contract": getattr(s, "role_clothing_contract", "") or "",
+                    "scene_contract": getattr(s, "scene_contract", "") or "",
+                })
+            plan_path = os.path.join(out_dir, f"segments_{jid[:8]}_plan.json")
+            with open(plan_path, "w", encoding="utf-8") as _pf:
+                json.dump(plan_records, _pf, ensure_ascii=False, indent=2)
+            print(f"[create-mv] segment plan sidecar written: {plan_path} ({len(plan_records)} segments)")
+        except Exception as _e:
+            print(f"[create-mv] segment plan sidecar write failed (non-fatal): {_e!r}")
         # Multi-role runs piled up T2I + Flux2 M-I Edit + ≥3 MCA passes before
         # LTX starts; without a defrag the first IA2V segment lands in LOWVRAM
         # mode (model partially offloaded to CPU → ~7 min/iter). One free here
@@ -2493,13 +2573,27 @@ async def _run_create_music_video(
                 role_portrait = portraits.get(msr_role) or frame or source
                 if not already_composite and msr_bg and os.path.exists(msr_bg) \
                         and role_portrait and os.path.exists(role_portrait):
-                    ff_still = seg.flux2_frame_prompt or (
-                        strip_lyrics_from_image_prompt(seg.frame_variant_prompt, lyrics=seg.lyrics)
-                        if getattr(seg, "frame_variant_prompt", "")
-                        else seg.prompt
-                    )
+                    # RELAY_BEAT0_ACTION experiment: build the FF from the first
+                    # relay beat (an action), mirroring the LF=beats[-1] path, so FF
+                    # already shows motion and LTX has no static idle start frame.
+                    # Identity + closed mouth still come from the role portrait
+                    # (slots 34/36), so lip-sync anchoring is unaffected.
+                    _b0_action = os.environ.get("RELAY_BEAT0_ACTION", "").strip().lower() in ("1", "true", "yes")
+                    _rel = seg.video_prompt_relay if isinstance(seg.video_prompt_relay, dict) else None
+                    _rel_beats = _rel.get("beats") if _rel else None
+                    if _b0_action and _rel_beats:
+                        ff_still = str(_rel_beats[0])
+                        _ff_action = True
+                    else:
+                        ff_still = seg.flux2_frame_prompt or (
+                            strip_lyrics_from_image_prompt(seg.frame_variant_prompt, lyrics=seg.lyrics)
+                            if getattr(seg, "frame_variant_prompt", "")
+                            else seg.prompt
+                        )
+                        _ff_action = False
                     composite = await _run_flux2_segment_frame(
                         msr_bg, role_portrait, ff_still, style_descriptor=video_style_desc,
+                        action_mode=_ff_action,
                     )
                     if composite and os.path.exists(composite):
                         frame = composite
@@ -2528,10 +2622,15 @@ async def _run_create_music_video(
                 _flf_secs = getattr(seg, "duration", 0) or 0
                 if _flf_secs:
                     wf = inject_flf_clip_length(wf, _flf_secs)
-                lf_still = seg.flux2_frame_prompt or (
-                    strip_lyrics_from_image_prompt(seg.frame_variant_prompt, lyrics=seg.lyrics)
-                    if getattr(seg, "frame_variant_prompt", "")
-                    else seg.prompt
+                # LF = END state of the action so FF (start) and LF (end) bracket the
+                # motion (otherwise FF≈LF → LTX idles at the end + no real motion).
+                # The relay beats are chronological: beat[0]=start, beat[-1]=end-action.
+                _relay = seg.video_prompt_relay if isinstance(seg.video_prompt_relay, dict) else None
+                _beats = _relay.get("beats") if _relay else None
+                lf_still = (
+                    (_beats[-1] if _beats and len(_beats) >= 2 else None)
+                    or seg.flux2_frame_prompt
+                    or seg.prompt
                 )
                 lf_path = await _run_flux2_last_frame(frame, lf_still, style_descriptor=video_style_desc)
                 if lf_path and os.path.exists(lf_path):

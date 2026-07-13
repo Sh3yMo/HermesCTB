@@ -20,9 +20,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from mv_prompt_hygiene import (
+    beats_similarity_ratio,
     clean_beat_text,
     collapse_duplicate_beats,
     is_instructional_language,
+    _split_sentences,
 )
 
 try:
@@ -1478,15 +1480,124 @@ def ensure_relay_specs_for_segments(
             action = static
         cleaned_static = clean_beat_text(static)
         cleaned_action = clean_beat_text(action)
-        raw_beats = [b for b in (cleaned_static, cleaned_action) if b]
+        if _relay_beat0_action():
+            # Experiment: no static beat[0] — motion only (global owns the static).
+            raw_beats = [b for b in (cleaned_action,) if b] or [b for b in (cleaned_static,) if b]
+        else:
+            raw_beats = [b for b in (cleaned_static, cleaned_action) if b]
         beats = collapse_duplicate_beats(raw_beats, threshold=0.85)
         if not beats:
-            fallback = clean_beat_text(static) or "The performer is visible in the scene."
+            fallback = clean_beat_text(action if _relay_beat0_action() else static) \
+                or "The performer moves through the scene."
             beats = [fallback]
+        # Target RELAY_FLF_MIN_BEATS: split the last (action) beat into an onset +
+        # completion pair when it has enough distinct sentences. Never fabricate a
+        # filler beat — if it can't be split cleanly we keep what we have and log.
+        if len(beats) < RELAY_FLF_MIN_BEATS:
+            sents = _split_sentences(beats[-1]) if beats else []
+            if len(sents) >= 2:
+                mid = len(sents) // 2
+                onset = clean_beat_text(" ".join(sents[:mid]), min_length=1)
+                completion = clean_beat_text(" ".join(sents[mid:]), min_length=1)
+                if onset and completion and beats_similarity_ratio(onset, completion) < 0.85:
+                    beats = beats[:-1] + [onset, completion]
+            if len(beats) < RELAY_FLF_MIN_BEATS:
+                print(
+                    f"[relay-fallback] seg {getattr(seg, 'index', '?')}: action not "
+                    f"splittable into {RELAY_FLF_MIN_BEATS} beats; kept {len(beats)}"
+                )
+        beats = beats[:RELAY_MAX_BEATS]
         seg.video_prompt_relay = {
             "global": " ".join(p for p in global_parts if p).strip(),
             "beats": beats,
         }
+
+
+_RELAY_SCENE_LOCK_RE = re.compile(
+    r"\bScene location must be exactly:\s*[^.]*\.?\s*", re.IGNORECASE,
+)
+_RELAY_CLOTHING_LOCK_RE = re.compile(
+    r"\bClothing lock:?\s*[^.]*\.?\s*", re.IGNORECASE,
+)
+# An outfit-cue sentence with no motion verb is pure wardrobe restatement and must
+# not survive in a motion beat (kijai spec: beats 2..N = only what changes).
+_OUTFIT_CUE_RE = re.compile(r"\b(?:wearing|wears|dressed\s+in|clad\s+in)\b", re.IGNORECASE)
+_MOTION_VERB_RE = re.compile(
+    r"\b(?:raise[sd]?|raising|lift[s]?|lifting|turn[s]?|turning|walk[s]?|walking|"
+    r"step[s]?|stepping|run[s]?|running|dance[s]?|dancing|cry|cries|crying|smile[s]?|"
+    r"smiling|reach[es]?|reaching|move[s]?|moving|lean[s]?|leaning|spin[s]?|spinning|"
+    r"bow[s]?|bowing|kneel[s]?|kneeling|jump[s]?|jumping|gestur\w+|sing[s]?|singing|"
+    r"look[s]?|looking|close[s]?|closing|open[s]?|opening|fall[s]?|falling|"
+    r"throw[s]?|throwing|grab[s]?|grabbing)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_motion_beat(text: str, anchor_sentences: List[str]) -> str:
+    """Strip outfit/scene/identity restatements from a motion beat, keeping motion.
+
+    Reuses the existing outfit/scene strippers, then drops any sentence that is a
+    near-duplicate of a sentence already carried by beat[0] or ``global`` (the
+    static anchors). Returns "" if nothing meaningful survives.
+    """
+    if not text:
+        return ""
+    out = _strip_existing_outfit_phrases(text)
+    out = _SANITIZE_CLOTHING_BLOCK_RE.sub("", out)
+    out = _RELAY_SCENE_LOCK_RE.sub("", out)
+    out = _RELAY_CLOTHING_LOCK_RE.sub("", out)
+    kept: List[str] = []
+    for sent in _split_sentences(out):
+        if any(beats_similarity_ratio(sent, a) >= 0.8 for a in anchor_sentences if a):
+            continue
+        # Drop pure-wardrobe sentences (outfit cue, no motion) — they only restate
+        # what the FF already carries.
+        if _OUTFIT_CUE_RE.search(sent) and not _MOTION_VERB_RE.search(sent):
+            continue
+        kept.append(sent)
+    cleaned = clean_beat_text(" ".join(kept), min_length=1)
+    return cleaned or ""
+
+
+def enforce_motion_only_beats(seg: "Segment") -> None:
+    """kijai PromptRelay spec: beats[1..N] describe ONLY what changes.
+
+    Leaves beat[0] (static FF state) and ``global`` untouched, and strips every
+    repeat of scene/location, outfit and identity out of the later beats. This is
+    the deterministic enforcement the LLM instruction alone never guaranteed; it
+    also fixes FF/LF clothing drift, because the LF still is prompted with
+    ``beats[-1]`` — once that beat carries no outfit prose, the Flux2 LF edit
+    inherits the first frame's wardrobe instead of inventing a new one.
+
+    If every later beat collapses to nothing (all pure restatement, no motion),
+    the original beats are kept — a repeated beat is less harmful than dropping
+    the only end-action that brackets the motion for LTX.
+    """
+    relay = seg.video_prompt_relay if isinstance(seg.video_prompt_relay, dict) else None
+    if not relay:
+        return
+    beats = [str(b) for b in relay.get("beats", [])]
+    if not beats:
+        return
+    if _relay_beat0_action():
+        # Experiment: no static beat[0] — global owns scene/character/outfit, so
+        # strip those restatements out of EVERY beat (all are motion).
+        anchor_sentences = _split_sentences(str(relay.get("global", "")))
+        stripped = [_strip_motion_beat(b, anchor_sentences) for b in beats]
+        new_beats = [s for s in stripped if s]
+        if new_beats:
+            relay["beats"] = new_beats
+            seg.video_prompt_relay = relay
+        return
+    if len(beats) < 2:
+        return
+    anchor_sentences = _split_sentences(beats[0]) + _split_sentences(str(relay.get("global", "")))
+    stripped_tail = [_strip_motion_beat(b, anchor_sentences) for b in beats[1:]]
+    new_tail = [s for s in stripped_tail if s]
+    if not new_tail:
+        return  # nothing survived — keep originals rather than lose the end-action
+    relay["beats"] = [beats[0]] + new_tail
+    seg.video_prompt_relay = relay
 
 
 # Clauses introducing the "opposite" performer that should be dropped from
@@ -1674,18 +1785,34 @@ def _segment_video_prompt(spec: Dict[str, Any], theme: str) -> str:
 # - Below 5s clip duration: relay degenerates to single-prompt → fall back to legacy.
 RELAY_MIN_BEAT_SECONDS = 5.0
 RELAY_MAX_BEATS = 4
+# FFLFA2V/relay floor: beat[0] = static FF state, beats[1..] = motion. A single
+# motion beat collapses FF≈LF (no bracketed action for LTX to interpolate), so we
+# always aim for at least one static + two motion beats once relay is in play.
+RELAY_FLF_MIN_BEATS = 3
+
+
+def _relay_beat0_action() -> bool:
+    """Experiment toggle (RELAY_BEAT0_ACTION=1): drop the dedicated static beat[0].
+
+    Hypothesis: on FFLF (FF + LF both anchored), a static "no motion" first beat
+    makes LTX idle on the FF then jump. With this on, ALL beats carry motion and
+    the static scene/character/outfit lives only in `global`. Default off → current
+    behaviour unchanged.
+    """
+    return os.environ.get("RELAY_BEAT0_ACTION", "").strip().lower() in ("1", "true", "yes")
 
 
 def pick_relay_beat_count(duration: float) -> int:
     """Adaptive beat count for distilled LTX-IA2V given clip duration.
 
     Returns 0 when duration is too short for relay to add value (caller should
-    fall back to single-prompt). Otherwise returns 1..4 beats, gleichgewichtet.
+    fall back to single-prompt). Otherwise returns RELAY_FLF_MIN_BEATS..4 beats
+    (beat[0] static + motion beats), scaling up with duration.
     """
     if duration < RELAY_MIN_BEAT_SECONDS:
         return 0
     n = int(duration // RELAY_MIN_BEAT_SECONDS)
-    return max(1, min(RELAY_MAX_BEATS, n))
+    return max(RELAY_FLF_MIN_BEATS, min(RELAY_MAX_BEATS, n))
 
 
 def extract_relay_spec(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3659,16 +3786,34 @@ class MusicVideoPrompter:
                     "include it, structure must be: "
                     "{\"global\": <string>, \"beats\": [<string>, ...]}. "
                     "Rules (empirically validated on LTX-2.3-distilled):\n"
-                    "  • Emit AT MOST 4 beats. Aim for one beat per ~5s of "
-                    "duration (5s→1, 10s→2, 15s→3, 20s+→4). Omit the field "
-                    "entirely for segments <5s.\n"
-                    "  • Beat 1 = strict static visible state ONLY: describe "
-                    "what is already visible in the provided image/reference. "
-                    "No motion, no action, no camera movement, no event that "
-                    "appears later. Allowed static verbs: is, stands, sits, "
-                    "holds, wears, leans, lies, rests. Use generic subject "
-                    "(\"A figure\", \"A person\", \"The performer\") unless "
-                    "the visible clothing must be stated.\n"
+                    + (
+                        (
+                            "  • Emit EXACTLY 3 MOTION beats for segments ≥5s "
+                            "(beats 1–3 are ALL actions — NO static-only beat). "
+                            "You MAY emit a 4th for ≥20s. Never fewer than 3. "
+                            "Omit the field for <5s.\n"
+                            "  • Beat 1 MUST begin the motion at the very first "
+                            "frame — the figure is already moving/acting, not "
+                            "posing. Put the static scene, character and outfit "
+                            "description in `global` ONLY, never inside a beat. Use "
+                            "a generic subject (\"A figure\", \"The performer\") in "
+                            "beats.\n"
+                        )
+                        if _relay_beat0_action() else
+                        (
+                            "  • Emit EXACTLY 3 beats for segments ≥5s (beat 1 static, "
+                            "beats 2–3 motion). You MAY emit a 4th motion beat for very "
+                            "long segments (≥20s). Never fewer than 3. Omit the field "
+                            "entirely for segments <5s.\n"
+                            "  • Beat 1 = strict static visible state ONLY: describe "
+                            "what is already visible in the provided image/reference. "
+                            "No motion, no action, no camera movement, no event that "
+                            "appears later. Allowed static verbs: is, stands, sits, "
+                            "holds, wears, leans, lies, rests. Use generic subject "
+                            "(\"A figure\", \"A person\", \"The performer\") unless "
+                            "the visible clothing must be stated.\n"
+                        )
+                    ) +
                     "  • Beats 2..N = ONLY what changes during that period. "
                     "Do not repeat scene, outfit or identity details from "
                     "Beat 1 or global. One subject, one action each. Single "

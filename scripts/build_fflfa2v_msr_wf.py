@@ -26,20 +26,24 @@ Run: py scripts/build_fflfa2v_msr_wf.py
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "Workflows", "LTX2.3 - FFLFA2V.json")
 DST = os.path.join(ROOT, "Workflows", "LTX2.3 - FFLFA2V-MSR.json")
+DST_RELAY = os.path.join(ROOT, "Workflows", "LTX2.3 - FFLFA2V-MSR-PromptRelay.json")
 
 # New node ids (verified free in the source workflow).
 M = "2100"   # LTXMSRICLoRAFLF_Experimental
 Z = "2101"   # ConditioningZeroOut (negative)
 L = "2102"   # LTXICLoRALoaderModelOnly (IC-LoRA on model path)
 C2 = "2103"  # fresh LTXVConditioning feeding M (clean text + frame_rate)
+RELAY = "2105"  # PromptRelaySmartEncode (model-path, relay variant only)
 SUBJ = ["2110", "2111", "2112", "2113"]
 BG = "2114"
+CLIP_LOADER = "146"  # DualCLIPLoader (clip source for the relay node)
 
 # Existing node ids we wire to / rewire (verified present in FFLFA2V).
 # NOTE: the stock 759:1067 LTXVConditioning is downstream of the old FF/LF
@@ -188,11 +192,46 @@ def build() -> dict:
     return wf
 
 
+def build_relay(base: dict) -> dict:
+    """Variant of the FFLFA2V-MSR workflow with PromptRelay added (MSR + relay).
+
+    Inserts a PromptRelaySmartEncode node on the MODEL path between the IC-LoRA
+    loader (L) and LTXVChunkFeedForward — same wiring as the stock
+    LTX2.3 - IA2V-PromptRelay-MSR.json. The relay node patches the model so the
+    per-beat prompt timeline switches over the clip; the conditioning path
+    (C2 -> M -> guiders) is unchanged, with the global/beat text injected by the
+    pipeline's relay path (has_relay_smart_node -> build_smart_prompt). Requires
+    the ComfyUI-PromptRelay (kijai) custom node — already used by the IA2V relay
+    workflows."""
+    wf = copy.deepcopy(base)
+    assert RELAY not in wf, f"id collision: {RELAY}"
+    assert CLIP_LOADER in wf, f"clip loader {CLIP_LOADER} missing"
+    wf[RELAY] = {
+        "inputs": {
+            "global_prompt": "",
+            "smart_prompt": "",
+            "normalize_by_tokens": False,
+            "epsilon": 0.001,
+            "model": [L, 0],
+            "clip": [CLIP_LOADER, 0],
+            "latent": [EMPTY_LATENT, 0],
+        },
+        "class_type": "PromptRelaySmartEncode",
+        "_meta": {"title": "Prompt Relay Encode (Smart) positive"},
+    }
+    wf[CHUNK_FF]["inputs"]["model"] = [RELAY, 0]
+    return wf
+
+
 def main() -> None:
     wf = build()
     with open(DST, "w", encoding="utf-8") as f:
         json.dump(wf, f, indent=2, ensure_ascii=False)
     print(f"wrote {DST} ({len(wf)} nodes)")
+    rwf = build_relay(wf)
+    with open(DST_RELAY, "w", encoding="utf-8") as f:
+        json.dump(rwf, f, indent=2, ensure_ascii=False)
+    print(f"wrote {DST_RELAY} ({len(rwf)} nodes)")
 
 
 if __name__ == "__main__":

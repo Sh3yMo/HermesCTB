@@ -16,3 +16,8 @@ nul
 config.json
 LLM Test Results/
 llm_test_results_*.json
+
+# Lokale Ad-hoc-Scratch-Dateien (nicht tracken)
+.jid
+.pr_body.md
+scripts/_*.py

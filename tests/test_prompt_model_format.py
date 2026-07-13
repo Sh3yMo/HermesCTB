@@ -89,4 +89,5 @@ def test_api_uses_model_formatted_prompts():
     assert "await MV_PROMPTER.polish_segment_prompts(segments)" in src
     assert "seg_prompt = seg.ltx_video_prompt or seg.prompt" in src
     assert "ff_still = seg.flux2_frame_prompt or (" in src
-    assert "lf_still = seg.flux2_frame_prompt or (" in src
+    # LF now comes from the end beat (FF/LF bracket the action); FF still uses flux2_frame_prompt
+    assert "lf_still = (" in src and "_beats[-1]" in src

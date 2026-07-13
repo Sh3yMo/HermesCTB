@@ -20,6 +20,7 @@ from comfyui import (
 
 _WF_DIR = os.path.join(os.path.dirname(__file__), "..", "Workflows")
 _FLF_WF = os.path.join(_WF_DIR, "LTX2.3 - FFLFA2V-MSR.json")
+_FLF_RELAY_WF = os.path.join(_WF_DIR, "LTX2.3 - FFLFA2V-MSR-PromptRelay.json")
 _STD_WF = os.path.join(_WF_DIR, "LTX2.3 - IA2V-PromptRelay.json")
 _FLF_NODE = "LTXMSRICLoRAFLF_Experimental"
 
@@ -142,10 +143,40 @@ def test_inject_msr_images_on_flf_node():
 # ── api.py hook ──────────────────────────────────────────────────
 
 
+def test_relay_variant_combines_msr_and_relay():
+    from comfyui import has_relay_smart_node, has_msr_nodes
+    wf = _load(_FLF_RELAY_WF)
+    # both MSR (FF/LF cross-attention) and PromptRelay present in one workflow
+    assert has_msr_nodes(wf)
+    assert has_relay_smart_node(wf)
+    relay_id = next(i for i, n in wf.items() if n["class_type"] == "PromptRelaySmartEncode")
+    lid = next(i for i, n in wf.items() if n["class_type"] == "LTXICLoRALoaderModelOnly")
+    # relay sits on the MODEL path: IC-LoRA -> relay -> LTXVChunkFeedForward
+    assert wf[relay_id]["inputs"]["model"] == [lid, 0]
+    assert wf["700"]["inputs"]["model"] == [relay_id, 0]
+    # MSR node untouched (conditioning/latent path unchanged)
+    assert _flf_id(wf)  # raises if no LTXMSRICLoRAFLF node
+
+
+def test_relay_variant_no_dangling_refs():
+    wf = _load(_FLF_RELAY_WF)
+    ids = set(wf)
+    for nid, n in wf.items():
+        for v in n.get("inputs", {}).values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str) and v[0][:1].isdigit():
+                assert v[0] in ids, f"dangling ref {nid} -> {v[0]}"
+
+
+def test_api_flf_workflows_include_relay():
+    with open(os.path.join(os.path.dirname(__file__), "..", "api.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert '"LTX2.3 - FFLFA2V-MSR-PromptRelay"' in src
+
+
 def test_api_flf_hook_present():
     with open(os.path.join(os.path.dirname(__file__), "..", "api.py"), encoding="utf-8") as f:
         src = f.read()
-    assert 'MSR_FLF_WORKFLOWS = {"LTX2.3 - FFLFA2V-MSR"}' in src
+    assert "MSR_FLF_WORKFLOWS = {" in src and '"LTX2.3 - FFLFA2V-MSR"' in src
     assert "is_flf = video_workflow_id in MSR_FLF_WORKFLOWS and use_msr" in src
     assert "_run_flux2_last_frame" in src
     assert "inject_first_frame" in src and "inject_last_frame" in src
@@ -179,7 +210,7 @@ def test_inject_msr_flf_resolution():
 def test_inject_flf_clip_length():
     wf = _load(_FLF_WF)
     inject_flf_clip_length(wf, 12.0)
-    # "Clip Length (in seconds)" mxSlider -> 12; "Cut OFF End Frames" -> 0
+    # "Clip Length (in seconds)" mxSlider -> 12; both cut-offs -> 0
     slider = next(n for n in wf.values()
                   if n.get("class_type") == "mxSlider"
                   and "clip length" in n.get("_meta", {}).get("title", "").lower())
@@ -188,14 +219,23 @@ def test_inject_flf_clip_length():
                if n.get("class_type") == "JWInteger"
                and "cut off end" in n.get("_meta", {}).get("title", "").lower())
     assert cut["inputs"]["value"] == 0
-    # one start frame trimmed to drop the locked-FF colour-flash frame
+    # FF must stay frame 0 — start frame is NOT trimmed
     cut_start = next(n for n in wf.values()
                      if n.get("class_type") == "JWInteger"
                      and "cut off start" in n.get("_meta", {}).get("title", "").lower())
-    assert cut_start["inputs"]["value"] == 1
-    # rounds fractional seconds, clamps >= 1
+    assert cut_start["inputs"]["value"] == 0
+    # rounds fractional seconds UP (ceil) so assembler trims, not freeze-pads; clamps >= 1
+    inject_flf_clip_length(wf, 11.2)
+    assert slider["inputs"]["Xi"] == 12
     inject_flf_clip_length(wf, 0.2)
     assert slider["inputs"]["Xi"] == 1
+
+
+def test_api_lf_from_end_beat():
+    # LF must come from the END beat (beat[-1]) so FF (start) and LF (end) differ.
+    with open(os.path.join(os.path.dirname(__file__), "..", "api.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert "_beats[-1] if _beats and len(_beats) >= 2 else None" in src
 
 
 def test_api_flf_clip_length_wired():
@@ -242,3 +282,72 @@ def test_run_dir_numbering(tmp_path, monkeypatch):
     assert sorted(os.listdir(day)) == ["01", "02", "03"]
     # after the last init, the run-scoped dir is the current one
     assert api._outputs_dir() == c
+
+
+# ---- PromptRelay beat-spec enforcement + 3-beat budget + LF outfit lock --------
+
+class _Seg:
+    def __init__(self, relay):
+        self.video_prompt_relay = relay
+        self.index = 0
+
+
+def test_enforce_motion_only_beats_strips_outfit_scene_keeps_motion():
+    from music_video_pipeline import enforce_motion_only_beats
+    seg = _Seg({
+        "global": "Neon-lit alley at night, cinematic teal grade.",
+        "beats": [
+            "A woman in a red dress stands in the neon alley.",
+            "A woman in a red dress stands in the neon alley. She slowly raises her arms.",
+            "She is wearing a red dress. The woman is now crying, tears on her face.",
+        ],
+    })
+    enforce_motion_only_beats(seg)
+    beats = seg.video_prompt_relay["beats"]
+    # beat[0] (static FF state) untouched
+    assert beats[0] == "A woman in a red dress stands in the neon alley."
+    # later beats keep their motion ...
+    assert "raises her arms" in beats[1]
+    assert "crying" in beats[2]
+    # ... but drop the restated outfit / pure wardrobe sentence
+    assert "red dress" not in beats[1].lower()
+    assert "wearing a red dress" not in beats[2].lower()
+
+
+def test_enforce_motion_only_beats_keeps_originals_when_all_repeat():
+    from music_video_pipeline import enforce_motion_only_beats
+    seg = _Seg({
+        "global": "g",
+        "beats": [
+            "A woman in a red dress stands.",
+            "A woman in a red dress stands.",
+        ],
+    })
+    enforce_motion_only_beats(seg)
+    # all-repeat tail collapses to nothing -> keep originals (never lose end-action)
+    assert seg.video_prompt_relay["beats"] == [
+        "A woman in a red dress stands.",
+        "A woman in a red dress stands.",
+    ]
+
+
+def test_pick_relay_beat_count_floor_three():
+    from music_video_pipeline import pick_relay_beat_count
+    assert pick_relay_beat_count(3) == 0      # < 5s -> single-prompt
+    assert pick_relay_beat_count(5) == 3      # floor at 3
+    assert pick_relay_beat_count(10) == 3
+    assert pick_relay_beat_count(20) == 4     # caps at 4
+
+
+def test_last_frame_prompt_locks_identity_without_freezing_action():
+    from api import _build_flux2_last_frame_prompt
+    out = _build_flux2_last_frame_prompt("The woman cries.", "cinematic still").lower()
+    # Flux2 convention: no colon
+    assert ":" not in out
+    # identity/outfit/location lock present
+    assert "same person" in out
+    assert "outfit" in out
+    assert "identical" in out
+    # action is still rendered (end state), not frozen
+    assert "end state" in out
+    assert "cries" in out

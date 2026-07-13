@@ -33,4 +33,9 @@ def test_flux2_last_frame_prompt_no_colon_no_motion_language():
     assert ":" not in out
     assert "end frame" not in out
     assert "render this video frame" not in out
-    assert "same location" in out
+    # LF no longer a near-clone of FF: no "identical framing / same pose" clone language
+    assert "identical framing" not in out
+    assert "slightly different relaxed pose" not in out
+    # still composites the same person into the scene (identity/wardrobe lock)
+    assert "exact garments" in out
+    assert "neon alley" in out
